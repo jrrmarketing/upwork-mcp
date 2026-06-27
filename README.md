@@ -1,209 +1,47 @@
-# Upwork MCP Server
+# upwork-mcp (JRR setup)
 
-MCP (Model Context Protocol) server for Upwork via browser automation. Enables Claude Code to search jobs, manage proposals, messages, and contracts on Upwork.
+Local MCP for Upwork — search jobs, proposals, messages, contracts. Uses **browser automation** (your Chrome session), not the Upwork GraphQL API.
 
-## Features
+Upstream: [vanooo/upwork-mcp](https://github.com/vanooo/upwork-mcp)
 
-- **Job Search**: Search and filter Upwork jobs by keywords, budget, experience level, etc.
-- **Job Details**: Get comprehensive information about specific job postings
-- **Profile**: View your freelancer profile, connects balance, and stats
-- **Proposals**: View, submit, and withdraw proposals
-- **Messages**: Read and send messages in Upwork inbox
-- **Contracts**: View active and past contracts, work diary entries
+## Why this instead of jrrsales locally?
 
-## How It Works
+JRR Sales Hub needs Lovable Google auth to run in the browser. This MCP talks to Upwork directly from Cursor once you log in once — no CRM login, no `UPWORK_CLIENT_ID` / `UPWORK_CLIENT_SECRET`.
 
-This MCP uses **Chrome DevTools Protocol (CDP)** to connect to your real Chrome browser. This approach:
-- Bypasses Cloudflare's "automated test software" detection
-- Uses your real browser profile with history and cookies
-- Requires Chrome to be running with debug port enabled
-
-## Installation
-
-### Prerequisites
-
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) package manager
-- Google Chrome browser
-
-### Install from source
+## Setup (one time)
 
 ```bash
-cd upwork-mcp
+cd ~/Projects/upwork-mcp
 uv sync
+uv run upwork-mcp --login    # sign in to Upwork in the opened browser
 ```
 
-## Authentication
+## Background Chrome (automatic)
 
-The server connects to Chrome via CDP (Chrome DevTools Protocol).
+Three layers — you shouldn't need to open Chrome manually:
 
-### First-time setup
+1. **Mac login** — `com.jrr.upwork-chrome` launchd agent (off-screen Chrome on port 9222)
+2. **Cursor session start** — `~/.cursor/hooks.json` runs `start-chrome-daemon.sh`
+3. **MCP startup** — `scripts/mcp-server.sh` ensures Chrome before `upwork-mcp` starts
+
+Install launchd once:
 
 ```bash
-# Start login flow - opens Chrome with debug port
-uv run upwork-mcp --login
+cd ~/Projects/upwork-mcp && ./scripts/install-launchd.sh
 ```
 
-This will:
-1. Start Chrome with `--remote-debugging-port=9222`
-2. Navigate to Upwork login page
-3. Wait for you to complete login (click Cloudflare checkbox, enter credentials)
-4. Save session to `~/.upwork-mcp/chrome-profile/`
+Cursor MCP config (`~/.cursor/mcp.json`) already points at `scripts/mcp-server.sh`.
 
-### Check session status
+## Use in Cursor
 
-```bash
-uv run upwork-mcp --check
-```
+Examples:
 
-### Clear session
+- “Search Upwork for Google Ads jobs posted in the last 3 days”
+- “Show my Upwork proposals”
+- “Get details for this job: https://www.upwork.com/jobs/~…”
 
-```bash
-uv run upwork-mcp --logout
-```
+See upstream README for the full tool list.
 
-## Usage
+## Docs
 
-### With Claude Code (local development)
-
-Add to your MCP settings (`~/.config/claude-code/settings.json` or workspace settings):
-
-```json
-{
-  "mcpServers": {
-    "upwork": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/upwork-mcp", "run", "upwork-mcp"]
-    }
-  }
-}
-```
-
-### Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `upwork_search_jobs` | Search for jobs matching criteria |
-| `upwork_get_job_details` | Get detailed job information |
-| `upwork_get_my_profile` | Get your freelancer profile |
-| `upwork_get_connects_balance` | Get current connects balance |
-| `upwork_get_profile_stats` | Get earnings and work history stats |
-| `upwork_get_proposals` | Get your submitted proposals |
-| `upwork_get_proposal_details` | Get details of a specific proposal |
-| `upwork_submit_proposal` | Submit a proposal to a job |
-| `upwork_withdraw_proposal` | Withdraw a submitted proposal |
-| `upwork_get_messages` | Get inbox conversations |
-| `upwork_get_conversation` | Get messages in a conversation |
-| `upwork_send_message` | Send a message |
-| `upwork_get_unread_count` | Get unread message count |
-| `upwork_get_contracts` | Get your contracts |
-| `upwork_get_contract_details` | Get contract details |
-| `upwork_get_work_diary` | Get work diary entries |
-| `upwork_check_session` | Check if session is valid |
-| `upwork_close_session` | Close browser and cleanup |
-
-## Examples
-
-### Search for Python developer jobs
-
-```
-Search for Python developer jobs on Upwork with budget over $1000
-```
-
-### Get job details
-
-```
-Get details for this Upwork job: https://www.upwork.com/jobs/~01234567890
-```
-
-### Check proposals
-
-```
-Show my active proposals on Upwork
-```
-
-### Read messages
-
-```
-Check my Upwork messages
-```
-
-## CLI Options
-
-```bash
-upwork-mcp [OPTIONS]
-
-Options:
-  --login        Open browser for manual login
-  --check        Check if session is valid
-  --logout       Clear saved session
-  --no-headless  Show browser window (debugging)
-  --timeout MS   Page timeout in milliseconds (default: 30000)
-  --transport    MCP transport type (default: stdio)
-```
-
-## Development
-
-### Project Structure
-
-```
-upwork-mcp/
-├── pyproject.toml
-├── README.md
-├── src/upwork_mcp/
-│   ├── __init__.py
-│   ├── server.py           # MCP server entry point
-│   ├── browser/
-│   │   ├── client.py       # Patchright browser wrapper
-│   │   └── auth.py         # Login flow
-│   ├── tools/
-│   │   ├── jobs.py         # Job search and details
-│   │   ├── profile.py      # Profile and connects
-│   │   ├── proposals.py    # Proposal management
-│   │   ├── messages.py     # Messaging
-│   │   └── contracts.py    # Contract management
-│   └── utils/
-│       ├── config.py       # Configuration
-│       └── logging.py      # Logging setup
-├── tests/
-└── scripts/
-    └── test_all.py
-```
-
-### Running tests
-
-```bash
-uv run python scripts/test_all.py
-```
-
-## Session Storage
-
-Session data is stored in `~/.upwork-mcp/profile/`. This includes browser cookies and local storage that persist your Upwork login.
-
-## Troubleshooting
-
-### Session expired
-
-```bash
-# Re-authenticate
-uvx upwork-mcp --login
-```
-
-### CAPTCHA or Cloudflare challenge
-
-Run with visible browser to solve manually:
-
-```bash
-uvx upwork-mcp --no-headless
-```
-
-### Browser not found
-
-```bash
-# Install Chromium for Patchright
-uvx patchright install chromium
-```
-
-## License
-
-Apache 2.0
+- `docs/env.md` — session paths and CLI commands
