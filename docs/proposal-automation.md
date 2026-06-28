@@ -133,3 +133,16 @@ Use this to attach highlights you missed.
 Save `page.screenshot(path=...)` at each step and read it back. Faster and more reliable
 than fighting the DOM for confirmation, especially for the highlights order and the
 success banners.
+
+## Inside Upwork messages (stay on-platform)
+
+When replying to clients **inside Upwork** (messages, interview chat, post-proposal threads):
+- **Do not share Calendly links**, booking URLs, email addresses, phone numbers, or anything
+  that pulls them off-platform before a contract exists. Upwork flags it and it can jeopardise
+  the account.
+- If they want a call, keep it vague and on-platform ("happy to jump on a call once we're set
+  up here") or use Upwork's own scheduling flow. No external schedulers in Upwork chat.
+- Calendly and direct booking links are fine **outside** Upwork (email, own site, after the
+  client has moved off-platform with permission).
+
+Voice and proposal copy rules: `~/.cursor/rules/upwork-proposals.mdc`.
