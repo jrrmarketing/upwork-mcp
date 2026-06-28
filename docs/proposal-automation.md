@@ -57,8 +57,34 @@ clicks with `page.evaluate(() => el.click())` instead. Native `.fill()` on plain
   "1 to 3 months", "3 to 6 months", "More than 6 months". Open + pick must happen in the
   **same script run** (the menu closes when the script ends). Don't match a bare span,
   the job-details sidebar also prints "Less than 1 month".
-- **Submit button:** `Submit proposal`. Success → URL gains `?...&inviteProposalSuccess=1`
-  and the page shows "Proposal sent!".
+- **Submit button:** `Submit proposal`. This is **not** the final send on many jobs.
+
+## Open apply flow (`/nx/proposals/job/~<uid>/apply/`)
+
+Same field map as invite accept, but:
+- Often **one textarea** (cover letter only) unless screening questions exist.
+- **By milestone is frequently the default.** Click the **By project** radio explicitly. If you
+  stay on milestones, Milestone 1 needs a **description** or you get "A description is needed."
+- **Amount:** only fill the **enabled** `input[placeholder="$0.00"]`. Disabled fee-breakdown
+  inputs (10% service fee, net receive) will timeout if you try to `.fill()` them.
+- **Duration:** job sidebar may say "Less than 1 month" while **1 to 3 months** is fine for
+  setup + management. Pick what fits the scope.
+
+## Two-step send + fixed-price modal
+
+After a valid **Submit proposal** click, Upwork usually shows **Boost your proposal (optional)**.
+The real send is **"Send for X Connects"** (base cost only unless Josiah asked to boost).
+
+Fixed-price jobs then show **"3 things you need to know"**:
+1. Check **"Yes, I understand."**
+2. Click **Continue**
+3. Success → `/nx/proposals/<proposalId>?success` and **"Your proposal was submitted."**
+
+Without the checkbox + Continue, the proposal is **not** sent even if you clicked Send earlier.
+
+The Upwork MCP `upwork_submit_proposal` tool may return **"Could not confirm submission
+status"**. Treat browser automation via CDP as the source of truth; verify on the proposals
+list or the `?success` URL.
 
 ## Profile highlights (the "Add profile highlights" modal)
 
