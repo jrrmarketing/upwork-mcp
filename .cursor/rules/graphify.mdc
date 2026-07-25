@@ -1,0 +1,36 @@
+---
+description: graphify knowledge graph — use when navigating unknown code; skip when the file is already known
+alwaysApply: true
+---
+
+# Graphify (smart)
+
+Only when `graphify-out/graph.json` exists.
+
+## Use graphify first when
+
+- You do not already know the files/symbols for a codebase or architecture question
+- You need relationships: what calls X, path from A to B, impact of changing Y
+- A subagent will explore the repo (put these rules in its prompt)
+
+## Skip graphify when
+
+- The user named the file/symbol, or you already have the exact path from this session
+- Pure copy, docs, commit, PR, or deploy with no code discovery
+- Fixing a known line/lint after orientation already happened this session
+
+## How to query (keeps tokens low)
+
+Prefer in this order:
+
+1. `graphify explain "<SymbolOrFile>"` — neighbors of one concept
+2. `graphify path "<A>" "<B>"` — shortest dependency path
+3. `graphify query "<specific symbols>" --context call --budget 2500`
+
+Do **not**:
+
+- Broad English questions on large apps (pulls UI hubs like Button/cn/Avatar)
+- Read all of `graphify-out/wiki/index.md` or `GRAPH_REPORT.md` by default
+- Prefer `graphify-out/AGENT_NAV.md` (short) if present; open one community wiki page only when needed
+
+After orientation, Read/Grep only the few files you will edit or verify. After substantive code edits: `graphify update .` (AST-only, no API cost).
