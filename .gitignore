@@ -35,3 +35,6 @@ Thumbs.db
 
 # Local config (users should create their own)
 mcp-config.json
+
+# Graphify knowledge graph (local; do not commit)
+graphify-out/
