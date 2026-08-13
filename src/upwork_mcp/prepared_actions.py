@@ -14,6 +14,7 @@ from .ledger import default_ledger_path
 from .strategy import payload_digest
 
 DEFAULT_EXPIRY_MINUTES = 30
+_REDACTED_PAYLOAD_JSON = '{"redacted":true}'
 
 
 def _path(path: Path | None = None) -> Path:
@@ -25,6 +26,7 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA secure_delete = ON")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS prepared_actions (
@@ -38,6 +40,7 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
             approved_at TEXT,
             claimed_at TEXT,
             consumed_at TEXT,
+            payload_redacted_at TEXT,
             owner_approval_reference TEXT
         )
         """
@@ -48,10 +51,28 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
     }
     if "claimed_at" not in columns:
         connection.execute("ALTER TABLE prepared_actions ADD COLUMN claimed_at TEXT")
+    if "payload_redacted_at" not in columns:
+        connection.execute("ALTER TABLE prepared_actions ADD COLUMN payload_redacted_at TEXT")
+    now = datetime.now(UTC).isoformat()
+    connection.execute(
+        """
+        UPDATE prepared_actions
+        SET payload_json = ?, payload_redacted_at = COALESCE(payload_redacted_at, ?)
+        WHERE (
+            claimed_at IS NOT NULL
+            OR consumed_at IS NOT NULL
+            OR julianday(expires_at) <= julianday(?)
+        )
+          AND (payload_json != ? OR payload_redacted_at IS NULL)
+        """,
+        (_REDACTED_PAYLOAD_JSON, now, now, _REDACTED_PAYLOAD_JSON),
+    )
     try:
         db_path.chmod(0o600)
     except OSError:
         pass
+    # Keep schema/privacy cleanup durable even when the requested action later fails validation.
+    connection.commit()
     return connection
 
 
@@ -191,10 +212,10 @@ def authorize_action(
         claimed = connection.execute(
             """
             UPDATE prepared_actions
-            SET claimed_at = ?
+            SET claimed_at = ?, payload_json = ?, payload_redacted_at = ?
             WHERE action_id = ? AND claimed_at IS NULL AND consumed_at IS NULL
             """,
-            (claimed_at, action_id),
+            (claimed_at, _REDACTED_PAYLOAD_JSON, claimed_at, action_id),
         )
         if claimed.rowcount != 1:
             raise ValueError(
@@ -222,5 +243,13 @@ def consume_action(action_id: str, *, path: Path | None = None) -> dict[str, Any
             raise ValueError("Cannot consume an unapproved action")
         if row["consumed_at"] is not None:
             return {"action_id": action_id, "consumed": False, "consumed_at": row["consumed_at"]}
-        connection.execute("UPDATE prepared_actions SET consumed_at = ? WHERE action_id = ?", (consumed_at, action_id))
+        connection.execute(
+            """
+            UPDATE prepared_actions
+            SET consumed_at = ?, payload_json = ?,
+                payload_redacted_at = COALESCE(payload_redacted_at, ?)
+            WHERE action_id = ?
+            """,
+            (consumed_at, _REDACTED_PAYLOAD_JSON, consumed_at, action_id),
+        )
     return {"action_id": action_id, "consumed": True, "consumed_at": consumed_at}

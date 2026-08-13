@@ -113,10 +113,17 @@ leave old unviewed proposals untouched unless a concrete risk justifies withdraw
 
 ## Learning loop and privacy
 
-The local ledger is `~/.upwork-mcp/ledger.sqlite3` with owner-only filesystem permissions. It
-stores job URLs/titles, policy version, classification, score, bid band, selected proof keys,
-boost choice, and verified outcomes. It does not store proposal copy, message bodies, client
-names, credentials, or browser DOM.
+The local ledger is `~/.upwork-mcp/ledger.sqlite3` with owner-only filesystem permissions. Its
+learning tables store job URLs/titles, policy version, classification, score, bid band, selected
+proof keys, boost choice, and verified outcomes. They do not store proposal copy, message bodies,
+client names, credentials, or browser DOM.
+
+The same private SQLite file briefly stores the exact proposal, message, or other action payload
+while its prepared action is pending. That temporary payload is required to bind a later approval
+to unchanged copy and terms. It is redacted in the same atomic update that claims the action, or
+consumes it after successful readback, or on the next access after the action expires. Legacy
+claimed, consumed, and expired rows are also scrubbed on access. Digests, idempotency keys, action
+state, and audit timestamps remain for replay protection.
 
 `upwork_bidding_report` compares view, interview, and hire rates by recommendation, price band,
 proof, and boost. Rates remain hidden until the configured minimum submission sample is reached.
