@@ -334,6 +334,7 @@ class _MessagePage:
     def __init__(self, *, contact_name: str = "Alex Client") -> None:
         self.url = "https://www.upwork.com/nx/messages/room-1234567"
         self.contact_name = contact_name
+        self.action_controls_queried = 0
         self.messages: list[_MessageElement] = []
         self.input = _Input()
 
@@ -349,8 +350,10 @@ class _MessagePage:
         if "contact-name" in selector or ".contact-name" in selector or "h2" in selector:
             return _TextElement(self.contact_name)
         if "message-input" in selector or "textarea" in selector:
+            self.action_controls_queried += 1
             return self.input
         if "send-button" in selector or "Send" in selector:
+            self.action_controls_queried += 1
             def send() -> None:
                 self.messages.append(_MessageElement(self.input.value, is_mine=True))
                 self.input.value = ""
@@ -365,6 +368,7 @@ class _ProposalPage:
         self.title = title
         self.status = status
         self.body = "Submitted proposal details"
+        self.action_controls_queried = 0
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
@@ -377,6 +381,7 @@ class _ProposalPage:
         if "proposal-status" in selector or selector == ".status":
             return _TextElement(self.status)
         if "withdraw-button" in selector or "Withdraw" in selector:
+            self.action_controls_queried += 1
             return _Button(lambda: None, "Withdraw")
         return None
 
@@ -389,6 +394,7 @@ class _InvitationPage:
         self.url = "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333"
         self.title = title
         self.body = "Pending invitation"
+        self.action_controls_queried = 0
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
@@ -399,6 +405,7 @@ class _InvitationPage:
         if "job-title" in selector or "h1" in selector:
             return _TextElement(self.title)
         if "decline-button" in selector or "Decline" in selector:
+            self.action_controls_queried += 1
             return _Button(lambda: None, "Decline invitation")
         return None
 
@@ -465,6 +472,7 @@ async def test_approved_message_stops_if_live_recipient_changed(monkeypatch, tmp
     assert result["status"] == "live_identity_mismatch"
     assert result["external_action_taken"] is False
     assert page.messages == []
+    assert page.action_controls_queried == 0
     replay = await messages.send_message(params)
     assert replay["status"] == "approval_required"
     assert "already been claimed" in replay["message"]
@@ -495,6 +503,7 @@ async def test_approved_withdrawal_stops_if_live_proposal_identity_changed(
     result = await proposals.withdraw_proposal(params)
     assert result["status"] == "live_identity_mismatch"
     assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
     replay = await proposals.withdraw_proposal(params)
     assert replay["status"] == "approval_required"
     assert "already been claimed" in replay["message"]
@@ -525,6 +534,7 @@ async def test_approved_decline_stops_if_live_invitation_identity_changed(
     result = await invitations.decline_invitation(params)
     assert result["status"] == "live_identity_mismatch"
     assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
     replay = await invitations.decline_invitation(params)
     assert replay["status"] == "approval_required"
     assert "already been claimed" in replay["message"]
