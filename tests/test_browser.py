@@ -1,7 +1,13 @@
 """Tests for browser client."""
 
+import os
+
 import pytest
-from pathlib import Path
+
+live_readonly = pytest.mark.skipif(
+    os.environ.get("UPWORK_MCP_LIVE_TEST") != "1",
+    reason="Set UPWORK_MCP_LIVE_TEST=1 for owner-account read-only browser checks",
+)
 
 
 @pytest.mark.asyncio
@@ -14,6 +20,8 @@ async def test_profile_dir_exists():
 
 
 @pytest.mark.asyncio
+@pytest.mark.upwork_live_readonly
+@live_readonly
 async def test_browser_launch(browser):
     """Test that browser can launch."""
     page = await browser.start()
@@ -21,6 +29,8 @@ async def test_browser_launch(browser):
 
 
 @pytest.mark.asyncio
+@pytest.mark.upwork_live_readonly
+@live_readonly
 async def test_browser_navigation(browser):
     """Test that browser can navigate."""
     page = await browser.start()
@@ -30,6 +40,8 @@ async def test_browser_navigation(browser):
 
 
 @pytest.mark.asyncio
+@pytest.mark.upwork_live_readonly
+@live_readonly
 async def test_browser_close(browser):
     """Test that browser closes cleanly."""
     await browser.start()

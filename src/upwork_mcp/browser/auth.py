@@ -1,16 +1,45 @@
 """Authentication flow for Upwork using CDP."""
 
 import asyncio
-from pathlib import Path
 import shutil
+from typing import Any
+
 from .client import (
+    CDP_PORT,
+    PROFILE_DIR,
     UpworkBrowser,
     find_chrome,
     is_chrome_running_with_debug,
     start_chrome_with_debug,
-    CDP_PORT,
-    PROFILE_DIR,
 )
+
+VISIBLE_LOGIN_BOUNDS: dict[str, int | str] = {
+    "left": 80,
+    "top": 80,
+    "width": 1400,
+    "height": 1000,
+    "windowState": "normal",
+}
+BACKGROUND_BOUNDS: dict[str, int | str] = {
+    "left": 9999,
+    "top": 9999,
+    "width": 1,
+    "height": 1,
+    "windowState": "normal",
+}
+
+
+async def _set_window_bounds(page: Any, bounds: dict[str, int | str]) -> None:
+    """Move the daemon window without closing or replacing the owner profile."""
+    session = await page.context.new_cdp_session(page)
+    try:
+        window = await session.send("Browser.getWindowForTarget")
+        await session.send(
+            "Browser.setWindowBounds",
+            {"windowId": window["windowId"], "bounds": bounds},
+        )
+    finally:
+        await session.detach()
 
 
 async def login_interactive(timeout_minutes: int = 5):
@@ -36,8 +65,8 @@ async def login_interactive(timeout_minutes: int = 5):
 
         print("Starting Chrome...")
         if not start_chrome_with_debug():
-            print(f"ERROR: Could not start Chrome with debug port.")
-            print(f"Please start Chrome manually with:")
+            print("ERROR: Could not start Chrome with debug port.")
+            print("Please start Chrome manually with:")
             print(f'  "{chrome_path}" --remote-debugging-port={CDP_PORT}')
             return
 
@@ -48,14 +77,17 @@ async def login_interactive(timeout_minutes: int = 5):
     try:
         page = await browser.start()
 
+        await _set_window_bounds(page, VISIBLE_LOGIN_BOUNDS)
+        await page.bring_to_front()
+
         print(f"Chrome connected! You have {timeout_minutes} minutes to log in.")
         print()
         print("Steps:")
-        print("  1. Click 'Verify you are human' if Cloudflare appears")
-        print("  2. Enter your email/username")
-        print("  3. Enter your password")
-        print("  4. Complete any 2FA challenges")
-        print("  5. Wait until you see the Upwork dashboard")
+        print("  1. Open the HeyLogin Chrome extension on the Upwork page")
+        print("  2. Select the exact saved Upwork login for Josiah")
+        print("  3. Let HeyLogin fill the username, password, and TOTP if requested")
+        print("  4. Complete a Cloudflare challenge only if one appears")
+        print("  5. Wait until you see the Upwork freelancer dashboard")
         print()
         print("Your session will be saved automatically.")
         print("=" * 60)
@@ -95,9 +127,14 @@ async def login_interactive(timeout_minutes: int = 5):
         print()
         print(f"Error: {e}")
         print()
-        print("Please try again with: uvx upwork-mcp --login")
+        print("Please try again with: uv run upwork-mcp --login")
 
     finally:
+        if browser._page is not None:
+            try:
+                await _set_window_bounds(browser._page, BACKGROUND_BOUNDS)
+            except Exception:
+                pass
         await browser.close()
 
 

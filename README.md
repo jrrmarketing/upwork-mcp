@@ -1,6 +1,8 @@
 # upwork-mcp (JRR setup)
 
-Local MCP for Upwork — search jobs, proposals, messages, contracts. Uses **browser automation** (your Chrome session), not the Upwork GraphQL API.
+Local MCP for Upwork job discovery, fit/reachability screening, price and proof decisions,
+proposal preparation, messages, invitations, maintenance, contracts, and bidding reports. It
+uses **browser automation** through the owner's Chrome session, not the Upwork GraphQL API.
 
 Upstream: [vanooo/upwork-mcp](https://github.com/vanooo/upwork-mcp)
 
@@ -30,18 +32,42 @@ Install launchd once:
 cd ~/Projects/upwork-mcp && ./scripts/install-launchd.sh
 ```
 
-Cursor MCP config (`~/.cursor/mcp.json`) already points at `scripts/mcp-server.sh`.
+Codex, Cursor, and Claude MCP configs point at `scripts/mcp-server.sh`, so Chrome is checked
+before the server starts.
 
 ## Use in Cursor
 
 Examples:
 
 - “Search Upwork for Google Ads jobs posted in the last 3 days”
+- “Review Best Matches and Most Recent, then rank only realistic JRR opportunities”
+- “Screen this job and explain the price, proof, and boost decision”
+- “Prepare this proposal for approval without submitting it”
 - “Show my Upwork proposals”
 - “Get details for this job: https://www.upwork.com/jobs/~…”
 
-See upstream README for the full tool list.
+Read-only tools may inspect live Upwork. Proposals, messages, withdrawals, and invitation
+declines follow prepare -> exact owner approval -> one-time commit -> owner-system readback.
+No tool may infer approval or Connect spend from a recommendation.
 
 ## Docs
 
 - `docs/env.md` — session paths and CLI commands
+- `docs/management.md` — screening, pricing, proof, boosts, maintenance, approval, and learning policy
+- `docs/proposal-automation.md` — current Upwork form mechanics
+
+## Verification
+
+```bash
+uv lock --check
+uv sync --frozen --group dev
+uv run ruff check src tests
+uv run mypy src/upwork_mcp
+uv run pytest -q
+```
+
+The default suite is offline. Owner-account checks are read-only and opt-in:
+
+```bash
+UPWORK_MCP_LIVE_TEST=1 uv run pytest -q -m upwork_live_readonly
+```
