@@ -631,7 +631,7 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
         matches = [
             (study, claim)
             for study, claim in permitted
-            if claim and claim in normalized_sentence
+            if claim and _contains_exact_claim(normalized_sentence, claim)
         ]
         if not matches:
             errors.append(
@@ -667,6 +667,13 @@ def _numeric_result_sentences(message: str) -> list[str]:
         and RESULT_METRIC_PATTERN.search(sentence)
         and NUMERIC_VALUE_PATTERN.search(sentence)
     ]
+
+
+def _contains_exact_claim(sentence: str, claim: str) -> bool:
+    """Match one full normalized claim as a bounded phrase."""
+
+    pattern = rf"(?<![\w$+.,-]){re.escape(claim)}(?![\w%+.,-])"
+    return re.search(pattern, sentence) is not None
 
 
 def _study_is_identified(message: str, study: Mapping[str, Any]) -> bool:

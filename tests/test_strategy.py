@@ -213,6 +213,26 @@ def test_paraphrased_or_rounded_case_study_result_is_rejected():
     assert any("exact permitted claim" in error for error in result["errors"])
 
 
+def test_exact_claim_cannot_be_hidden_inside_a_larger_number():
+    selected = [
+        {
+            "key": "priority-one-plumbing",
+            "name": "Priority 1 Plumbing",
+            "url": (
+                "https://josiahroche.co/digital-marketing-case-studies/"
+                "local-plumber-marketing-agency"
+            ),
+            "approved_claims": ["1,258 tracked leads."],
+        }
+    ]
+    result = validate_proof_claims(
+        "Priority 1 Plumbing generated 11,258 tracked leads.",
+        selected,
+    )
+    assert result["valid"] is False
+    assert any("exact permitted claim" in error for error in result["errors"])
+
+
 def test_exact_numeric_result_must_identify_or_link_the_case_study():
     selected = [
         {
