@@ -5,27 +5,56 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import Any
+from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from ..browser.client import get_browser
+from ..prepared_actions import prepare_action
+from ..strategy import validate_upwork_copy
 from .proposals import StrictToolModel, approval_gate, validate_upwork_url
 
+_MESSAGE_ROOM_PATHS = (
+    re.compile(r"^/nx/messages/(?P<room_id>[A-Za-z0-9_-]{12,128})/?$"),
+    re.compile(r"^/ab/messages/rooms/(?P<room_id>[A-Za-z0-9_-]{12,128})/?$"),
+)
 
-def _validate_room_id(value: str) -> str:
+
+def parse_message_room(value: str) -> tuple[str, str]:
+    """Return a canonical individual room URL and its conversation ID."""
+
     candidate = value.strip()
     if candidate.startswith("http"):
         url = validate_upwork_url(candidate)
-        if "/messages" not in url:
-            raise ValueError("Room URL must point to an Upwork messages route")
-        return url
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", candidate):
+        path = urlparse(url).path
+        for pattern in _MESSAGE_ROOM_PATHS:
+            match = pattern.fullmatch(path)
+            if match:
+                room_id = match.group("room_id")
+                route = (
+                    f"/nx/messages/{room_id}"
+                    if path.startswith("/nx/")
+                    else f"/ab/messages/rooms/{room_id}"
+                )
+                return f"https://www.upwork.com{route}", room_id
+        raise ValueError(
+            "Room URL must point to one room at /nx/messages/<id> or /ab/messages/rooms/<id>"
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,128}", candidate):
         raise ValueError("Room ID may contain only letters, numbers, underscores, and hyphens")
-    return candidate
+    return f"https://www.upwork.com/nx/messages/{candidate}", candidate
+
+
+def _validate_room_id(value: str) -> str:
+    return parse_message_room(value)[1]
+
+
+def _validate_room_url(value: str) -> str:
+    return parse_message_room(value)[0]
 
 
 def _room_url(room_id: str) -> str:
-    return room_id if room_id.startswith("http") else f"https://www.upwork.com/nx/messages/{room_id}"
+    return parse_message_room(room_id)[0]
 
 
 class MessagesParams(StrictToolModel):
@@ -43,13 +72,30 @@ class MessagesParams(StrictToolModel):
 class SendMessageParams(StrictToolModel):
     """Exact approved payload for sending a message."""
 
-    room_id: str = Field(description="Chat room ID or URL")
+    room_url: str = Field(description="Canonical individual Upwork room URL")
+    room_id: str = Field(description="Exact room/conversation ID")
+    contact_name: str = Field(min_length=1, max_length=500, description="Live recipient identity")
     message: str = Field(min_length=1, max_length=10000, description="Exact message content to send")
     approved: bool = False
     approval_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
     action_id: str | None = Field(default=None, min_length=1, max_length=128)
 
-    _validate_room_id_field = field_validator("room_id")(_validate_room_id)
+    _validate_room_url_field = field_validator("room_url")(_validate_room_url)
+
+    @field_validator("room_id")
+    @classmethod
+    def _validate_bound_room_id(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{12,128}", value):
+            raise ValueError("Room ID may contain only letters, numbers, underscores, and hyphens")
+        return value
+
+    @field_validator("contact_name")
+    @classmethod
+    def _normalise_contact_name(cls, value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if not normalized:
+            raise ValueError("Contact name cannot be blank")
+        return normalized
 
     @field_validator("message")
     @classmethod
@@ -58,9 +104,20 @@ class SendMessageParams(StrictToolModel):
             raise ValueError("Message cannot be blank")
         return value
 
+    @model_validator(mode="after")
+    def _room_id_must_match_url(self) -> SendMessageParams:
+        if parse_message_room(self.room_url)[1] != self.room_id:
+            raise ValueError("room_id does not match the individual messages URL")
+        return self
+
 
 def message_payload(params: SendMessageParams) -> dict[str, str]:
-    return {"room_id": params.room_id, "message": params.message}
+    return {
+        "room_url": params.room_url,
+        "room_id": params.room_id,
+        "contact_name": params.contact_name,
+        "message": params.message,
+    }
 
 
 async def get_messages(params: MessagesParams) -> list[dict]:
@@ -174,18 +231,27 @@ async def _get_conversation_on_page(room_id: str, limit: int, page) -> dict:
 
     # Build URL
     url = _room_url(room_id)
+    expected_room_id = parse_message_room(room_id)[1]
 
     await page.goto(url, wait_until="networkidle")
 
+    live_url, live_room_id = parse_message_room(str(getattr(page, "url", "")))
+    if live_room_id != expected_room_id:
+        raise ValueError("Upwork opened a different message room than requested")
+
     conversation: dict[str, Any] = {
-        "room_id": room_id,
+        "room_url": live_url,
+        "room_id": live_room_id,
         "messages": [],
         "history_complete": False,
         "completeness_note": "Upwork exposes a virtualised message history; this returns the latest visible messages only.",
     }
 
     # Contact name
-    contact_el = await page.query_selector('[data-test="contact-name"], .contact-name, h2')
+    contact_el = await page.query_selector(
+        '[data-test="contact-name"], .contact-name, .sender-name, '
+        '[data-test="room-header"] h2, .room-header h2'
+    )
     if contact_el:
         conversation["contact_name"] = (await contact_el.text_content() or "").strip()
 
@@ -206,6 +272,66 @@ async def _get_conversation_on_page(room_id: str, limit: int, page) -> dict:
             continue
 
     return conversation
+
+
+def _conversation_identity(conversation: dict[str, Any]) -> dict[str, str] | None:
+    room_url = str(conversation.get("room_url") or "").strip()
+    room_id = str(conversation.get("room_id") or "").strip()
+    contact_name = re.sub(r"\s+", " ", str(conversation.get("contact_name") or "")).strip()
+    if not room_url or not room_id or not contact_name:
+        return None
+    try:
+        canonical_url, route_id = parse_message_room(room_url)
+    except ValueError:
+        return None
+    if route_id != room_id:
+        return None
+    return {
+        "room_url": canonical_url,
+        "room_id": room_id,
+        "contact_name": contact_name,
+    }
+
+
+async def prepare_message_from_live(room: str, message: str) -> dict[str, Any]:
+    """Read one exact room and bind its recipient before creating approval state."""
+
+    canonical_url, room_id = parse_message_room(room)
+    browser = get_browser()
+    await browser.ensure_logged_in()
+    async with browser.operation() as page:
+        conversation = await _get_conversation_on_page(canonical_url, 1, page)
+    identity = _conversation_identity(conversation)
+    validation = validate_upwork_copy(message)
+    errors = list(validation["errors"])
+    if identity is None:
+        errors.append("The message room and recipient identity could not be read back from Upwork")
+    elif identity["room_id"] != room_id:
+        errors.append("Upwork returned a different message room than requested")
+
+    payload: dict[str, str] | None = None
+    prepared = None
+    if identity is not None:
+        params = SendMessageParams(
+            room_url=identity["room_url"],
+            room_id=identity["room_id"],
+            contact_name=identity["contact_name"],
+            message=message,
+        )
+        payload = message_payload(params)
+        if not errors:
+            prepared = prepare_action("message", payload)
+
+    return {
+        **validation,
+        "valid": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "current_conversation": identity,
+        "exact_message": payload,
+        "prepared_action": prepared,
+        "external_action_taken": False,
+        "next_step": "Show the exact message and recipient to Josiah, then wait for approval",
+    }
 
 
 async def _extract_message(el) -> dict | None:
@@ -311,9 +437,28 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
     """Send while the browser operation lock is held."""
 
     # Navigate to conversation
-    url = _room_url(params.room_id)
-
-    await page.goto(url, wait_until="networkidle")
+    url = params.room_url
+    try:
+        conversation = await _get_conversation_on_page(url, 1, page)
+    except ValueError:
+        conversation = {}
+    live_identity = _conversation_identity(conversation)
+    approved_identity = {
+        "room_url": params.room_url,
+        "room_id": params.room_id,
+        "contact_name": re.sub(r"\s+", " ", params.contact_name).strip(),
+    }
+    if live_identity != approved_identity:
+        return {
+            "status": "live_identity_mismatch",
+            "message": (
+                "The live conversation or recipient differs from the approved payload; "
+                "nothing was sent. Prepare the current room again before new approval."
+            ),
+            "approved_conversation_identity": approved_identity,
+            "live_conversation_identity": live_identity,
+            "external_action_taken": False,
+        }
 
     last_message = await _last_visible_message(page)
     if (
@@ -325,7 +470,11 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
         return {
             "status": "duplicate_blocked",
             "message": "The latest owner-system message already matches this exact payload.",
-            "owner_system_readback": {"confirmed": True, "existing_message": last_message},
+            "owner_system_readback": {
+                "confirmed": True,
+                "conversation_identity": approved_identity,
+                "existing_message": last_message,
+            },
             "external_action_taken": False,
         }
 
@@ -353,6 +502,27 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
     for _ in range(20):
         matching_after = await _matching_own_message_count(page, params.message)
         if matching_after > matching_before:
+            try:
+                readback_conversation = await _get_conversation_on_page(url, 1, page)
+            except ValueError:
+                readback_conversation = {}
+            readback_identity = _conversation_identity(readback_conversation)
+            if readback_identity != approved_identity:
+                return {
+                    "status": "unknown",
+                    "message": (
+                        "Upwork showed the new message but the same conversation identity could not "
+                        "be read back; do not retry automatically."
+                    ),
+                    "owner_system_readback": {
+                        "confirmed": False,
+                        "matching_messages_before": matching_before,
+                        "matching_messages_after": matching_after,
+                        "conversation_identity": readback_identity,
+                        "room_url": str(getattr(page, "url", url)),
+                    },
+                    "external_action_taken": True,
+                }
             return {
                 "status": "sent",
                 "message": "Message sent and read back from Upwork",
@@ -361,6 +531,7 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
                     "exact_visible_copy": True,
                     "matching_messages_before": matching_before,
                     "matching_messages_after": matching_after,
+                    "conversation_identity": readback_identity,
                     "room_url": str(getattr(page, "url", url)),
                 },
                 "external_action_taken": True,
@@ -376,6 +547,7 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
             "input_cleared": not bool(input_value),
             "matching_messages_before": matching_before,
             "matching_messages_after": await _matching_own_message_count(page, params.message),
+            "conversation_identity": approved_identity,
             "room_url": str(getattr(page, "url", url)),
         },
         "external_action_taken": True,

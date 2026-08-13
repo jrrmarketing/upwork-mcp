@@ -82,9 +82,12 @@ Fixed-price jobs then show **"3 things you need to know"**:
 
 Without the checkbox + Continue, the proposal is **not** sent even if you clicked Send earlier.
 
-The MCP commits only an unexpired prepared proposal. A result is successful only when the
-owner system shows a proposal success URL/banner or the stored proposal can be read back.
-An unknown result must not be retried automatically.
+The MCP commits only an unexpired, one-time prepared proposal. It first re-reads the exact
+approved application job ID/title/type before exposing form controls. A success URL or banner is
+not sufficient: the owner system must expose one exact stored `/nx/proposals/<19-digit-id>` record
+whose job identity, normalized cover letter, price, and active/submitted status match the approved
+target. `success=false`, an index, a mismatched/unreadable record, or any other unknown result must
+not be retried automatically.
 
 ## Profile highlights (the "Add profile highlights" modal)
 
@@ -93,6 +96,10 @@ Opened by clicking the card titled **"Add a portfolio project"** (also "Add an U
 
 Read the current titles from this live modal before preparation. Do not rely on the old
 case-study digest: several historical card titles conflict with the audited public evidence.
+The read-only form inspection opens the chooser, visits every visible tab, reads each card
+beside a `Select highlight` button without clicking it, and dismisses the chooser. It returns
+`available_profile_highlights` with `available_profile_highlights_status`. Preparation is
+blocked unless that status is `complete`, and a supplied title must exactly match the live list.
 
 - **Tabs** are `button[role=tab][data-ev-tab=...]` with values `portfolio`,
   `certifications`, and the Upwork-jobs tab. Switch via JS click on the tab button.

@@ -52,33 +52,126 @@ def test_action_schemas_are_strict() -> None:
     with pytest.raises(ValidationError):
         invitations.DeclineInvitationParams(
             invitation_url="https://www.upwork.com/ab/proposals/job/~123/apply/",
+            invitation_id="3333333333333333333",
+            job_title="Wrong route",
+            invitation_status="pending",
             reason="   ",
         )
 
 
-@pytest.mark.asyncio
-async def test_submit_proposal_requires_exact_approval_before_browser(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.upwork.com/nx/proposals/",
+        "https://www.upwork.com/nx/proposals/archived",
+        "https://www.upwork.com/nx/proposals/1111111111111111111/edit",
+        "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+        "https://www.upwork.com/jobs/~abc?next=/nx/proposals/1111111111111111111",
+    ],
+)
+def test_withdrawal_rejects_everything_except_individual_submitted_proposal(url: str) -> None:
+    with pytest.raises(ValidationError):
+        proposals.WithdrawProposalParams(
+            proposal_url=url,
+            proposal_id="1111111111111111111",
+            job_title="Google Ads review",
+            proposal_status="active",
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333/accept",
+        "https://www.upwork.com/nx/proposals/job/~123/apply/",
+        "https://www.upwork.com/jobs/~123",
+        "https://www.upwork.com/nx/proposals/?next=/nx/proposals/interview/uid/3333333333333333333",
+    ],
+)
+def test_decline_rejects_non_invitation_and_invitation_accept_routes(url: str) -> None:
+    with pytest.raises(ValidationError):
+        invitations.DeclineInvitationParams(
+            invitation_url=url,
+            invitation_id="3333333333333333333",
+            job_title="Agency Google Ads support",
+            invitation_status="pending",
+        )
+
+
+@pytest.mark.parametrize(
+    ("url", "room_id"),
+    [
+        ("https://www.upwork.com/nx/messages/abc123456789", "abc123456789"),
+        ("https://www.upwork.com/ab/messages/rooms/abc123456789", "abc123456789"),
+    ],
+)
+def test_message_accepts_only_observed_individual_room_forms(url: str, room_id: str) -> None:
+    params = messages.SendMessageParams(
+        room_url=url,
+        room_id=room_id,
+        contact_name="Alex Client",
+        message="Exact copy",
+    )
+    assert params.room_id == room_id
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.upwork.com/nx/messages",
+        "https://www.upwork.com/ab/messages/rooms/",
+        "https://www.upwork.com/jobs/~123?next=/nx/messages/abc123456789",
+        "https://www.upwork.com/nx/messages/abc123456789/settings",
+    ],
+)
+def test_message_rejects_indexes_subroutes_and_query_bypass(url: str) -> None:
+    with pytest.raises(ValidationError):
+        messages.SendMessageParams(
+            room_url=url,
+            room_id="abc123456789",
+            contact_name="Alex Client",
+            message="Exact copy",
+        )
+
+
+def test_all_action_ids_must_match_their_exact_routes() -> None:
+    with pytest.raises(ValidationError):
+        proposals.WithdrawProposalParams(
+            proposal_url="https://www.upwork.com/nx/proposals/1111111111111111111",
+            proposal_id="2222222222222222222",
+            job_title="Google Ads review",
+            proposal_status="active",
+        )
+    with pytest.raises(ValidationError):
+        invitations.DeclineInvitationParams(
+            invitation_url="https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+            invitation_id="4444444444444444444",
+            job_title="Agency Google Ads support",
+            invitation_status="pending",
+        )
+    with pytest.raises(ValidationError):
+        messages.SendMessageParams(
+            room_url="https://www.upwork.com/nx/messages/abc123456789",
+            room_id="different",
+            contact_name="Alex Client",
+            message="Exact copy",
+        )
+
+
+def test_submit_proposal_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
-    params = proposals.SubmitProposalParams(
-        job_url="https://www.upwork.com/jobs/~123",
-        cover_letter="Exact approved copy",
-        rate=63,
-        duration="1 to 3 months",
-        base_connects=12,
-    )
-
-    prepared = await proposals.submit_proposal(params)
-    assert prepared["status"] == "approval_required"
-    assert prepared["external_action_taken"] is False
-    assert prepared["approval_sha256"] == proposals.approval_payload_digest(
-        proposals.proposal_submission_payload(params)
-    )
-
-    mismatch = await proposals.submit_proposal(
-        params.model_copy(update={"approved": True, "approval_sha256": "0" * 64})
-    )
-    assert mismatch["status"] == "approval_mismatch"
-    assert mismatch["external_action_taken"] is False
+    with pytest.raises(ValidationError):
+        proposals.SubmitProposalParams(
+            job_url="https://www.upwork.com/jobs/~123",
+            job_id="~123",
+            form_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            job_title="Google Ads audit",
+            job_type="hourly",
+            cover_letter="Exact approved copy",
+            rate=63,
+            duration="1 to 3 months",
+            base_connects=12,
+        )
 
 
 @pytest.mark.asyncio
@@ -86,14 +179,17 @@ async def test_approved_proposal_still_requires_live_preflight_before_browser(mo
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
     params = proposals.SubmitProposalParams(
         job_url="https://www.upwork.com/jobs/~123",
+        job_id="~123",
+        form_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+        job_title="Google Ads audit",
+        job_type="hourly",
+        action_id="uwa_missing_action",
         cover_letter="Exact approved copy",
         rate=63,
         duration="1 to 3 months",
     )
-    params = _approved(params, proposals.proposal_submission_payload(params))
-
     result = await proposals.submit_proposal(params)
-    assert result["status"] == "preflight_required"
+    assert result["status"] == "approval_required"
     assert result["external_action_taken"] is False
 
 
@@ -103,6 +199,11 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
     original = proposals.SubmitProposalParams(
         job_url="https://www.upwork.com/jobs/~123",
+        job_id="~123",
+        form_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+        job_title="Google Ads audit",
+        job_type="hourly",
+        action_id="uwa_placeholder",
         cover_letter="Exact approved copy",
         rate=63,
         duration="1 to 3 months",
@@ -123,21 +224,24 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
 
 
 @pytest.mark.asyncio
-async def test_legacy_withdrawal_call_is_prepare_only(monkeypatch) -> None:
+async def test_legacy_withdrawal_call_requires_identity_preflight(monkeypatch) -> None:
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
-    result = await proposals.withdraw_proposal("https://www.upwork.com/ab/proposals/123")
-    assert result["status"] == "approval_required"
-    assert result["exact_payload"] == {
-        "proposal_url": "https://www.upwork.com/ab/proposals/123",
-        "reason": None,
-    }
+    result = await proposals.withdraw_proposal("https://www.upwork.com/nx/proposals/1111111111111111111")
+    assert result["status"] == "preflight_required"
+    assert result["proposal_url"] == "https://www.upwork.com/nx/proposals/1111111111111111111"
+    assert result["proposal_id"] == "1111111111111111111"
     assert result["external_action_taken"] is False
 
 
 @pytest.mark.asyncio
 async def test_message_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(messages, "get_browser", _browser_must_not_open)
-    params = messages.SendMessageParams(room_id="room-123", message="Exact approved message")
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
 
     prepared = await messages.send_message(params)
     assert prepared["status"] == "approval_required"
@@ -155,7 +259,10 @@ async def test_message_requires_exact_approval_before_browser(monkeypatch) -> No
 async def test_decline_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(invitations, "get_browser", _browser_must_not_open)
     params = invitations.DeclineInvitationParams(
-        invitation_url="https://www.upwork.com/ab/proposals/job/~123/apply/",
+        invitation_url="https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+        invitation_id="3333333333333333333",
+        job_title="Agency Google Ads support",
+        invitation_status="pending",
         reason="Not interested in work described",
         note="We work with agencies on a consultancy basis, but not as a full-time embedded team member.",
     )
@@ -193,6 +300,39 @@ class _Button(_TextElement):
         self.callback()
 
 
+class _HighlightOption(_TextElement):
+    def __init__(self, title: str | None) -> None:
+        super().__init__("Select highlight")
+        self.title = title
+
+    async def evaluate(self, _script: str) -> str | None:
+        return self.title
+
+    async def is_visible(self) -> bool:
+        return True
+
+
+class _HighlightTab(_Button):
+    def __init__(self, tab_id: str, callback: Callable[[], None]) -> None:
+        super().__init__(callback, tab_id.replace("_", " ").title())
+        self.tab_id = tab_id
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.tab_id if name == "data-ev-tab" else None
+
+    async def is_visible(self) -> bool:
+        return True
+
+
+class _Keyboard:
+    def __init__(self, callback: Callable[[], None]) -> None:
+        self.callback = callback
+
+    async def press(self, key: str) -> None:
+        if key == "Escape":
+            self.callback()
+
+
 class _Input(_TextElement):
     def __init__(self) -> None:
         super().__init__()
@@ -223,8 +363,10 @@ class _MessageElement(_TextElement):
 
 
 class _MessagePage:
-    def __init__(self) -> None:
-        self.url = ""
+    def __init__(self, *, contact_name: str = "Alex Client") -> None:
+        self.url = "https://www.upwork.com/nx/messages/room-1234567"
+        self.contact_name = contact_name
+        self.action_controls_queried = 0
         self.messages: list[_MessageElement] = []
         self.input = _Input()
 
@@ -237,15 +379,70 @@ class _MessagePage:
         return []
 
     async def query_selector(self, selector: str):
+        if "contact-name" in selector or ".contact-name" in selector or "h2" in selector:
+            return _TextElement(self.contact_name)
         if "message-input" in selector or "textarea" in selector:
+            self.action_controls_queried += 1
             return self.input
         if "send-button" in selector or "Send" in selector:
+            self.action_controls_queried += 1
             def send() -> None:
                 self.messages.append(_MessageElement(self.input.value, is_mine=True))
                 self.input.value = ""
 
             return _Button(send)
         return None
+
+
+class _ProposalPage:
+    def __init__(self, *, title: str, status: str = "active") -> None:
+        self.url = "https://www.upwork.com/nx/proposals/1111111111111111111"
+        self.title = title
+        self.status = status
+        self.body = "Submitted proposal details"
+        self.action_controls_queried = 0
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.url = url
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return _TextElement(self.body)
+        if "job-title" in selector or "h1" in selector:
+            return _TextElement(self.title)
+        if "proposal-status" in selector or selector == ".status":
+            return _TextElement(self.status)
+        if "withdraw-button" in selector or "Withdraw" in selector:
+            self.action_controls_queried += 1
+            return _Button(lambda: None, "Withdraw")
+        return None
+
+    async def query_selector_all(self, _selector: str) -> list[Any]:
+        return []
+
+
+class _InvitationPage:
+    def __init__(self, *, title: str) -> None:
+        self.url = "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333"
+        self.title = title
+        self.body = "Pending invitation"
+        self.action_controls_queried = 0
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.url = url
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return _TextElement(self.body)
+        if "job-title" in selector or "h1" in selector:
+            return _TextElement(self.title)
+        if "decline-button" in selector or "Decline" in selector:
+            self.action_controls_queried += 1
+            return _Button(lambda: None, "Decline invitation")
+        return None
+
+    async def query_selector_all(self, _selector: str) -> list[Any]:
+        return []
 
 
 class _Browser:
@@ -267,7 +464,12 @@ class _Browser:
 async def test_approved_message_requires_exact_owner_system_readback(monkeypatch) -> None:
     page = _MessagePage()
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(room_id="room-123", message="Exact approved message")
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
     params = _approved(params, messages.message_payload(params))
 
     result = await messages.send_message(params)
@@ -275,18 +477,147 @@ async def test_approved_message_requires_exact_owner_system_readback(monkeypatch
     assert result["external_action_taken"] is True
     assert result["owner_system_readback"]["confirmed"] is True
     assert result["owner_system_readback"]["exact_visible_copy"] is True
+    assert result["owner_system_readback"]["conversation_identity"]["contact_name"] == "Alex Client"
+
+
+@pytest.mark.asyncio
+async def test_approved_message_stops_if_live_recipient_changed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(contact_name="Different Client")
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+    payload = messages.message_payload(params)
+    prepared = prepare_action("message", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await messages.send_message(params)
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    assert page.messages == []
+    assert page.action_controls_queried == 0
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+async def test_approved_withdrawal_stops_if_live_proposal_identity_changed(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _ProposalPage(title="Different Google Ads job")
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+    params = proposals.WithdrawProposalParams(
+        proposal_url="https://www.upwork.com/nx/proposals/1111111111111111111",
+        proposal_id="1111111111111111111",
+        job_title="Approved Google Ads job",
+        proposal_status="active",
+    )
+    payload = proposals.proposal_withdrawal_payload(params)
+    prepared = prepare_action("withdrawal", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await proposals.withdraw_proposal(params)
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
+    replay = await proposals.withdraw_proposal(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+async def test_approved_decline_stops_if_live_invitation_identity_changed(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _InvitationPage(title="Different agency role")
+    monkeypatch.setattr(invitations, "get_browser", lambda: _Browser(page))
+    params = invitations.DeclineInvitationParams(
+        invitation_url="https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+        invitation_id="3333333333333333333",
+        job_title="Approved agency role",
+        invitation_status="pending",
+    )
+    payload = invitations.invitation_decline_payload(params)
+    prepared = prepare_action("invitation_decline", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await invitations.decline_invitation(params)
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
+    replay = await invitations.decline_invitation(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+class _PaymentTerms(_TextElement):
+    def __init__(self) -> None:
+        super().__init__("By milestone By project")
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if 'type="radio"' in selector and (
+            "project" in selector.casefold() or "milestone" in selector.casefold()
+        ):
+            return [_TextElement()]
+        return []
 
 
 class _InspectPage:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        unresolved_highlight: bool = False,
+        dismiss_highlight: bool = True,
+        escape_dismisses_highlight: bool = False,
+    ) -> None:
         self.url = "https://www.upwork.com/jobs/~123"
         self.form_open = False
+        self.highlight_open = False
+        self.highlight_tab = "portfolio"
+        self.dismiss_highlight = dismiss_highlight
+        self.escape_dismisses_highlight = escape_dismisses_highlight
+        self.keyboard = _Keyboard(self._escape)
         self.body = "Google Ads audit job"
+        self.highlight_options: dict[str, list[str | None]] = {
+            "portfolio": ["  Family   Law Growth  ", "Home Services Lead Generation"],
+            "certifications": ["Google Ads Search Certification"],
+            "upwork_jobs": [None if unresolved_highlight else "Google Ads Account Audit"],
+        }
+        self.payment_terms = _PaymentTerms()
+
+    def _escape(self) -> None:
+        if self.escape_dismisses_highlight:
+            self.highlight_open = False
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
 
     async def wait_for_load_state(self, _state: str) -> None:
+        return None
+
+    async def wait_for_timeout(self, _milliseconds: int) -> None:
         return None
 
     async def query_selector(self, selector: str):
@@ -302,6 +633,8 @@ class _InspectPage:
                 self.url = "https://www.upwork.com/ab/proposals/job/~123/apply/"
                 self.body = """Google Ads audit
 Fixed-price project
+By milestone
+By project
 12 Connects required to submit
 Upwork service fee $50
 You'll receive $450 net
@@ -313,11 +646,30 @@ Boost your proposal auction: top bid 8 Connects
 """
 
             return _Button(open_form, "Apply Now")
+        if self.form_open and "Add a portfolio project" in selector:
+            return _Button(lambda: setattr(self, "highlight_open", True), "Add a portfolio project")
+        if self.highlight_open and "aria-label" in selector and "Close" in selector:
+            def close_highlights() -> None:
+                if self.dismiss_highlight:
+                    self.highlight_open = False
+
+            return _Button(close_highlights, "Close")
+        if self.highlight_open and "Add profile highlights" in selector:
+            return _TextElement("Add profile highlights")
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
+        if self.form_open and "payment-terms" in selector:
+            return [self.payment_terms]
         if "screening-question" in selector:
             return [_TextElement("What similar work have you done?")]
+        if self.highlight_open and 'role="tab"' in selector:
+            return [
+                _HighlightTab(tab_id, lambda tab_id=tab_id: setattr(self, "highlight_tab", tab_id))
+                for tab_id in self.highlight_options
+            ]
+        if self.highlight_open and "Select highlight" in selector:
+            return [_HighlightOption(title) for title in self.highlight_options[self.highlight_tab]]
         return []
 
 
@@ -328,7 +680,11 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
 
     result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
     assert result["form_status"] == "ready"
+    assert result["job_id"] == "~123"
+    assert result["form_url"] == "https://www.upwork.com/nx/proposals/job/~123/apply"
+    assert result["job_title"] == "Google Ads audit"
     assert result["job_type"] == "fixed"
+    assert result["fixed_payment_structures"] == ["by_project", "by_milestone"]
     assert result["base_connects"] == 12
     assert result["screening_questions"] == ["What similar work have you done?"]
     assert result["duration_options"] == [
@@ -339,4 +695,59 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
     ]
     assert result["fee_net_text"]
     assert result["boost_auction_text"]
+    assert result["available_profile_highlights"] == [
+        "Family Law Growth",
+        "Home Services Lead Generation",
+        "Google Ads Search Certification",
+        "Google Ads Account Audit",
+    ]
+    assert result["available_profile_highlights_status"] == "complete"
+    assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
+    assert result["available_profile_highlights_details"]["tabs_inspected"] == [
+        "portfolio",
+        "certifications",
+        "upwork_jobs",
+    ]
+    assert page.highlight_open is False
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_marks_unreadable_highlight_titles_incomplete(monkeypatch) -> None:
+    page = _InspectPage(unresolved_highlight=True)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "incomplete"
+    assert result["available_profile_highlights_details"]["selectable_options_seen"] == 4
+    assert result["available_profile_highlights_details"]["titles_extracted"] == 3
+    assert "1 selectable option" in result["available_profile_highlights_details"]["message"]
+    assert page.highlight_open is False
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_marks_undismissed_highlight_chooser_incomplete(monkeypatch) -> None:
+    page = _InspectPage(dismiss_highlight=False)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "incomplete"
+    assert result["available_profile_highlights_details"]["chooser_dismissed"] is False
+    assert "could not be dismissed" in result["available_profile_highlights_details"]["message"]
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_uses_escape_when_close_does_not_dismiss(monkeypatch) -> None:
+    page = _InspectPage(dismiss_highlight=False, escape_dismisses_highlight=True)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "complete"
+    assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
+    assert page.highlight_open is False
     assert result["external_action_taken"] is False

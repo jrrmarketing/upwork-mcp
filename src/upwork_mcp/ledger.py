@@ -1,7 +1,7 @@
 """Private local decision ledger for evidence-based Upwork bidding reports.
 
-The ledger intentionally stores no proposal copy, message bodies, client names, or
-browser content. It records the smallest set of decision/outcome facts needed to
+The decision/outcome tables intentionally store no proposal copy, message bodies,
+client names, or browser content. They record the smallest set of facts needed to
 measure whether screening, proof, pricing, and boost choices are working.
 """
 

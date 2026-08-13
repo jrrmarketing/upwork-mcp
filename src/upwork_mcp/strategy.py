@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -34,9 +35,21 @@ SERVICE_TERMS: Mapping[str, tuple[str, ...]] = {
     "shopping_feed_segmentation": ("shopping", "merchant center", "product feed", "feed segmentation"),
     "seo": ("seo", "organic search", "search engine optimization"),
     "local_seo": ("local seo", "google business profile", "organic search"),
-    "landing_pages": ("landing page", "unbounce", "cro", "conversion rate optimisation", "conversion rate optimization"),
+    "landing_pages": (
+        "landing page",
+        "unbounce",
+        "cro",
+        "conversion rate optimisation",
+        "conversion rate optimization",
+    ),
     "website_cro": ("website", "landing page", "cro", "conversion rate"),
-    "conversion_tracking": ("conversion tracking", "offline conversion", "attribution", "call tracking", "whatconverts"),
+    "conversion_tracking": (
+        "conversion tracking",
+        "offline conversion",
+        "attribution",
+        "call tracking",
+        "whatconverts",
+    ),
     "whatconverts_attribution": ("whatconverts", "offline conversion", "lead attribution", "call tracking"),
     "revenue_attribution": ("revenue attribution", "conversion value", "roas", "tracked revenue"),
     "call_tracking": ("call tracking", "phone calls", "whatconverts"),
@@ -81,7 +94,10 @@ TAG_TERMS: Mapping[str, tuple[str, ...]] = {
 
 
 HARD_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\b(?:google tag manager|gtm|server[- ]side tag(?:ging)?)\b", "Google Tag Manager implementation is outside JRR scope"),
+    (
+        r"\b(?:google tag manager|gtm|server[- ]side tag(?:ging)?)\b",
+        "Google Tag Manager implementation is outside JRR scope",
+    ),
     (r"\b(?:local services ads?|google lsa|lsa management)\b", "Local Services Ads management is outside JRR scope"),
     (r"\b(?:appsflyer|mobile app campaign|app install campaign)\b", "App campaign tracking is outside JRR scope"),
 )
@@ -210,6 +226,32 @@ def _proof_highlight(record: ProofRecord) -> str | None:
     return None
 
 
+def proposal_safe_proof_lines(study: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Return canonical, claim-local proof lines that proposal validation can verify exactly."""
+
+    name = str(study.get("name") or "").strip()
+    if not name:
+        return []
+    evidence_periods = {
+        _normalise_claim_text(str(evidence.get("text") or "")): str(evidence.get("period") or "").strip()
+        for evidence in study.get("claim_evidence") or []
+        if isinstance(evidence, Mapping)
+    }
+    lines: list[dict[str, str]] = []
+    for raw_claim in study.get("approved_claims") or []:
+        claim = str(raw_claim).strip()
+        if not claim:
+            continue
+        line = f"A relevant example is {name}: {claim}"
+        item = {"claim": claim, "line": line}
+        period = evidence_periods.get(_normalise_claim_text(claim), "")
+        if period:
+            item["period"] = period
+            item["line_with_period"] = f"{line} Period: {period}"
+        lines.append(item)
+    return lines
+
+
 def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:
     """Return the closest verified proof, with the match strength made explicit."""
     text = _text(job)
@@ -261,6 +303,15 @@ def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str
                 "url": study.current_url,
                 "evidence_status": study.status.value,
                 "source": "Audited dated asset or individual public case-study route",
+                "proposal_safe_proof_lines": proposal_safe_proof_lines(
+                    {
+                        "name": study.name,
+                        "approved_claims": [claim.text for claim in study.permitted_claims],
+                        "claim_evidence": [
+                            {"text": claim.text, "period": claim.period} for claim in study.permitted_claims
+                        ],
+                    }
+                ),
                 "highlight": _proof_highlight(study),
             }
         )
@@ -374,12 +425,20 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     boundaries: list[str] = []
     missing: list[str] = []
 
-    google_ads = _contains_any(text, ("google ads", "google adwords", "adwords", "paid search", "ppc", "pmax", "performance max", "shopping"))
+    google_ads = _contains_any(
+        text, ("google ads", "google adwords", "adwords", "paid search", "ppc", "pmax", "performance max", "shopping")
+    )
     seo = _contains_any(text, ("seo", "search engine optimization", "organic search", "technical seo"))
     audit = _contains_any(text, ("audit", "review", "account analysis", "second opinion"))
-    lead_gen = _contains_any(text, ("lead generation", "lead gen", "bookings", "phone calls", "form leads", "qualified leads"))
-    ecommerce = _contains_any(text, ("ecommerce", "e-commerce", "shopify", "woocommerce", "merchant center", "shopping"))
-    tracking = _contains_any(text, ("conversion tracking", "offline conversion", "attribution", "tracking setup", "purchase tracking"))
+    lead_gen = _contains_any(
+        text, ("lead generation", "lead gen", "bookings", "phone calls", "form leads", "qualified leads")
+    )
+    ecommerce = _contains_any(
+        text, ("ecommerce", "e-commerce", "shopify", "woocommerce", "merchant center", "shopping")
+    )
+    tracking = _contains_any(
+        text, ("conversion tracking", "offline conversion", "attribution", "tracking setup", "purchase tracking")
+    )
     invited = bool(job.get("invited"))
 
     service_fit = 0
@@ -402,24 +461,44 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         if re.search(pattern, text, re.I):
             blockers.append(reason)
 
-    if ecommerce and tracking and _contains_any(text, ("purchase", "checkout", "pixel", "ga4 ecommerce", "ecommerce tracking")):
+    if (
+        ecommerce
+        and tracking
+        and _contains_any(text, ("purchase", "checkout", "pixel", "ga4 ecommerce", "ecommerce tracking"))
+    ):
         blockers.append("Ecommerce purchase-tracking implementation is outside JRR's WhatConverts lead-tracking scope")
 
     unsupported = [channel for channel, terms in UNSUPPORTED_CHANNELS.items() if _contains_any(text, terms)]
     if unsupported:
         if google_ads or seo:
-            boundaries.append(f"Client must accept a Google Ads/SEO-only scope; unsupported channels: {', '.join(unsupported)}")
+            boundaries.append(
+                f"Client must accept a Google Ads/SEO-only scope; unsupported channels: {', '.join(unsupported)}"
+            )
         else:
             blockers.append(f"The required work is on unsupported channels: {', '.join(unsupported)}")
 
-    employee_style = _contains_any(text, ("full-time", "full time", "35+ hrs", "35+ hours", "40 hrs", "40 hours", "embedded in", "direct client ownership"))
+    employee_style = _contains_any(
+        text,
+        (
+            "full-time",
+            "full time",
+            "35+ hrs",
+            "35+ hours",
+            "40 hrs",
+            "40 hours",
+            "embedded in",
+            "direct client ownership",
+        ),
+    )
     if employee_style:
         blockers.append("The role is employee-style or requires 35+ hours rather than consultancy support")
 
     agency = "agency" in text
     white_label = _contains_any(text, ("white label", "white-label", "consultancy", "consultant", "fractional"))
     if agency and not white_label and not employee_style:
-        boundaries.append("Confirm the agency accepts a white-label consultancy relationship rather than an employee-style role")
+        boundaries.append(
+            "Confirm the agency accepts a white-label consultancy relationship rather than an employee-style role"
+        )
 
     if tracking and not any("Tag Manager" in blocker for blocker in blockers):
         boundaries.append("Confirm the client is open to WhatConverts for lead and offline-conversion attribution")
@@ -452,7 +531,9 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     if hires and spent is not None and hires > 0:
         spend_per_hire = spent / hires
         if spend_per_hire < 100:
-            components.append(ScoreComponent("low_spend_per_hire", -9, f"Client averages only ${spend_per_hire:,.0f} spent per hire"))
+            components.append(
+                ScoreComponent("low_spend_per_hire", -9, f"Client averages only ${spend_per_hire:,.0f} spent per hire")
+            )
     if average_paid is not None and average_paid < pricing.minimum_hourly_rate * 0.7:
         components.append(ScoreComponent("low_average_rate", -6, f"Client's average paid rate is ${average_paid:g}/hr"))
 
@@ -475,7 +556,11 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     studies = select_case_studies(job)
     if studies:
         proof_points = 14 if studies[0]["match_strength"] == "exact" else 7
-        components.append(ScoreComponent("proof_fit", proof_points, f"Closest proof is {studies[0]['name']} ({studies[0]['match_strength']})"))
+        components.append(
+            ScoreComponent(
+                "proof_fit", proof_points, f"Closest proof is {studies[0]['name']} ({studies[0]['match_strength']})"
+            )
+        )
     else:
         missing.append("a genuinely related individual case study")
 
@@ -505,9 +590,20 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     else:
         recommendation = "skip"
 
-    client_quality = sum(component.points for component in components if component.name in {"payment_verified", "client_spend", "hire_rate", "client_rating", "low_spend_per_hire", "low_average_rate"})
+    client_quality = sum(
+        component.points
+        for component in components
+        if component.name
+        in {"payment_verified", "client_spend", "hire_rate", "client_rating", "low_spend_per_hire", "low_average_rate"}
+    )
     exact_proof = bool(studies and studies[0]["match_strength"] == "exact")
-    should_consider_boost = recommendation == "strong_fit" and client_quality >= 12 and exact_proof and not invited and (count is None or count < 20)
+    should_consider_boost = (
+        recommendation == "strong_fit"
+        and client_quality >= 12
+        and exact_proof
+        and not invited
+        and (count is None or count < 20)
+    )
     max_extra = min(12, int(connects or 8)) if should_consider_boost else 0
     boost = {
         "recommendation": "inspect_live_auction" if should_consider_boost else "no_boost",
@@ -523,7 +619,9 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     plan = {
         "opening": "Hey, thanks for the invite." if invited else "Hey, more than happy to take a look at this for you.",
         "proof_order": [study["name"] for study in studies],
-        "case_study_link": studies[0]["url"] if studies and studies[0]["match_strength"] == "exact" else CASE_STUDY_INDEX,
+        "case_study_link": studies[0]["url"]
+        if studies and studies[0]["match_strength"] == "exact"
+        else CASE_STUDY_INDEX,
         "mention_whatconverts": tracking and not any("Tag Manager" in blocker for blocker in blockers),
         "diagnose_before_access": False,
         "plain_text_only": True,
@@ -590,26 +688,114 @@ def validate_upwork_copy(message: str, *, invited: bool | None = None) -> dict[s
 
 
 def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """Refuse quarantined or unselected case-study proof in proposal copy."""
+    """Allow audited proof only as an exact, claim-local canonical line."""
     errors: list[str] = []
-    lowered = message.lower()
+    normalized_message = _normalise_claim_text(_strip_invisible_formatting(message))
+    lowered = normalized_message
     selected = {str(study.get("key")): study for study in selected_studies}
 
     for pattern, reason in QUARANTINED_CLAIM_PATTERNS:
-        if re.search(pattern, message, re.I):
+        if re.search(pattern, normalized_message, re.I):
             errors.append(reason)
 
     for record in PROOF_MANIFEST:
-        referenced = record.current_url.lower() in lowered or record.name.lower() in lowered
+        referenced = (
+            _normalise_claim_text(record.current_url) in lowered or _normalise_claim_text(record.name) in lowered
+        )
         if referenced and record.key not in selected:
             errors.append(f"{record.name} was referenced but was not selected by the proof matcher")
 
-    if CASE_STUDY_INDEX.lower() in lowered and selected:
+    if _normalise_claim_text(CASE_STUDY_INDEX) in lowered and selected:
         exact = [study for study in selected.values() if study.get("match_strength") == "exact"]
-        if exact and not any(str(study.get("url", "")).lower() in lowered for study in exact):
+        if exact and not any(_normalise_claim_text(str(study.get("url", ""))) in lowered for study in exact):
             errors.append("Use the closest verified individual case-study URL instead of only the general index")
 
+    allowed_lines: list[tuple[Mapping[str, Any], str]] = []
+    proof_fragments: list[tuple[Mapping[str, Any], str]] = []
+    for study in selected.values():
+        lines = proposal_safe_proof_lines(study)
+        for item in lines:
+            allowed_lines.append((study, _normalise_claim_text(item["line"])))
+            if item.get("line_with_period"):
+                allowed_lines.append((study, _normalise_claim_text(item["line_with_period"])))
+            proof_fragments.append((study, _normalise_claim_text(item["claim"])))
+            if item.get("period"):
+                proof_fragments.append((study, _normalise_claim_text(item["period"])))
+
+    residual_lines: list[str] = []
+    used_studies: set[str] = set()
+    for raw_line in message.splitlines():
+        line = _normalise_claim_text(raw_line)
+        if not line:
+            continue
+        exact_line: tuple[Mapping[str, Any], str] | None = next(
+            ((study, allowed) for study, allowed in allowed_lines if line == allowed),
+            None,
+        )
+        if exact_line:
+            used_studies.add(str(exact_line[0].get("key") or ""))
+            continue
+        residual_lines.append(raw_line)
+
+    residual = "\n".join(residual_lines)
+    residual_normalized = _normalise_claim_text(residual)
+    any_safe_line_used = bool(used_studies)
+    for study, fragment in proof_fragments:
+        if fragment and _contains_exact_claim(residual_normalized, fragment):
+            errors.append(
+                f"Audited proof must use one exact proposal-safe line for the selected case study: {study.get('name')}"
+            )
+    for study in selected.values():
+        name = _normalise_claim_text(str(study.get("name") or ""))
+        url = _normalise_claim_text(str(study.get("url") or ""))
+        if ((name and name in residual_normalized) or (url and url in residual_normalized)) and str(
+            study.get("key") or ""
+        ) not in used_studies:
+            errors.append(
+                f"A selected case study may appear only in its exact proposal-safe proof line: {study.get('name')}"
+            )
+    if any_safe_line_used and residual_normalized and not _ordinary_nonproof_remainder(residual_normalized):
+        errors.append("A generated proof line cannot be combined with extra unstructured copy in the same proof block")
     return {"valid": not errors, "errors": list(dict.fromkeys(errors))}
+
+
+def _normalise_claim_text(value: str) -> str:
+    """Normalize punctuation and spacing without changing a claim's numbers."""
+
+    normalized = unicodedata.normalize("NFKC", _strip_invisible_formatting(value))
+    normalized = normalized.casefold().replace("’", "'").replace("–", "-").replace("—", "-")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.rstrip(".!? ")
+
+
+def _contains_exact_claim(sentence: str, claim: str) -> bool:
+    """Match one full normalized claim as a bounded phrase."""
+
+    pattern = rf"(?<![\w$+.-]){re.escape(claim)}(?![\w%+-])"
+    return re.search(pattern, sentence) is not None
+
+
+def _strip_invisible_formatting(value: str) -> str:
+    return "".join(character for character in value if unicodedata.category(character) != "Cf")
+
+
+def _ordinary_nonproof_remainder(value: str) -> bool:
+    """Recognize only the ordinary proposal contexts allowed beside a proof line."""
+
+    normalized = _normalise_claim_text(value)
+    allowed_context = re.compile(
+        r"\b(?:i|i'm|i've|i'd|my|you|your|we|account|campaigns?|audit|review|compare|"
+        r"scope|project|timeline|available|availability|experience|worked|working|managed|"
+        r"rate|bid|budget|fee|price|complete|finish|hours?|weeks?|months?|years?|options?)\b",
+        re.I,
+    )
+    obvious_result = re.compile(
+        r"\b(?:roi|roas|revenue|cpl|sales|calls?|forms?|conversions?|"
+        r"achieved|generated|made|earned|doubled|tripled|grew|increased|decreased|reduced|"
+        r"improved|converted|happened|tracked)\b",
+        re.I,
+    )
+    return bool(allowed_context.search(normalized)) and not obvious_result.search(normalized)
 
 
 def audit_proposals(proposals: Iterable[Mapping[str, Any]], stale_after_days: int = 14) -> dict[str, Any]:
@@ -635,7 +821,9 @@ def audit_proposals(proposals: Iterable[Mapping[str, Any]], stale_after_days: in
             action = "leave_unwithdrawn"
             reason = "Withdrawing does not refund Connects or improve search visibility; leave it unless a specific risk exists"
         counts[action] = counts.get(action, 0) + 1
-        rows.append({**dict(proposal), "age_days": age_days, "maintenance_action": action, "maintenance_reason": reason})
+        rows.append(
+            {**dict(proposal), "age_days": age_days, "maintenance_action": action, "maintenance_reason": reason}
+        )
 
     return {
         "summary": counts,
