@@ -119,6 +119,17 @@ QUARANTINED_CLAIM_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"81%\s+of\s+clients", "The 81% client-improvement claim has no audited denominator or period"),
 )
 
+RESULT_METRIC_PATTERN = re.compile(
+    r"\b(?:revenue|roi|roas|cac|customer acquisition cost|cost per (?:case|lead|conversion)|"
+    r"cpl|conversion rate|conversions?|leads?|calls?|forms?|transactions?|sales|traffic|"
+    r"clicks?|keywords?|cases?|bookings?|ad spend|google ads spend|return on)\b",
+    re.I,
+)
+NUMERIC_VALUE_PATTERN = re.compile(
+    r"(?:\$\s*\d|[+-]?\d[\d,.]*\s*%|\b\d+(?:\.\d+)?\s*x\b|\b\d[\d,.]*\b)",
+    re.I,
+)
+
 
 @dataclass
 class PricingContext:
@@ -609,7 +620,60 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
         if exact and not any(str(study.get("url", "")).lower() in lowered for study in exact):
             errors.append("Use the closest verified individual case-study URL instead of only the general index")
 
+    permitted: list[tuple[Mapping[str, Any], str]] = []
+    for study in selected.values():
+        for claim in study.get("approved_claims") or []:
+            if isinstance(claim, str) and claim.strip():
+                permitted.append((study, _normalise_claim_text(claim)))
+
+    for sentence in _numeric_result_sentences(message):
+        normalized_sentence = _normalise_claim_text(sentence)
+        matches = [
+            (study, claim)
+            for study, claim in permitted
+            if claim and claim in normalized_sentence
+        ]
+        if not matches:
+            errors.append(
+                "Numeric performance claims must repeat an exact permitted claim "
+                f"from the selected proof manifest: {sentence[:160]}"
+            )
+            continue
+        if not any(_study_is_identified(message, study) for study, _ in matches):
+            errors.append(
+                "Numeric performance claims must identify or link the selected case study: "
+                f"{sentence[:160]}"
+            )
+
     return {"valid": not errors, "errors": list(dict.fromkeys(errors))}
+
+
+def _normalise_claim_text(value: str) -> str:
+    """Normalize punctuation and spacing without changing a claim's numbers."""
+
+    normalized = value.casefold().replace("’", "'").replace("–", "-").replace("—", "-")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.rstrip(".!? ")
+
+
+def _numeric_result_sentences(message: str) -> list[str]:
+    """Return sentences that appear to make quantified performance claims."""
+
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", message)
+    return [
+        sentence.strip()
+        for sentence in sentences
+        if sentence.strip()
+        and RESULT_METRIC_PATTERN.search(sentence)
+        and NUMERIC_VALUE_PATTERN.search(sentence)
+    ]
+
+
+def _study_is_identified(message: str, study: Mapping[str, Any]) -> bool:
+    lowered = message.casefold()
+    name = str(study.get("name") or "").strip().casefold()
+    url = str(study.get("url") or "").strip().casefold()
+    return bool((name and name in lowered) or (url and url in lowered))
 
 
 def audit_proposals(proposals: Iterable[Mapping[str, Any]], stale_after_days: int = 14) -> dict[str, Any]:

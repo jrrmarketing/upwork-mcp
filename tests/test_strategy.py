@@ -174,6 +174,70 @@ def test_unaudited_aggregate_claims_are_quarantined():
     assert "methodology" in result["errors"][0]
 
 
+def test_exact_selected_case_study_claim_is_allowed_when_attributed():
+    selected = [
+        {
+            "key": "priority-one-plumbing",
+            "name": "Priority 1 Plumbing",
+            "url": (
+                "https://josiahroche.co/digital-marketing-case-studies/"
+                "local-plumber-marketing-agency"
+            ),
+            "approved_claims": ["1,258 tracked leads.", "33% tracked conversion rate."],
+        }
+    ]
+    result = validate_proof_claims(
+        (
+            "Priority 1 Plumbing is the closest example. It generated 1,258 tracked leads. "
+            "https://josiahroche.co/digital-marketing-case-studies/local-plumber-marketing-agency"
+        ),
+        selected,
+    )
+    assert result["valid"] is True
+
+
+def test_paraphrased_or_rounded_case_study_result_is_rejected():
+    selected = [
+        {
+            "key": "japanese-head-spa",
+            "name": "Japanese Head Spa",
+            "url": "https://josiahroche.co/digital-marketing-case-studies/japanese-spa-marketing",
+            "approved_claims": ["844.11% actual ROAS.", "349 tracked leads."],
+        }
+    ]
+    result = validate_proof_claims(
+        "Japanese Head Spa generated roughly 844% ROAS.",
+        selected,
+    )
+    assert result["valid"] is False
+    assert any("exact permitted claim" in error for error in result["errors"])
+
+
+def test_exact_numeric_result_must_identify_or_link_the_case_study():
+    selected = [
+        {
+            "key": "dark-shade-window-tinting",
+            "name": "Dark Shade Window Tinting",
+            "url": (
+                "https://josiahroche.co/digital-marketing-case-studies/"
+                "window-tinting-marketing-houston"
+            ),
+            "approved_claims": ["10.63x Google Ads ROAS."],
+        }
+    ]
+    result = validate_proof_claims("A similar account reached 10.63x Google Ads ROAS.", selected)
+    assert result["valid"] is False
+    assert any("identify or link" in error for error in result["errors"])
+
+
+def test_experience_years_and_bid_rate_are_not_treated_as_results():
+    result = validate_proof_claims(
+        "I've worked in Google Ads for 10 years, and the proposed rate is $63/hr.",
+        [],
+    )
+    assert result["valid"] is True
+
+
 def test_copy_validator_blocks_off_platform_and_template_style_copy():
     result = validate_upwork_copy(
         "Hey, more than happy to take a look at this.\n\nI'm an expert. Book at calendly.com/example.",
