@@ -82,6 +82,10 @@ not expose a claim. Disputed aggregates and stale card figures are quarantined. 
 the MCP refuses `$100M+`, `$53M+`, and `81% of clients` proposal claims until dated methodology
 is attached. It does not change the existing Upwork profile title.
 
+Quantified proposal proof must repeat an exact permitted claim and identify or link the selected
+case study. The validator also rejects any additional number or period in that result sentence
+unless it is the exact audited period attached to the same claim.
+
 Current portfolio-highlight titles must be read from the live owner system. Several old titles
 conflict with audited case-study evidence, so the old digest is not an automatic selection list.
 Proposal preparation requires a `complete` live chooser enumeration and rejects any requested
