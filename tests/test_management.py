@@ -27,6 +27,12 @@ def _job():
 
 def _form():
     return {
+        "job_url": "https://www.upwork.com/jobs/~law123",
+        "job_id": "~law123",
+        "form_url": "https://www.upwork.com/nx/proposals/job/~law123/apply",
+        "job_title": "Google Ads audit for family law firm",
+        "job_type": "hourly",
+        "fixed_payment_structures": [],
         "form_status": "ready",
         "existing_proposal": False,
         "screening_questions": [],
@@ -76,6 +82,12 @@ async def test_prepare_proposal_binds_live_cost_questions_terms_and_copy(
 
     assert result["ready_for_owner_approval"] is True
     assert result["exact_submission"]["base_connects"] == 8
+    assert result["exact_submission"]["job_id"] == "~law123"
+    assert result["exact_submission"]["form_url"] == (
+        "https://www.upwork.com/nx/proposals/job/~law123/apply"
+    )
+    assert result["exact_submission"]["job_title"] == "Google Ads audit for family law firm"
+    assert result["exact_submission"]["job_type"] == "hourly"
     assert result["exact_submission"]["screening_questions"] == []
     assert result["exact_submission"]["rate_increase_frequency"] == "Never"
     assert result["prepared_action"]["approved"] is False

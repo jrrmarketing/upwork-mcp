@@ -11,8 +11,10 @@ client, spends Connects, or changes an Upwork record is prepared and approved se
    rating, and payment verification.
 3. Classify it as `strong_fit`, `fit`, `price_conversion`, `speculative`, or `skip` with
    separate reasons for service fit, client quality, reachability, pricing, and proof.
-4. Inspect the live proposal form. Bind its current questions, duration options, fee/net
-   text, base Connect cost, boost auction, and existing-proposal status to the preparation.
+4. Inspect one exact `/jobs/~<job-id>` posting and its matching canonical
+   `/nx/proposals/job/~<job-id>/apply` form. Bind the job ID, live title, job type, form URL,
+   questions, duration options, fee/net text, base Connect cost, boost auction, and
+   existing-proposal status to the preparation.
 5. Draft in Josiah's plain-text consultative voice and answer every screening question.
 6. Prepare an expiring one-time action. Show the full copy and terms to Josiah.
 7. After a fresh exact approval, arm and commit that unchanged action once. A live-state
@@ -24,6 +26,19 @@ prepare a fresh action instead. The approval tool enforces exact-payload integri
 execution, but MCP transport does not cryptographically prove which chat turn came from the
 owner. The calling agent must invoke it only after Josiah's fresh later-turn approval under the
 canonical communication rule.
+
+Proposal commit navigates directly to the approved application form and reads back the same job
+ID, canonical job/form URLs, title, and job type before querying any rate, bid, cover-letter,
+screening, duration, highlight, payment, boost, or submit control. A fixed-price proposal must
+bind either `by_project` with no milestones or `by_milestone` with an ordered list of exact
+description, ISO due date, and amount values whose total equals the bid. The live selection and
+filled values must be readable after entry. Upwork defaults are never accepted implicitly.
+
+A success query or banner is only supporting context. Submission succeeds only when Upwork opens
+one exact stored `/nx/proposals/<19-digit-id>` record whose job ID, URL, title, normalized cover
+letter, price, and active/submitted status match the approved target. `success=false`, an index,
+an unreadable stored identity, or a mismatch remains terminal `unknown` and must not be retried
+automatically.
 
 `upwork_find_opportunities` and `upwork_screen_job` are read-only on Upwork and write only
 minimal decision facts to the private local ledger. They never apply.

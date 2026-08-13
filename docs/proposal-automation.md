@@ -82,9 +82,12 @@ Fixed-price jobs then show **"3 things you need to know"**:
 
 Without the checkbox + Continue, the proposal is **not** sent even if you clicked Send earlier.
 
-The MCP commits only an unexpired prepared proposal. A result is successful only when the
-owner system shows a proposal success URL/banner or the stored proposal can be read back.
-An unknown result must not be retried automatically.
+The MCP commits only an unexpired, one-time prepared proposal. It first re-reads the exact
+approved application job ID/title/type before exposing form controls. A success URL or banner is
+not sufficient: the owner system must expose one exact stored `/nx/proposals/<19-digit-id>` record
+whose job identity, normalized cover letter, price, and active/submitted status match the approved
+target. `success=false`, an index, a mismatched/unreadable record, or any other unknown result must
+not be retried automatically.
 
 ## Profile highlights (the "Add profile highlights" modal)
 

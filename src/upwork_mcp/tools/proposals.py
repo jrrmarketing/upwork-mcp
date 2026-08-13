@@ -1,8 +1,8 @@
 """Proposal tools for Upwork MCP.
 
 Every consequential action in this module is approval-gated before the browser is
-created.  Calling an action without approval is therefore a safe prepare step: it
-returns the exact payload and digest that must be approved and committed unchanged.
+created. Proposal submission accepts only an approved one-time prepared action;
+other guarded actions retain their exact-payload preparation interfaces.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import hmac
 import json
 import re
 from collections.abc import Mapping
+from datetime import date
+from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -34,27 +36,67 @@ def validate_upwork_url(value: str) -> str:
     candidate = value.strip()
     parsed = urlparse(candidate)
     hostname = (parsed.hostname or "").lower()
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("A full HTTPS Upwork URL is required") from error
     if (
         parsed.scheme != "https"
         or not hostname
         or not (hostname == "upwork.com" or hostname.endswith(".upwork.com"))
         or parsed.username
         or parsed.password
+        or port is not None
     ):
         raise ValueError("A full HTTPS Upwork URL is required")
     return candidate
 
 
-def validate_job_or_invitation_url(value: str) -> str:
+_JOB_ID = r"~[A-Za-z0-9]{3,64}"
+_JOB_PATH = re.compile(rf"^/jobs/(?P<job_id>{_JOB_ID})/?$")
+_APPLICATION_PATH = re.compile(
+    rf"^/(?:nx|ab)/proposals/job/(?P<job_id>{_JOB_ID})/apply/?$"
+)
+
+
+def parse_job_url(value: str) -> tuple[str, str]:
+    """Return one canonical public-job URL and its exact Upwork job ID."""
+
     candidate = validate_upwork_url(value)
-    path = urlparse(candidate).path
-    if not (
-        path.startswith("/jobs/")
-        or "/proposals/job/" in path
-        or "/proposals/interview/" in path
-    ):
-        raise ValueError("URL must point to an Upwork job or invitation route")
-    return candidate
+    match = _JOB_PATH.fullmatch(urlparse(candidate).path)
+    if not match:
+        raise ValueError("URL must point to one job at /jobs/~<job_id>")
+    job_id = match.group("job_id")
+    return f"https://www.upwork.com/jobs/{job_id}", job_id
+
+
+def parse_application_url(value: str) -> tuple[str, str]:
+    """Return the canonical application-form URL and its exact Upwork job ID."""
+
+    candidate = validate_upwork_url(value)
+    match = _APPLICATION_PATH.fullmatch(urlparse(candidate).path)
+    if not match:
+        raise ValueError(
+            "URL must point to one application form at /nx/proposals/job/~<job_id>/apply"
+        )
+    job_id = match.group("job_id")
+    return f"https://www.upwork.com/nx/proposals/job/{job_id}/apply", job_id
+
+
+def parse_job_or_application_url(value: str) -> tuple[str, str, Literal["job", "application"]]:
+    """Parse only an exact individual public-job or application-form route."""
+
+    try:
+        canonical, job_id = parse_job_url(value)
+        return canonical, job_id, "job"
+    except ValueError:
+        canonical, job_id = parse_application_url(value)
+        return canonical, job_id, "application"
+
+
+def validate_job_or_application_url(value: str) -> str:
+    """Accept and canonicalize only one exact job or application route."""
+    return parse_job_or_application_url(value)[0]
 
 
 _SUBMITTED_PROPOSAL_PATH = re.compile(r"^/nx/proposals/(?P<proposal_id>[0-9]{19})/?$")
@@ -148,18 +190,92 @@ class ProposalsParams(StrictToolModel):
 class InspectProposalFormParams(StrictToolModel):
     """Parameters for opening and reading an Upwork application form."""
 
-    job_url: str = Field(description="Full Upwork job or invitation URL")
+    job_url: str = Field(description="Full individual Upwork job or application-form URL")
 
-    _validate_job_url = field_validator("job_url")(validate_job_or_invitation_url)
+    _validate_job_url = field_validator("job_url")(validate_job_or_application_url)
+
+
+class FixedPriceMilestone(StrictToolModel):
+    """One exact owner-approved fixed-price milestone."""
+
+    description: str = Field(min_length=1, max_length=500)
+    due_date: str = Field(description="Exact ISO due date (YYYY-MM-DD)")
+    amount: float = Field(gt=0)
+
+    @field_validator("description")
+    @classmethod
+    def _description_must_not_be_blank(cls, value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if not normalized:
+            raise ValueError("Milestone description cannot be blank")
+        return normalized
+
+    @field_validator("due_date")
+    @classmethod
+    def _due_date_must_be_iso(cls, value: str) -> str:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Milestone due_date must use YYYY-MM-DD") from error
+        return parsed.isoformat()
+
+    @field_validator("amount")
+    @classmethod
+    def _amount_must_use_cents(cls, value: float) -> float:
+        decimal_value = Decimal(str(value))
+        if decimal_value != decimal_value.quantize(Decimal("0.01")):
+            raise ValueError("Milestone amount cannot use fractions of a cent")
+        return value
+
+
+def validate_payment_terms(
+    *,
+    rate: float | None,
+    bid: float | None,
+    payment_structure: Literal["by_project", "by_milestone"] | None,
+    milestones: list[FixedPriceMilestone],
+) -> None:
+    """Validate exact hourly/fixed commercial terms before approval or commit."""
+
+    if (rate is None) == (bid is None):
+        raise ValueError("Provide exactly one of rate or bid")
+    approved_price = Decimal(str(rate if rate is not None else bid))
+    if not approved_price.is_finite() or approved_price != approved_price.quantize(Decimal("0.01")):
+        raise ValueError("Proposal prices must be finite and cannot use fractions of a cent")
+    if rate is not None:
+        if payment_structure is not None or milestones:
+            raise ValueError("Hourly proposals cannot include fixed-price payment terms")
+        return
+    if payment_structure is None:
+        raise ValueError("Fixed-price proposals require an explicit payment_structure")
+    if payment_structure == "by_project":
+        if milestones:
+            raise ValueError("By-project proposals cannot include milestones")
+        return
+    if not milestones:
+        raise ValueError("By-milestone proposals require at least one exact milestone")
+    assert bid is not None
+    milestone_total = sum((Decimal(str(item.amount)) for item in milestones), Decimal("0"))
+    if milestone_total != Decimal(str(bid)):
+        raise ValueError("Milestone amounts must add up exactly to the fixed-price bid")
 
 
 class SubmitProposalParams(StrictToolModel):
     """Parameters for submitting a proposal."""
 
-    job_url: str = Field(description="Full Upwork job URL")
+    job_url: str = Field(description="Canonical individual Upwork job URL")
+    job_id: str = Field(pattern=rf"^{_JOB_ID}$", description="Exact job ID bound during preparation")
+    form_url: str = Field(description="Canonical individual Upwork application-form URL")
+    job_title: str = Field(min_length=1, max_length=1000, description="Exact live job title")
+    job_type: Literal["hourly", "fixed"]
     cover_letter: str = Field(min_length=1, max_length=10000, description="Exact approved cover letter")
     rate: float | None = Field(default=None, gt=0, description="Proposed hourly rate")
     bid: float | None = Field(default=None, gt=0, description="Fixed-price bid")
+    payment_structure: Literal["by_project", "by_milestone"] | None = Field(
+        default=None,
+        description="Required explicit structure for fixed-price proposals",
+    )
+    milestones: list[FixedPriceMilestone] = Field(default_factory=list, max_length=20)
     answers: list[str] | None = Field(default=None, max_length=20, description="Exact screening answers")
     screening_questions: list[str] = Field(
         default_factory=list,
@@ -180,11 +296,18 @@ class SubmitProposalParams(StrictToolModel):
     )
     boost_connects: int = Field(default=0, ge=0)
     rate_increase_frequency: Literal["Never"] = "Never"
-    approved: bool = False
-    approval_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
-    action_id: str | None = Field(default=None, min_length=1, max_length=128)
+    action_id: str = Field(min_length=1, max_length=128, description="Approved one-time prepared action ID")
 
-    _validate_job_url = field_validator("job_url")(validate_job_or_invitation_url)
+    _validate_job_url = field_validator("job_url")(lambda value: parse_job_url(value)[0])
+    _validate_form_url = field_validator("form_url")(lambda value: parse_application_url(value)[0])
+
+    @field_validator("job_title")
+    @classmethod
+    def _normalise_job_title(cls, value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if not normalized:
+            raise ValueError("job_title cannot be blank")
+        return normalized
 
     @field_validator("cover_letter")
     @classmethod
@@ -201,9 +324,21 @@ class SubmitProposalParams(StrictToolModel):
         return values
 
     @model_validator(mode="after")
-    def _require_exactly_one_price(self) -> SubmitProposalParams:
-        if (self.rate is None) == (self.bid is None):
-            raise ValueError("Provide exactly one of rate or bid")
+    def _bind_identity_and_terms(self) -> SubmitProposalParams:
+        _, job_route_id = parse_job_url(self.job_url)
+        _, form_route_id = parse_application_url(self.form_url)
+        if self.job_id != job_route_id or self.job_id != form_route_id:
+            raise ValueError("job_id must match both the individual job and application-form URLs")
+        if self.job_type == "hourly" and self.rate is None:
+            raise ValueError("An hourly form requires an hourly rate")
+        if self.job_type == "fixed" and self.bid is None:
+            raise ValueError("A fixed-price form requires a fixed bid")
+        validate_payment_terms(
+            rate=self.rate,
+            bid=self.bid,
+            payment_structure=self.payment_structure,
+            milestones=self.milestones,
+        )
         return self
 
 
@@ -241,9 +376,15 @@ def proposal_submission_payload(params: SubmitProposalParams) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "job_url": params.job_url,
+        "job_id": params.job_id,
+        "form_url": params.form_url,
+        "job_title": params.job_title,
+        "job_type": params.job_type,
         "cover_letter": params.cover_letter,
         "rate": params.rate,
         "bid": params.bid,
+        "payment_structure": params.payment_structure,
+        "milestones": [item.model_dump(mode="json") for item in params.milestones],
         "answers": params.answers or [],
         "screening_questions": params.screening_questions,
         "duration": params.duration,
@@ -404,6 +545,18 @@ async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
     title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
     if title_el:
         details["job_title"] = (await title_el.text_content() or "").strip()
+    job_link = await page.query_selector('a[href^="/jobs/~"], a[href^="https://www.upwork.com/jobs/~"]')
+    if job_link:
+        try:
+            href = str(await job_link.get_attribute("href") or "")
+            if href.startswith("/"):
+                href = f"https://www.upwork.com{href}"
+            live_job_url, live_job_id = parse_job_url(href)
+        except (AttributeError, ValueError):
+            pass
+        else:
+            details["job_url"] = live_job_url
+            details["job_id"] = live_job_id
 
     # Cover letter
     cover_el = await page.query_selector('[data-test="cover-letter"], .cover-letter')
@@ -566,19 +719,80 @@ def _existing_proposal_evidence(text: str) -> str | None:
     return None
 
 
+def _normalise_identity_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _detect_job_type(text: str) -> Literal["hourly", "fixed"] | None:
+    normalized = re.sub(r"\s+", " ", text)
+    # Prefer form-structure labels over incidental job-description/profile text.
+    if re.search(r"\bby project\b|\bby milestone\b", normalized, re.I):
+        return "fixed"
+    if re.search(r"rate increase frequency|select a frequency", normalized, re.I):
+        return "hourly"
+    fixed = re.search(r"fixed[- ]price|project budget", normalized, re.I)
+    hourly = re.search(r"hourly rate|hourly contract|/hr\b", normalized, re.I)
+    if fixed and not hourly:
+        return "fixed"
+    if hourly and not fixed:
+        return "hourly"
+    return None
+
+
+async def _application_identity_from_current_page(page) -> dict[str, str] | None:
+    """Read only immutable application identity, without querying form controls."""
+
+    try:
+        form_url, job_id = parse_application_url(str(getattr(page, "url", "")))
+    except ValueError:
+        return None
+    text = await _page_text(page)
+    title_el = await page.query_selector(
+        f'[data-test="job-title"], .job-title, a[href="/jobs/{job_id}"], '
+        f'a[href^="/jobs/{job_id}?"]'
+    )
+    title = _normalise_identity_text(await title_el.text_content()) if title_el else ""
+    job_type = _detect_job_type(text)
+    if not title or job_type is None:
+        return None
+    job_url, _ = parse_job_url(f"https://www.upwork.com/jobs/{job_id}")
+    return {
+        "job_url": job_url,
+        "job_id": job_id,
+        "form_url": form_url,
+        "job_title": title,
+        "job_type": job_type,
+    }
+
+
 async def _open_proposal_form(page, job_url: str) -> tuple[str, str | None]:
     """Navigate to a job and open its apply form without committing anything."""
 
-    await page.goto(job_url, wait_until="networkidle")
+    target_url, expected_job_id, target_kind = parse_job_or_application_url(job_url)
+    await page.goto(target_url, wait_until="networkidle")
     text = await _page_text(page)
     existing = _existing_proposal_evidence(text)
     if existing:
         return "already_applied", existing
 
-    if "/proposals/" in str(getattr(page, "url", "")):
+    live_url = str(getattr(page, "url", ""))
+    try:
+        _, live_job_id = parse_application_url(live_url)
+    except ValueError:
+        live_job_id = None
+    if live_job_id is not None:
+        if live_job_id != expected_job_id:
+            return "identity_mismatch", None
         return "ready", None
-    if await page.query_selector('[data-test="cover-letter-input"], textarea[name*="cover"]'):
-        return "ready", None
+    if target_kind == "application":
+        return "identity_mismatch", None
+
+    try:
+        _, live_job_id = parse_job_url(live_url)
+    except ValueError:
+        return "identity_mismatch", None
+    if live_job_id != expected_job_id:
+        return "identity_mismatch", None
 
     apply_btn = await page.query_selector(
         '[data-test="apply-button"], button:has-text("Apply Now"), '
@@ -596,12 +810,13 @@ async def _open_proposal_form(page, job_url: str) -> tuple[str, str | None]:
     existing = _existing_proposal_evidence(text)
     if existing:
         return "already_applied", existing
-    if (
-        "/proposals/" in str(getattr(page, "url", ""))
-        or await page.query_selector('[data-test="cover-letter-input"], textarea')
-    ):
+    try:
+        _, live_job_id = parse_application_url(str(getattr(page, "url", "")))
+    except ValueError:
+        return "identity_mismatch", None
+    if live_job_id == expected_job_id:
         return "ready", None
-    return "unavailable", None
+    return "identity_mismatch", None
 
 
 async def _inspect_duration_options(page, text: str) -> list[str]:
@@ -935,21 +1150,24 @@ async def inspect_proposal_form(
 async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page) -> dict[str, Any]:
     """Read an already-leased page for proposal-form facts."""
 
+    _, expected_job_id, _ = parse_job_or_application_url(params.job_url)
+    canonical_job_url, _ = parse_job_url(f"https://www.upwork.com/jobs/{expected_job_id}")
     form_status, existing_evidence = await _open_proposal_form(page, params.job_url)
     text = await _page_text(page)
-    normalized = re.sub(r"\s+", " ", text)
-
-    title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
-    title = (await title_el.text_content() or "").strip() if title_el else None
+    identity = await _application_identity_from_current_page(page) if form_status == "ready" else None
+    if form_status == "ready" and (
+        identity is None or identity["job_id"] != expected_job_id
+    ):
+        form_status = "identity_mismatch"
+        identity = None
 
     question_texts = await _screening_question_texts(page)
-
-    if re.search(r"hourly rate|hourly contract|/hr\b", normalized, re.I):
-        job_type: str | None = "hourly"
-    elif re.search(r"fixed[- ]price|by project|project budget", normalized, re.I):
-        job_type = "fixed"
-    else:
-        job_type = None
+    job_type = identity["job_type"] if identity else None
+    fixed_payment_structures = (
+        await _inspect_fixed_payment_structures(page)
+        if form_status == "ready" and job_type == "fixed"
+        else []
+    )
 
     fee_net_lines = _dedupe_text(
         [
@@ -989,14 +1207,16 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
         duration_options = []
 
     return {
-        "job_url": params.job_url,
-        "form_url": str(getattr(page, "url", params.job_url)),
-        "job_title": title,
+        "job_url": canonical_job_url,
+        "job_id": expected_job_id,
+        "form_url": identity["form_url"] if identity else None,
+        "job_title": identity["job_title"] if identity else None,
         "form_status": form_status,
         "existing_proposal": existing_evidence is not None,
         "existing_proposal_evidence": existing_evidence,
         "screening_questions": question_texts,
         "job_type": job_type,
+        "fixed_payment_structures": fixed_payment_structures,
         "base_connects": _extract_base_connects(text),
         "fee_net_text": fee_net_lines,
         "duration_options": duration_options,
@@ -1059,6 +1279,232 @@ async def _select_rate_increase_never(page) -> bool:
     return False
 
 
+async def _checked_state(element) -> bool | None:
+    try:
+        return bool(await element.is_checked())
+    except Exception:
+        try:
+            value = await element.get_attribute("aria-checked")
+        except Exception:
+            return None
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+        return None
+
+
+async def _fixed_payment_section(page) -> Any | None:
+    """Resolve one payment section containing both exact structure labels."""
+
+    candidates = await page.query_selector_all(
+        'fieldset:has(label:text-is("By project")):has(label:text-is("By milestone")), '
+        '[data-test="payment-terms"]:has-text("By project"):has-text("By milestone"), '
+        '[data-test="payment-structure"]:has-text("By project"):has-text("By milestone")'
+    )
+    exact: list[Any] = []
+    for candidate in candidates:
+        try:
+            text = _normalise_identity_text(await candidate.text_content())
+        except Exception:
+            continue
+        if re.search(r"(?:^|\s)By project(?:\s|$)", text) and re.search(
+            r"(?:^|\s)By milestone(?:\s|$)", text
+        ):
+            exact.append(candidate)
+    return exact[0] if len(exact) == 1 else None
+
+
+async def _exact_payment_radio(section, label: str):
+    token = "project" if label == "By project" else "milestone"
+    matches = await section.query_selector_all(
+        ", ".join(
+            (
+                f'label:text-is("{label}") input[type="radio"]',
+                f'input[type="radio"][aria-label="{label}"]',
+                f'input[type="radio"][value="{token}"]',
+                f'input[type="radio"][value="by_{token}"]',
+                f'input[type="radio"][data-test="by-{token}"]',
+            )
+        )
+    )
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+async def _inspect_fixed_payment_structures(
+    page,
+) -> list[Literal["by_project", "by_milestone"]]:
+    """Read exact fixed-price options from one scoped payment section."""
+
+    section = await _fixed_payment_section(page)
+    if section is None:
+        return []
+    project = await _exact_payment_radio(section, "By project")
+    milestone = await _exact_payment_radio(section, "By milestone")
+    if project is None or milestone is None:
+        return []
+    return ["by_project", "by_milestone"]
+
+
+async def _select_fixed_payment_structure(
+    page,
+    structure: Literal["by_project", "by_milestone"],
+) -> Any | None:
+    """Select and read back one exact fixed-price payment structure."""
+
+    section = await _fixed_payment_section(page)
+    if section is None:
+        return None
+    label = "By project" if structure == "by_project" else "By milestone"
+    opposite_label = "By milestone" if structure == "by_project" else "By project"
+    radio = await _exact_payment_radio(section, label)
+    opposite = await _exact_payment_radio(section, opposite_label)
+    if radio is None or opposite is None:
+        return None
+    checked = await _checked_state(radio)
+    opposite_checked = await _checked_state(opposite)
+    if checked is None or opposite_checked is None:
+        return None
+    if not checked:
+        try:
+            await _click(page, radio)
+        except Exception:
+            return None
+    if await _checked_state(radio) is not True or await _checked_state(opposite) is not False:
+        return None
+    return section
+
+
+async def _fill_one_exact_input(page, selectors: str, value: str) -> bool:
+    inputs: list[Any] = []
+    for element in await page.query_selector_all(selectors):
+        try:
+            enabled = bool(await element.is_enabled())
+        except Exception:
+            enabled = True
+        if enabled:
+            inputs.append(element)
+    if len(inputs) != 1:
+        return False
+    element = inputs[0]
+    try:
+        await element.fill(value)
+        live_value = str(await element.input_value()).replace(",", "").replace("$", "").strip()
+    except Exception:
+        return False
+    try:
+        return Decimal(live_value) == Decimal(value)
+    except Exception:
+        return False
+
+
+async def _configure_fixed_payment_terms(page, params: SubmitProposalParams) -> tuple[bool, str | None]:
+    """Apply only the exact owner-approved fixed-price structure and terms."""
+
+    if params.payment_structure is None or params.bid is None:
+        return False, "Fixed-price payment terms were not approval-bound"
+    section = await _select_fixed_payment_structure(page, params.payment_structure)
+    if section is None:
+        return False, "Approved fixed-price payment structure could not be selected and verified"
+
+    if params.payment_structure == "by_project":
+        ok = await _fill_one_exact_input(
+            section,
+            '[data-test="bid-input"], input[name="bid"], input[name="amount"], '
+            'input[data-test="project-amount"], input[placeholder="$0.00"]',
+            str(params.bid),
+        )
+        return (True, None) if ok else (False, "One exact by-project total input could not be filled and verified")
+
+    rows = await section.query_selector_all(
+        '[data-test="milestone-row"], [data-test*="milestone-item"], .milestone-row'
+    )
+    if len(rows) != len(params.milestones):
+        return False, "Live milestone rows differ from the exact approved milestones"
+    for row, milestone in zip(rows, params.milestones, strict=True):
+        description = await row.query_selector(
+            'input[name*="description"], textarea[name*="description"], [data-test*="description"] input'
+        )
+        due_date = await row.query_selector(
+            'input[name*="due"], input[name*="date"], [data-test*="due-date"] input'
+        )
+        amount = await row.query_selector(
+            'input[name*="amount"], input[data-test*="amount"]'
+        )
+        if not description or not due_date or not amount:
+            return False, "An exact approved milestone field could not be found"
+        try:
+            await description.fill(milestone.description)
+            await due_date.fill(milestone.due_date)
+            await amount.fill(str(milestone.amount))
+            live_description = _normalise_identity_text(await description.input_value())
+            live_due_date = str(await due_date.input_value()).strip()
+            live_amount = Decimal(
+                str(await amount.input_value()).replace(",", "").replace("$", "").strip()
+            )
+        except Exception:
+            return False, "Approved milestone values could not be read back"
+        if (
+            live_description != milestone.description
+            or live_due_date != milestone.due_date
+            or live_amount != Decimal(str(milestone.amount))
+        ):
+            return False, "Live milestone values differ from the exact approved milestones"
+    return True, None
+
+
+async def _acknowledge_fixed_price_warning(page) -> bool:
+    """Acknowledge only the exact fixed-price warning dialog, if it is present."""
+
+    matching_dialogs: list[Any] = []
+    try:
+        dialogs = await page.query_selector_all('[role="dialog"]')
+    except Exception:
+        return False
+    for dialog in dialogs:
+        try:
+            dialog_text = _normalise_identity_text(await dialog.text_content())
+        except Exception:
+            continue
+        if re.search(r"\b3 things you need to know\b", dialog_text, re.I) and re.search(
+            r"\bYes, I understand\.?\b", dialog_text, re.I
+        ):
+            matching_dialogs.append(dialog)
+    if len(matching_dialogs) != 1:
+        return False
+    dialog = matching_dialogs[0]
+    try:
+        acknowledgements = await dialog.query_selector_all(
+            'label:text-is("Yes, I understand") input[type="checkbox"], '
+            'label:text-is("Yes, I understand.") input[type="checkbox"], '
+            'input[type="checkbox"][aria-label="Yes, I understand"], '
+            'input[type="checkbox"][aria-label="Yes, I understand."]'
+        )
+        continue_buttons = await dialog.query_selector_all('button:text-is("Continue")')
+    except Exception:
+        return False
+    if len(acknowledgements) != 1 or len(continue_buttons) != 1:
+        return False
+    acknowledgement = acknowledgements[0]
+    continue_btn = continue_buttons[0]
+    try:
+        await acknowledgement.check()
+    except Exception:
+        try:
+            await _click(page, acknowledgement)
+        except Exception:
+            return False
+    if await _checked_state(acknowledgement) is not True:
+        return False
+    try:
+        await _click(page, continue_btn)
+    except Exception:
+        return False
+    return True
+
+
 async def _select_profile_highlights(page, highlights: list[str]) -> tuple[bool, str | None]:
     if not highlights:
         return True, None
@@ -1100,23 +1546,104 @@ async def _select_profile_highlights(page, highlights: list[str]) -> tuple[bool,
     return True, None
 
 
-async def _proposal_confirmation(page, timeout_seconds: float = 15) -> dict[str, Any]:
+def _success_query_is_true(url: str) -> bool:
+    parsed = urlparse(url)
+    return any(
+        part.casefold() in {"success", "success=true", "success=1"}
+        for part in parsed.query.split("&")
+        if part
+    )
+
+
+def _readback_price(value: Any) -> Decimal | None:
+    """Read one unambiguous monetary amount from a stored proposal field."""
+
+    matches = re.findall(r"(?:\$\s*)?([0-9][0-9,]*(?:\.[0-9]{1,2})?)", str(value or ""))
+    try:
+        amounts = {Decimal(match.replace(",", "")).quantize(Decimal("0.01")) for match in matches}
+    except Exception:
+        return None
+    return next(iter(amounts)) if len(amounts) == 1 else None
+
+
+async def _proposal_confirmation(
+    page,
+    approved_target: Mapping[str, Any],
+    timeout_seconds: float = 15,
+) -> dict[str, Any]:
+    """Confirm submission only by reading one exact stored proposal identity."""
+
     for _ in range(max(1, int(timeout_seconds * 2))):
-        url = str(getattr(page, "url", ""))
-        text = await _page_text(page)
+        try:
+            url = str(getattr(page, "url", ""))
+        except Exception:
+            url = ""
+        try:
+            text = await _page_text(page)
+        except Exception:
+            text = ""
         success_text = re.search(
             r"your proposal was submitted|proposal submitted successfully|proposal has been submitted",
             text,
             re.I,
         )
-        if ("/proposals/" in url and "success" in url.lower()) or success_text:
-            return {
-                "confirmed": True,
-                "url": url,
-                "evidence": success_text.group(0) if success_text else "success URL",
-            }
+        try:
+            proposal_url, proposal_id = parse_submitted_proposal_url(url)
+        except ValueError:
+            proposal_url = ""
+            proposal_id = ""
+        if proposal_id:
+            try:
+                details = await _get_proposal_details_on_page(proposal_url, page)
+            except Exception:
+                details = {}
+            live_title = _normalise_identity_text(details.get("job_title"))
+            live_status = _normalise_identity_text(details.get("status")).casefold()
+            live_cover_letter = _normalise_identity_text(details.get("cover_letter"))
+            live_price = _readback_price(details.get("bid"))
+            try:
+                approved_price = Decimal(str(approved_target["price_amount"]))
+                approved_cover_letter = str(approved_target["cover_letter"])
+            except (KeyError, ArithmeticError, ValueError):
+                approved_price = None
+                approved_cover_letter = ""
+            same_target = bool(
+                details.get("proposal_id") == proposal_id
+                and details.get("job_id") == approved_target["job_id"]
+                and details.get("job_url") == approved_target["job_url"]
+                and live_title == approved_target["job_title"]
+                and live_status in {"active", "submitted"}
+                and live_cover_letter == approved_cover_letter
+                and approved_price is not None
+                and live_price == approved_price
+            )
+            if same_target:
+                return {
+                    "confirmed": True,
+                    "url": proposal_url,
+                    "proposal_id": proposal_id,
+                    "job_id": approved_target["job_id"],
+                    "job_title": live_title,
+                    "price_amount": str(live_price),
+                    "proposal_status": live_status,
+                    "evidence": (
+                        success_text.group(0)
+                        if success_text
+                        else "exact stored proposal identity"
+                    ),
+                    "success_query": _success_query_is_true(url),
+                }
         await asyncio.sleep(0.5)
-    return {"confirmed": False, "url": str(getattr(page, "url", "")), "evidence": None}
+    try:
+        final_url = str(getattr(page, "url", ""))
+    except Exception:
+        final_url = ""
+    return {
+        "confirmed": False,
+        "url": final_url,
+        "evidence": None,
+        "success_query": _success_query_is_true(final_url),
+    }
 
 
 async def submit_proposal(params: SubmitProposalParams) -> dict:
@@ -1131,8 +1658,8 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     blocked = approval_gate(
         "submit_proposal",
         payload,
-        approved=params.approved,
-        approval_sha256=params.approval_sha256,
+        approved=False,
+        approval_sha256=None,
         action_id=params.action_id,
     )
     if blocked:
@@ -1160,11 +1687,20 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
     """Fill and commit a proposal while the browser operation lock is held."""
     assert params.duration is not None
 
-    form_status, existing_evidence = await _open_proposal_form(page, params.job_url)
+    form_status, existing_evidence = await _open_proposal_form(page, params.form_url)
     if form_status == "already_applied":
         return {
             "status": "already_submitted",
             "message": existing_evidence,
+            "external_action_taken": False,
+        }
+    if form_status == "identity_mismatch":
+        return {
+            "status": "live_identity_mismatch",
+            "message": (
+                "Upwork did not remain on the exact approved application route; "
+                "nothing was filled or submitted. Prepare the current job again before new approval."
+            ),
             "external_action_taken": False,
         }
     if form_status != "ready":
@@ -1173,6 +1709,35 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
             "message": "Apply form not found. Job may be closed or unavailable.",
             "external_action_taken": False,
         }
+
+    approved_identity = {
+        "job_url": params.job_url,
+        "job_id": params.job_id,
+        "form_url": params.form_url,
+        "job_title": params.job_title,
+        "job_type": params.job_type,
+    }
+    live_identity = await _application_identity_from_current_page(page)
+    if live_identity != approved_identity:
+        return {
+            "status": "live_identity_mismatch",
+            "message": (
+                "The live application identity differs from the approved payload; "
+                "nothing was filled or submitted. Prepare the current job again before new approval."
+            ),
+            "approved_application_identity": approved_identity,
+            "live_application_identity": live_identity,
+            "external_action_taken": False,
+        }
+    approved_proposal_target: dict[str, Any] = {
+        **approved_identity,
+        "cover_letter": _normalise_identity_text(params.cover_letter),
+        "price_amount": str(
+            Decimal(str(params.rate if params.rate is not None else params.bid)).quantize(
+                Decimal("0.01")
+            )
+        ),
+    }
 
     live_text = await _page_text(page)
     live_base_connects = _extract_base_connects(live_text)
@@ -1197,7 +1762,7 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
             "external_action_taken": False,
         }
 
-    # Fill in rate/bid
+    # Only after exact identity readback may form controls be queried or filled.
     if params.rate is not None:
         rate_input = await _first_enabled(page, '[data-test="hourly-rate-input"], input[name*="rate"]')
         if not rate_input:
@@ -1205,13 +1770,9 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
         await rate_input.fill(str(params.rate))
 
     if params.bid is not None:
-        bid_input = await _first_enabled(
-            page,
-            '[data-test="bid-input"], input[name*="bid"], input[name*="amount"], input[placeholder="$0.00"]',
-        )
-        if not bid_input:
-            return {"status": "error", "message": "Fixed-price bid input not found", "external_action_taken": False}
-        await bid_input.fill(str(params.bid))
+        fixed_ok, fixed_error = await _configure_fixed_payment_terms(page, params)
+        if not fixed_ok:
+            return {"status": "error", "message": fixed_error, "external_action_taken": False}
 
     # Fill cover letter
     cover_textarea = await page.query_selector('[data-test="cover-letter-input"], textarea[name*="cover"], textarea')
@@ -1264,7 +1825,11 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
     await _click(page, submit_btn)
     consequential_click_taken = True
 
-    immediate_confirmation = await _proposal_confirmation(page, timeout_seconds=2)
+    immediate_confirmation = await _proposal_confirmation(
+        page,
+        approved_proposal_target,
+        timeout_seconds=2,
+    )
     if immediate_confirmation["confirmed"]:
         return {
             "status": "submitted",
@@ -1300,22 +1865,13 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
     if send_btn:
         await _click(page, send_btn)
 
-    acknowledgement = await page.query_selector(
-        'input[type="checkbox"] + label:has-text("Yes, I understand"), '
-        'label:has-text("Yes, I understand"), input[type="checkbox"]'
-    )
-    if acknowledgement:
-        try:
-            await acknowledgement.check()
-        except Exception:
-            await _click(page, acknowledgement)
-        continue_btn = await page.query_selector(
-            '[role="dialog"] button:has-text("Continue"), button:has-text("Continue")'
-        )
-        if continue_btn:
-            await _click(page, continue_btn)
+    if params.bid is not None:
+        await _acknowledge_fixed_price_warning(page)
 
-    readback = await _proposal_confirmation(page)
+    readback = await _proposal_confirmation(
+        page,
+        approved_proposal_target,
+    )
     if readback["confirmed"]:
         return {
             "status": "submitted",

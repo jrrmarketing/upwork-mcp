@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -45,6 +45,7 @@ from .tools.messages import (
 )
 from .tools.profile import get_connects_balance, get_my_profile, get_profile_stats
 from .tools.proposals import (
+    FixedPriceMilestone,
     InspectProposalFormParams,
     ProposalsParams,
     SubmitProposalParams,
@@ -211,7 +212,7 @@ async def upwork_audit_proposals(
 
 @mcp.tool()
 async def upwork_inspect_proposal_form(
-    job_url: Annotated[str, Field(description="Full Upwork job or invitation URL")],
+    job_url: Annotated[str, Field(description="Full individual Upwork job or application URL")],
 ) -> dict:
     """Open and read the live application form without filling or submitting it."""
     return await inspect_proposal_form(InspectProposalFormParams(job_url=job_url))
@@ -223,6 +224,8 @@ async def upwork_prepare_proposal(
     cover_letter: str,
     rate: float | None = None,
     bid: float | None = None,
+    payment_structure: Literal["by_project", "by_milestone"] | None = None,
+    milestones: list[dict[str, Any]] | None = None,
     answers: list[str] | None = None,
     duration: Literal[
         "Less than 1 month",
@@ -243,6 +246,8 @@ async def upwork_prepare_proposal(
             cover_letter=cover_letter,
             rate=rate,
             bid=bid,
+            payment_structure=payment_structure,
+            milestones=[FixedPriceMilestone.model_validate(item) for item in (milestones or [])],
             answers=answers or [],
             duration=duration,
             profile_highlights=profile_highlights or [],
@@ -275,9 +280,15 @@ async def upwork_approve_prepared_action(
 async def upwork_submit_prepared_proposal(
     action_id: str,
     job_url: str,
+    job_id: str,
+    form_url: str,
+    job_title: str,
+    job_type: Literal["hourly", "fixed"],
     cover_letter: str,
     rate: float | None = None,
     bid: float | None = None,
+    payment_structure: Literal["by_project", "by_milestone"] | None = None,
+    milestones: list[dict[str, Any]] | None = None,
     answers: list[str] | None = None,
     screening_questions: list[str] | None = None,
     duration: Literal[
@@ -294,9 +305,15 @@ async def upwork_submit_prepared_proposal(
     params = SubmitProposalParams(
         action_id=action_id,
         job_url=job_url,
+        job_id=job_id,
+        form_url=form_url,
+        job_title=job_title,
+        job_type=job_type,
         cover_letter=cover_letter,
         rate=rate,
         bid=bid,
+        payment_structure=payment_structure,
+        milestones=[FixedPriceMilestone.model_validate(item) for item in (milestones or [])],
         answers=answers or [],
         screening_questions=screening_questions or [],
         duration=duration,

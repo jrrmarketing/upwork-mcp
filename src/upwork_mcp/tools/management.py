@@ -17,7 +17,15 @@ from ..strategy import (
     validate_upwork_copy,
 )
 from .jobs import JobDetailsParams, JobSearchParams, get_job_details, search_jobs
-from .proposals import InspectProposalFormParams, ProposalsParams, get_proposals, inspect_proposal_form
+from .proposals import (
+    FixedPriceMilestone,
+    InspectProposalFormParams,
+    ProposalsParams,
+    get_proposals,
+    inspect_proposal_form,
+    parse_job_url,
+    validate_payment_terms,
+)
 
 
 class PrepareProposalParams(BaseModel):
@@ -27,6 +35,8 @@ class PrepareProposalParams(BaseModel):
     cover_letter: str = Field(min_length=1, max_length=8_000)
     rate: float | None = Field(default=None, gt=0)
     bid: float | None = Field(default=None, gt=0)
+    payment_structure: Literal["by_project", "by_milestone"] | None = None
+    milestones: list[FixedPriceMilestone] = Field(default_factory=list, max_length=20)
     answers: list[str] = Field(default_factory=list, max_length=20)
     duration: str | None = Field(default=None, max_length=100)
     profile_highlights: list[str] = Field(default_factory=list, max_length=4)
@@ -38,19 +48,35 @@ class PrepareProposalParams(BaseModel):
 
     @model_validator(mode="after")
     def validate_terms(self) -> PrepareProposalParams:
-        if (self.rate is None) == (self.bid is None):
-            raise ValueError("Choose exactly one of rate or bid")
+        self.job_url = parse_job_url(self.job_url)[0]
+        validate_payment_terms(
+            rate=self.rate,
+            bid=self.bid,
+            payment_structure=self.payment_structure,
+            milestones=self.milestones,
+        )
         if self.rate_increase_frequency != "Never":
             raise ValueError('rate_increase_frequency must be "Never"')
         return self
 
 
-def _proposal_payload(params: PrepareProposalParams, *, base_connects: int | None) -> dict[str, Any]:
+def _proposal_payload(
+    params: PrepareProposalParams,
+    *,
+    base_connects: int | None,
+    form: dict[str, Any],
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "job_url": params.job_url,
+        "job_id": form.get("job_id"),
+        "form_url": form.get("form_url"),
+        "job_title": form.get("job_title"),
+        "job_type": form.get("job_type"),
         "cover_letter": params.cover_letter,
         "rate": params.rate,
         "bid": params.bid,
+        "payment_structure": params.payment_structure,
+        "milestones": [item.model_dump(mode="json") for item in params.milestones],
         "answers": params.answers,
         "screening_questions": [],
         "duration": params.duration,
@@ -81,6 +107,29 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
     proof_check = validate_proof_claims(params.cover_letter, analysis["case_studies"])
     errors.extend(proof_check["errors"])
 
+    try:
+        _, expected_job_id = parse_job_url(params.job_url)
+    except ValueError:
+        expected_job_id = ""
+    job_title = " ".join(str(job.get("title") or "").split())
+    form_title = " ".join(str(form.get("job_title") or "").split())
+    if not expected_job_id or form.get("job_id") != expected_job_id:
+        errors.append("The live application form does not match the exact requested job ID")
+    if not job_title or not form_title or job_title != form_title:
+        errors.append("The live job title and application-form title could not be matched exactly")
+    if not form.get("form_url"):
+        errors.append("The canonical individual application-form URL could not be bound")
+    if form.get("job_type") not in {"hourly", "fixed"}:
+        errors.append("The live application job type could not be bound")
+    elif params.rate is not None and form.get("job_type") != "hourly":
+        errors.append("The approved hourly rate does not match the live fixed-price form")
+    elif params.bid is not None and form.get("job_type") != "fixed":
+        errors.append("The approved fixed bid does not match the live hourly form")
+    if params.bid is not None:
+        available_structures = form.get("fixed_payment_structures") or []
+        if params.payment_structure not in available_structures:
+            errors.append("The approved fixed-price payment structure is not available in the live form")
+
     if analysis["recommendation"] == "skip":
         errors.append("The JRR screening policy classifies this job as skip")
     if params.rate is not None and params.bid is not None:
@@ -95,13 +144,16 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         errors.append("Upwork allows no more than 4 profile highlights")
     if not params.profile_highlights:
         errors.append("Select at least one current owner-system profile highlight before approval")
+    form_ready = form.get("form_status") == "ready"
+    if not form_ready:
+        errors.append(f"The live proposal form is not ready: {form.get('form_status')}")
     available_highlights_status = form.get("available_profile_highlights_status")
     available_highlights = set(form.get("available_profile_highlights") or [])
-    if available_highlights_status != "complete":
+    if form_ready and available_highlights_status != "complete":
         errors.append(
             "Live profile-highlight enumeration is not complete, so highlight titles cannot be validated for approval"
         )
-    else:
+    elif form_ready:
         invalid_highlights = [
             highlight for highlight in params.profile_highlights if highlight not in available_highlights
         ]
@@ -109,8 +161,6 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
             errors.append(
                 "These profile highlights are not selectable in the live form: " + ", ".join(invalid_highlights)
             )
-    if form.get("form_status") != "ready":
-        errors.append(f"The live proposal form is not ready: {form.get('form_status')}")
     if form.get("existing_proposal"):
         errors.append("An existing proposal was found for this job")
     screening_questions = form.get("screening_questions") or []
@@ -127,7 +177,7 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         warnings.append("Upwork did not expose a live fee/net preview during read-only inspection")
 
     recommended = set(analysis["profile_highlights"])
-    if available_highlights_status == "complete":
+    if form_ready and available_highlights_status == "complete":
         unavailable_recommended = sorted(recommended - available_highlights)
         if unavailable_recommended:
             warnings.append(
@@ -144,7 +194,7 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
     if params.boost_connects > analysis["boost"]["max_extra_connects"]:
         errors.append("Boost exceeds the policy cap for this job")
 
-    payload = _proposal_payload(params, base_connects=form.get("base_connects"))
+    payload = _proposal_payload(params, base_connects=form.get("base_connects"), form=form)
     payload["screening_questions"] = form.get("screening_questions") or []
     prepared_action = prepare_action("proposal", payload) if not errors else None
     return {

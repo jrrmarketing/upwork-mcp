@@ -158,29 +158,20 @@ def test_all_action_ids_must_match_their_exact_routes() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_submit_proposal_requires_exact_approval_before_browser(monkeypatch) -> None:
+def test_submit_proposal_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
-    params = proposals.SubmitProposalParams(
-        job_url="https://www.upwork.com/jobs/~123",
-        cover_letter="Exact approved copy",
-        rate=63,
-        duration="1 to 3 months",
-        base_connects=12,
-    )
-
-    prepared = await proposals.submit_proposal(params)
-    assert prepared["status"] == "approval_required"
-    assert prepared["external_action_taken"] is False
-    assert prepared["approval_sha256"] == proposals.approval_payload_digest(
-        proposals.proposal_submission_payload(params)
-    )
-
-    mismatch = await proposals.submit_proposal(
-        params.model_copy(update={"approved": True, "approval_sha256": "0" * 64})
-    )
-    assert mismatch["status"] == "approval_mismatch"
-    assert mismatch["external_action_taken"] is False
+    with pytest.raises(ValidationError):
+        proposals.SubmitProposalParams(
+            job_url="https://www.upwork.com/jobs/~123",
+            job_id="~123",
+            form_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            job_title="Google Ads audit",
+            job_type="hourly",
+            cover_letter="Exact approved copy",
+            rate=63,
+            duration="1 to 3 months",
+            base_connects=12,
+        )
 
 
 @pytest.mark.asyncio
@@ -188,14 +179,17 @@ async def test_approved_proposal_still_requires_live_preflight_before_browser(mo
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
     params = proposals.SubmitProposalParams(
         job_url="https://www.upwork.com/jobs/~123",
+        job_id="~123",
+        form_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+        job_title="Google Ads audit",
+        job_type="hourly",
+        action_id="uwa_missing_action",
         cover_letter="Exact approved copy",
         rate=63,
         duration="1 to 3 months",
     )
-    params = _approved(params, proposals.proposal_submission_payload(params))
-
     result = await proposals.submit_proposal(params)
-    assert result["status"] == "preflight_required"
+    assert result["status"] == "approval_required"
     assert result["external_action_taken"] is False
 
 
@@ -205,6 +199,11 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
     original = proposals.SubmitProposalParams(
         job_url="https://www.upwork.com/jobs/~123",
+        job_id="~123",
+        form_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+        job_title="Google Ads audit",
+        job_type="hourly",
+        action_id="uwa_placeholder",
         cover_letter="Exact approved copy",
         rate=63,
         duration="1 to 3 months",
@@ -573,6 +572,18 @@ async def test_approved_decline_stops_if_live_invitation_identity_changed(
     assert "already been claimed" in replay["message"]
 
 
+class _PaymentTerms(_TextElement):
+    def __init__(self) -> None:
+        super().__init__("By milestone By project")
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if 'type="radio"' in selector and (
+            "project" in selector.casefold() or "milestone" in selector.casefold()
+        ):
+            return [_TextElement()]
+        return []
+
+
 class _InspectPage:
     def __init__(
         self,
@@ -594,6 +605,7 @@ class _InspectPage:
             "certifications": ["Google Ads Search Certification"],
             "upwork_jobs": [None if unresolved_highlight else "Google Ads Account Audit"],
         }
+        self.payment_terms = _PaymentTerms()
 
     def _escape(self) -> None:
         if self.escape_dismisses_highlight:
@@ -621,6 +633,8 @@ class _InspectPage:
                 self.url = "https://www.upwork.com/ab/proposals/job/~123/apply/"
                 self.body = """Google Ads audit
 Fixed-price project
+By milestone
+By project
 12 Connects required to submit
 Upwork service fee $50
 You'll receive $450 net
@@ -645,6 +659,8 @@ Boost your proposal auction: top bid 8 Connects
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
+        if self.form_open and "payment-terms" in selector:
+            return [self.payment_terms]
         if "screening-question" in selector:
             return [_TextElement("What similar work have you done?")]
         if self.highlight_open and 'role="tab"' in selector:
@@ -664,7 +680,11 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
 
     result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
     assert result["form_status"] == "ready"
+    assert result["job_id"] == "~123"
+    assert result["form_url"] == "https://www.upwork.com/nx/proposals/job/~123/apply"
+    assert result["job_title"] == "Google Ads audit"
     assert result["job_type"] == "fixed"
+    assert result["fixed_payment_structures"] == ["by_project", "by_milestone"]
     assert result["base_connects"] == 12
     assert result["screening_questions"] == ["What similar work have you done?"]
     assert result["duration_options"] == [
