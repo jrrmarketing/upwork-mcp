@@ -82,11 +82,12 @@ not expose a claim. Disputed aggregates and stale card figures are quarantined. 
 the MCP refuses `$100M+`, `$53M+`, and `81% of clients` proposal claims until dated methodology
 is attached. It does not change the existing Upwork profile title.
 
-Quantified proposal proof must repeat an exact permitted claim and identify or link the selected
-case study. Once a case study is referenced, the validator rejects any other quantified result or
-proof timeframe anywhere in the proposal unless it is the exact audited period attached to the
-same claim. Explicit experience years and clearly labelled proposal rates, bids, budgets, fees, or
-prices are treated as commercial context rather than case-study proof.
+Proposal proof must use a standalone `proposal_safe_proof_lines` value exposed with the selected
+case study. Each generated line binds the study name and one exact permitted claim; the period
+variant also binds that claim's audited period. Paraphrases, mixed-client attribution, swapped
+periods, and extra proof on the same line fail closed. Ordinary scope, experience, and commercial
+copy can remain natural on separate lines, but raw result assertions cannot replace the generated
+proof line.
 
 Current portfolio-highlight titles must be read from the live owner system. Several old titles
 conflict with audited case-study evidence, so the old digest is not an automatic selection list.

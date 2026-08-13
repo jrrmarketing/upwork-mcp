@@ -35,9 +35,21 @@ SERVICE_TERMS: Mapping[str, tuple[str, ...]] = {
     "shopping_feed_segmentation": ("shopping", "merchant center", "product feed", "feed segmentation"),
     "seo": ("seo", "organic search", "search engine optimization"),
     "local_seo": ("local seo", "google business profile", "organic search"),
-    "landing_pages": ("landing page", "unbounce", "cro", "conversion rate optimisation", "conversion rate optimization"),
+    "landing_pages": (
+        "landing page",
+        "unbounce",
+        "cro",
+        "conversion rate optimisation",
+        "conversion rate optimization",
+    ),
     "website_cro": ("website", "landing page", "cro", "conversion rate"),
-    "conversion_tracking": ("conversion tracking", "offline conversion", "attribution", "call tracking", "whatconverts"),
+    "conversion_tracking": (
+        "conversion tracking",
+        "offline conversion",
+        "attribution",
+        "call tracking",
+        "whatconverts",
+    ),
     "whatconverts_attribution": ("whatconverts", "offline conversion", "lead attribution", "call tracking"),
     "revenue_attribution": ("revenue attribution", "conversion value", "roas", "tracked revenue"),
     "call_tracking": ("call tracking", "phone calls", "whatconverts"),
@@ -82,7 +94,10 @@ TAG_TERMS: Mapping[str, tuple[str, ...]] = {
 
 
 HARD_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\b(?:google tag manager|gtm|server[- ]side tag(?:ging)?)\b", "Google Tag Manager implementation is outside JRR scope"),
+    (
+        r"\b(?:google tag manager|gtm|server[- ]side tag(?:ging)?)\b",
+        "Google Tag Manager implementation is outside JRR scope",
+    ),
     (r"\b(?:local services ads?|google lsa|lsa management)\b", "Local Services Ads management is outside JRR scope"),
     (r"\b(?:appsflyer|mobile app campaign|app install campaign)\b", "App campaign tracking is outside JRR scope"),
 )
@@ -125,8 +140,31 @@ RESULT_METRIC_PATTERN = re.compile(
     r"cpl|conversion rate|conversions?|leads?|calls?|forms?|transactions?|sales|traffic|"
     r"clicks?|keywords?|cases?|bookings?|ad spend|google ads spend|return on|performance|"
     r"results?|outcomes?|customers?|clients?|appointments?|enquiries|inquiries|purchases?|"
-    r"orders?|profits?|pipeline|growth|improved?|converted?|grew|grown|increased?|decreased?|"
-    r"reduced?|delivered?|achieved?|reached?|rose|risen|fell|fallen|dropped?|gained?|won|bought)\b",
+    r"orders?|profits?|pipeline|growth)\b",
+    re.I,
+)
+RESULT_ASSERTION_PATTERN = re.compile(
+    r"\b(?:achieved|reached|generated|delivered|produced|created|drove|driven|returned|resulted|"
+    r"tracked|converted|grew|grown|increased|decreased|reduced|improved|lowered|cut|raised|"
+    r"lifted|boosted|rose|risen|fell|fallen|dropped|gained|won|made|earned|booked|closed|"
+    r"became|happened|took|outperformed|beat|bought|doubled|tripled|quadrupled|halved)\b",
+    re.I,
+)
+SCOPE_CONTEXT_PATTERN = re.compile(
+    r"\b(?:your|you'd|you would|we'll|we will|i'll|i will|would|will|can|could|should|"
+    r"plan|recommend|propose|review|compare|audit|analyse|analyze|assess|check|inspect|"
+    r"start|focus|look at|project|scope|timeline|schedule|availability|complete|finish)\b",
+    re.I,
+)
+RAW_PROOF_SUBJECT_PATTERN = re.compile(
+    r"\b(?:case study|similar (?:account|client|campaign)|another (?:account|client|campaign)|"
+    r"previous (?:account|client|campaign)|past (?:account|client|campaign)|the (?:account|client|campaign)|"
+    r"our (?:account|client|campaign)|their (?:account|client|campaign)|that|it|they)\b",
+    re.I,
+)
+RESULT_COMPARISON_PATTERN = re.compile(
+    r"\b(?:had|has|was|were|is|are|higher|lower|better|worse|up|down|more|less|"
+    r"successful|worked|performed|outperformed|beat)\b",
     re.I,
 )
 WRITTEN_NUMBER_WORD = (
@@ -145,40 +183,18 @@ NUMERIC_VALUE_PATTERN = re.compile(
 )
 RESULT_TIMEFRAME_PATTERN = re.compile(
     rf"\b(?:in|within|over|during|across|after|before|throughout|happened in)\s+"
-    rf"(?:the\s+)?(?:\d+(?:\.\d+)?|{WRITTEN_NUMBER}|first|second|third|fourth)\s+"
+    rf"(?:(?:the|a|an)\s+)?(?:(?:\d+(?:\.\d+)?|{WRITTEN_NUMBER}|first|second|third|fourth)\s+)?"
     rf"(?:days?|weeks?|months?|quarters?|years?)\b|"
-    rf"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-    rf"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{{4}}\s+"
-    rf"(?:to|through|until|[-–—])\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
+    rf"\b(?:between\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    rf"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{{4}}\s*"
+    rf"(?:to|through|until|and|[-–—])\s*(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
     rf"may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
     rf"dec(?:ember)?)\s+\d{{4}}\b",
     re.I,
 )
-UNAPPROVED_NUMBER_PATTERN = re.compile(
-    rf"(?:\$\s*\d|[+-]?\d[\d,.]*\s*[%％]?|\b\d+(?:\.\d+)?\s*x\b|"
-    rf"\b{WRITTEN_NUMBER}\s+(?:percent|per cent)\b)",
+RESULT_FREQUENCY_PATTERN = re.compile(
+    r"\b(?:per\s+(?:day|week|month|quarter|year)|daily|weekly|monthly|quarterly|annually|yearly)\b",
     re.I,
-)
-BENIGN_NUMERIC_PATTERNS = (
-    re.compile(r"\b\d+(?:\.\d+)?\s+years?\s+(?:of\s+)?experience\b", re.I),
-    re.compile(
-        r"\b(?:worked|working|managed|managing|run|running|been|speciali[sz](?:e|ed|ing))\b"
-        r"[^.!?\n]{0,80}\bfor\s+\d+(?:\.\d+)?\s+years?\b",
-        re.I,
-    ),
-    re.compile(
-        r"\$\s*\d[\d,]*(?:\.\d+)?\s*(?:/|per\s+)(?:hr|hour)\b",
-        re.I,
-    ),
-    re.compile(
-        r"\b(?:proposed\s+)?(?:rate|bid|budget|fee|price)\s+"
-        r"(?:is|of|at|would be|:)\s*\$\s*\d[\d,]*(?:\.\d+)?\b",
-        re.I,
-    ),
-    re.compile(
-        r"\$\s*\d[\d,]*(?:\.\d+)?\s+(?:hourly\s+)?(?:rate|bid|budget|fee|price)\b",
-        re.I,
-    ),
 )
 
 
@@ -272,6 +288,32 @@ def _proof_highlight(record: ProofRecord) -> str | None:
     return None
 
 
+def proposal_safe_proof_lines(study: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Return canonical, claim-local proof lines that proposal validation can verify exactly."""
+
+    name = str(study.get("name") or "").strip()
+    if not name:
+        return []
+    evidence_periods = {
+        _normalise_claim_text(str(evidence.get("text") or "")): str(evidence.get("period") or "").strip()
+        for evidence in study.get("claim_evidence") or []
+        if isinstance(evidence, Mapping)
+    }
+    lines: list[dict[str, str]] = []
+    for raw_claim in study.get("approved_claims") or []:
+        claim = str(raw_claim).strip()
+        if not claim:
+            continue
+        line = f"A relevant example is {name}: {claim}"
+        item = {"claim": claim, "line": line}
+        period = evidence_periods.get(_normalise_claim_text(claim), "")
+        if period:
+            item["period"] = period
+            item["line_with_period"] = f"{line} Period: {period}"
+        lines.append(item)
+    return lines
+
+
 def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:
     """Return the closest verified proof, with the match strength made explicit."""
     text = _text(job)
@@ -323,6 +365,15 @@ def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str
                 "url": study.current_url,
                 "evidence_status": study.status.value,
                 "source": "Audited dated asset or individual public case-study route",
+                "proposal_safe_proof_lines": proposal_safe_proof_lines(
+                    {
+                        "name": study.name,
+                        "approved_claims": [claim.text for claim in study.permitted_claims],
+                        "claim_evidence": [
+                            {"text": claim.text, "period": claim.period} for claim in study.permitted_claims
+                        ],
+                    }
+                ),
                 "highlight": _proof_highlight(study),
             }
         )
@@ -436,12 +487,20 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     boundaries: list[str] = []
     missing: list[str] = []
 
-    google_ads = _contains_any(text, ("google ads", "google adwords", "adwords", "paid search", "ppc", "pmax", "performance max", "shopping"))
+    google_ads = _contains_any(
+        text, ("google ads", "google adwords", "adwords", "paid search", "ppc", "pmax", "performance max", "shopping")
+    )
     seo = _contains_any(text, ("seo", "search engine optimization", "organic search", "technical seo"))
     audit = _contains_any(text, ("audit", "review", "account analysis", "second opinion"))
-    lead_gen = _contains_any(text, ("lead generation", "lead gen", "bookings", "phone calls", "form leads", "qualified leads"))
-    ecommerce = _contains_any(text, ("ecommerce", "e-commerce", "shopify", "woocommerce", "merchant center", "shopping"))
-    tracking = _contains_any(text, ("conversion tracking", "offline conversion", "attribution", "tracking setup", "purchase tracking"))
+    lead_gen = _contains_any(
+        text, ("lead generation", "lead gen", "bookings", "phone calls", "form leads", "qualified leads")
+    )
+    ecommerce = _contains_any(
+        text, ("ecommerce", "e-commerce", "shopify", "woocommerce", "merchant center", "shopping")
+    )
+    tracking = _contains_any(
+        text, ("conversion tracking", "offline conversion", "attribution", "tracking setup", "purchase tracking")
+    )
     invited = bool(job.get("invited"))
 
     service_fit = 0
@@ -464,24 +523,44 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         if re.search(pattern, text, re.I):
             blockers.append(reason)
 
-    if ecommerce and tracking and _contains_any(text, ("purchase", "checkout", "pixel", "ga4 ecommerce", "ecommerce tracking")):
+    if (
+        ecommerce
+        and tracking
+        and _contains_any(text, ("purchase", "checkout", "pixel", "ga4 ecommerce", "ecommerce tracking"))
+    ):
         blockers.append("Ecommerce purchase-tracking implementation is outside JRR's WhatConverts lead-tracking scope")
 
     unsupported = [channel for channel, terms in UNSUPPORTED_CHANNELS.items() if _contains_any(text, terms)]
     if unsupported:
         if google_ads or seo:
-            boundaries.append(f"Client must accept a Google Ads/SEO-only scope; unsupported channels: {', '.join(unsupported)}")
+            boundaries.append(
+                f"Client must accept a Google Ads/SEO-only scope; unsupported channels: {', '.join(unsupported)}"
+            )
         else:
             blockers.append(f"The required work is on unsupported channels: {', '.join(unsupported)}")
 
-    employee_style = _contains_any(text, ("full-time", "full time", "35+ hrs", "35+ hours", "40 hrs", "40 hours", "embedded in", "direct client ownership"))
+    employee_style = _contains_any(
+        text,
+        (
+            "full-time",
+            "full time",
+            "35+ hrs",
+            "35+ hours",
+            "40 hrs",
+            "40 hours",
+            "embedded in",
+            "direct client ownership",
+        ),
+    )
     if employee_style:
         blockers.append("The role is employee-style or requires 35+ hours rather than consultancy support")
 
     agency = "agency" in text
     white_label = _contains_any(text, ("white label", "white-label", "consultancy", "consultant", "fractional"))
     if agency and not white_label and not employee_style:
-        boundaries.append("Confirm the agency accepts a white-label consultancy relationship rather than an employee-style role")
+        boundaries.append(
+            "Confirm the agency accepts a white-label consultancy relationship rather than an employee-style role"
+        )
 
     if tracking and not any("Tag Manager" in blocker for blocker in blockers):
         boundaries.append("Confirm the client is open to WhatConverts for lead and offline-conversion attribution")
@@ -514,7 +593,9 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     if hires and spent is not None and hires > 0:
         spend_per_hire = spent / hires
         if spend_per_hire < 100:
-            components.append(ScoreComponent("low_spend_per_hire", -9, f"Client averages only ${spend_per_hire:,.0f} spent per hire"))
+            components.append(
+                ScoreComponent("low_spend_per_hire", -9, f"Client averages only ${spend_per_hire:,.0f} spent per hire")
+            )
     if average_paid is not None and average_paid < pricing.minimum_hourly_rate * 0.7:
         components.append(ScoreComponent("low_average_rate", -6, f"Client's average paid rate is ${average_paid:g}/hr"))
 
@@ -537,7 +618,11 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     studies = select_case_studies(job)
     if studies:
         proof_points = 14 if studies[0]["match_strength"] == "exact" else 7
-        components.append(ScoreComponent("proof_fit", proof_points, f"Closest proof is {studies[0]['name']} ({studies[0]['match_strength']})"))
+        components.append(
+            ScoreComponent(
+                "proof_fit", proof_points, f"Closest proof is {studies[0]['name']} ({studies[0]['match_strength']})"
+            )
+        )
     else:
         missing.append("a genuinely related individual case study")
 
@@ -567,9 +652,20 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     else:
         recommendation = "skip"
 
-    client_quality = sum(component.points for component in components if component.name in {"payment_verified", "client_spend", "hire_rate", "client_rating", "low_spend_per_hire", "low_average_rate"})
+    client_quality = sum(
+        component.points
+        for component in components
+        if component.name
+        in {"payment_verified", "client_spend", "hire_rate", "client_rating", "low_spend_per_hire", "low_average_rate"}
+    )
     exact_proof = bool(studies and studies[0]["match_strength"] == "exact")
-    should_consider_boost = recommendation == "strong_fit" and client_quality >= 12 and exact_proof and not invited and (count is None or count < 20)
+    should_consider_boost = (
+        recommendation == "strong_fit"
+        and client_quality >= 12
+        and exact_proof
+        and not invited
+        and (count is None or count < 20)
+    )
     max_extra = min(12, int(connects or 8)) if should_consider_boost else 0
     boost = {
         "recommendation": "inspect_live_auction" if should_consider_boost else "no_boost",
@@ -585,7 +681,9 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     plan = {
         "opening": "Hey, thanks for the invite." if invited else "Hey, more than happy to take a look at this for you.",
         "proof_order": [study["name"] for study in studies],
-        "case_study_link": studies[0]["url"] if studies and studies[0]["match_strength"] == "exact" else CASE_STUDY_INDEX,
+        "case_study_link": studies[0]["url"]
+        if studies and studies[0]["match_strength"] == "exact"
+        else CASE_STUDY_INDEX,
         "mention_whatconverts": tracking and not any("Tag Manager" in blocker for blocker in blockers),
         "diagnose_before_access": False,
         "plain_text_only": True,
@@ -652,9 +750,10 @@ def validate_upwork_copy(message: str, *, invited: bool | None = None) -> dict[s
 
 
 def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """Refuse quarantined or unselected case-study proof in proposal copy."""
+    """Allow audited proof only as an exact, claim-local canonical line."""
     errors: list[str] = []
-    lowered = message.lower()
+    normalized_message = _normalise_claim_text(message)
+    lowered = normalized_message
     selected = {str(study.get("key")): study for study in selected_studies}
 
     for pattern, reason in QUARANTINED_CLAIM_PATTERNS:
@@ -662,82 +761,64 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
             errors.append(reason)
 
     for record in PROOF_MANIFEST:
-        referenced = record.current_url.lower() in lowered or record.name.lower() in lowered
+        referenced = (
+            _normalise_claim_text(record.current_url) in lowered or _normalise_claim_text(record.name) in lowered
+        )
         if referenced and record.key not in selected:
             errors.append(f"{record.name} was referenced but was not selected by the proof matcher")
 
-    if CASE_STUDY_INDEX.lower() in lowered and selected:
+    if _normalise_claim_text(CASE_STUDY_INDEX) in lowered and selected:
         exact = [study for study in selected.values() if study.get("match_strength") == "exact"]
-        if exact and not any(str(study.get("url", "")).lower() in lowered for study in exact):
+        if exact and not any(_normalise_claim_text(str(study.get("url", ""))) in lowered for study in exact):
             errors.append("Use the closest verified individual case-study URL instead of only the general index")
 
-    permitted: list[tuple[Mapping[str, Any], str]] = []
+    allowed_lines: list[tuple[Mapping[str, Any], str]] = []
+    proof_fragments: list[tuple[Mapping[str, Any], str]] = []
     for study in selected.values():
-        for claim in study.get("approved_claims") or []:
-            if isinstance(claim, str) and claim.strip():
-                permitted.append((study, _normalise_claim_text(claim)))
+        lines = proposal_safe_proof_lines(study)
+        for item in lines:
+            allowed_lines.append((study, _normalise_claim_text(item["line"])))
+            if item.get("line_with_period"):
+                allowed_lines.append((study, _normalise_claim_text(item["line_with_period"])))
+            proof_fragments.append((study, _normalise_claim_text(item["claim"])))
+            if item.get("period"):
+                proof_fragments.append((study, _normalise_claim_text(item["period"])))
 
-    covered_fragments: list[str] = []
-    referenced_studies = [study for study in selected.values() if _study_is_identified(message, study)]
-    for study in referenced_studies:
-        covered_fragments.extend(
-            (
-                _normalise_claim_text(str(study.get("name") or "")),
-                _normalise_claim_text(str(study.get("url") or "")),
-            )
-        )
-    for sentence in _numeric_result_sentences(message):
-        normalized_sentence = _normalise_claim_text(sentence)
-        matches = [
-            (study, claim)
-            for study, claim in permitted
-            if claim and _contains_exact_claim(normalized_sentence, claim)
-        ]
-        if not matches:
-            errors.append(
-                "Numeric performance claims must repeat an exact permitted claim "
-                f"from the selected proof manifest: {sentence[:160]}"
-            )
+    residual_lines: list[str] = []
+    used_studies: set[str] = set()
+    for raw_line in message.splitlines():
+        line = _normalise_claim_text(raw_line)
+        if not line:
             continue
-        if not any(_study_is_identified(message, study) for study, _ in matches):
-            errors.append(
-                "Numeric performance claims must identify or link the selected case study: "
-                f"{sentence[:160]}"
-            )
-        uncovered = normalized_sentence
-        for study, claim in matches:
-            covered_fragments.append(claim)
-            uncovered = _remove_exact_fragment(uncovered, claim)
-            name = _normalise_claim_text(str(study.get("name") or ""))
-            url = _normalise_claim_text(str(study.get("url") or ""))
-            covered_fragments.extend((name, url))
-            uncovered = _remove_exact_fragment(uncovered, name)
-            uncovered = _remove_exact_fragment(uncovered, url)
-            for evidence in study.get("claim_evidence") or []:
-                if not isinstance(evidence, Mapping):
-                    continue
-                evidence_claim = _normalise_claim_text(str(evidence.get("text") or ""))
-                if evidence_claim == claim:
-                    period = _normalise_claim_text(str(evidence.get("period") or ""))
-                    covered_fragments.append(period)
-                    uncovered = _remove_exact_fragment(uncovered, period)
-        uncovered = _strip_benign_numeric_context(uncovered)
-        if NUMERIC_VALUE_PATTERN.search(uncovered) or RESULT_TIMEFRAME_PATTERN.search(uncovered):
-            errors.append(
-                "Numeric performance sentences cannot add figures or periods beyond the "
-                f"exact permitted claim: {sentence[:160]}"
-            )
+        exact_line: tuple[Mapping[str, Any], str] | None = next(
+            ((study, allowed) for study, allowed in allowed_lines if line == allowed),
+            None,
+        )
+        if exact_line:
+            used_studies.add(str(exact_line[0].get("key") or ""))
+            continue
+        residual_lines.append(raw_line)
 
-    if referenced_studies:
-        residual = _normalise_claim_text(message)
-        for fragment in dict.fromkeys(fragment for fragment in covered_fragments if fragment):
-            residual = _remove_exact_fragment(residual, fragment)
-        residual = _strip_benign_numeric_context(residual)
-        for assertion in _uncovered_result_assertions(residual):
+    residual = "\n".join(residual_lines)
+    residual_normalized = _normalise_claim_text(residual)
+    for study, fragment in proof_fragments:
+        if fragment and _contains_exact_claim(residual_normalized, fragment):
             errors.append(
-                "Proposal proof contains a quantified result or timeframe outside the exact "
-                f"selected claim and audited period: {assertion[:160]}"
+                f"Audited proof must use one exact proposal-safe line for the selected case study: {study.get('name')}"
             )
+    for study in selected.values():
+        name = _normalise_claim_text(str(study.get("name") or ""))
+        url = _normalise_claim_text(str(study.get("url") or ""))
+        if ((name and name in residual_normalized) or (url and url in residual_normalized)) and str(
+            study.get("key") or ""
+        ) not in used_studies:
+            errors.append(
+                f"A selected case study may appear only in its exact proposal-safe proof line: {study.get('name')}"
+            )
+    for assertion in _raw_proof_assertions(residual):
+        errors.append(
+            f"Raw result assertions are not proposal-safe; use an exact generated proof line: {assertion[:160]}"
+        )
 
     return {"valid": not errors, "errors": list(dict.fromkeys(errors))}
 
@@ -751,19 +832,6 @@ def _normalise_claim_text(value: str) -> str:
     return normalized.rstrip(".!? ")
 
 
-def _numeric_result_sentences(message: str) -> list[str]:
-    """Return sentences that appear to make quantified performance claims."""
-
-    sentences = re.split(r"(?<=[.!?])\s+|\n+", message)
-    return [
-        sentence.strip()
-        for sentence in sentences
-        if sentence.strip()
-        and RESULT_METRIC_PATTERN.search(_strip_benign_numeric_context(sentence))
-        and NUMERIC_VALUE_PATTERN.search(_strip_benign_numeric_context(sentence))
-    ]
-
-
 def _contains_exact_claim(sentence: str, claim: str) -> bool:
     """Match one full normalized claim as a bounded phrase."""
 
@@ -771,43 +839,30 @@ def _contains_exact_claim(sentence: str, claim: str) -> bool:
     return re.search(pattern, sentence) is not None
 
 
-def _remove_exact_fragment(value: str, fragment: str) -> str:
-    if not fragment:
-        return value
-    pattern = rf"(?<![\w$+.-]){re.escape(fragment)}(?![\w%+-])"
-    return re.sub(pattern, " ", value)
+def _raw_proof_assertions(value: str) -> list[str]:
+    """Find evidence-like prose left outside exact generated proof lines."""
 
-
-def _uncovered_result_assertions(value: str) -> list[str]:
     assertions: list[str] = []
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", value):
         sentence = sentence.strip()
         if not sentence:
             continue
-        quantified_result = UNAPPROVED_NUMBER_PATTERN.search(sentence)
-        written_result = (
-            re.search(WRITTEN_NUMBER, sentence, re.I) and RESULT_METRIC_PATTERN.search(sentence)
+        normalized = _normalise_claim_text(sentence)
+        metric = bool(RESULT_METRIC_PATTERN.search(normalized))
+        result_verb = bool(RESULT_ASSERTION_PATTERN.search(normalized))
+        subject = bool(RAW_PROOF_SUBJECT_PATTERN.search(normalized))
+        comparison = bool(RESULT_COMPARISON_PATTERN.search(normalized))
+        value_present = bool(NUMERIC_VALUE_PATTERN.search(normalized))
+        timeframe = bool(RESULT_TIMEFRAME_PATTERN.search(normalized))
+        frequency = bool(RESULT_FREQUENCY_PATTERN.search(normalized))
+        proof_like = (
+            (metric and (result_verb or comparison))
+            or (subject and (result_verb or comparison or value_present or timeframe or frequency))
+            or (metric and value_present and not SCOPE_CONTEXT_PATTERN.search(normalized))
         )
-        result_timeframe = RESULT_TIMEFRAME_PATTERN.search(sentence)
-        if quantified_result or written_result or result_timeframe:
+        if proof_like:
             assertions.append(sentence)
     return assertions
-
-
-def _strip_benign_numeric_context(value: str) -> str:
-    """Remove explicit experience and commercial figures that are not case-study proof."""
-
-    stripped = _normalise_claim_text(value)
-    for pattern in BENIGN_NUMERIC_PATTERNS:
-        stripped = pattern.sub(" ", stripped)
-    return stripped
-
-
-def _study_is_identified(message: str, study: Mapping[str, Any]) -> bool:
-    lowered = message.casefold()
-    name = str(study.get("name") or "").strip().casefold()
-    url = str(study.get("url") or "").strip().casefold()
-    return bool((name and name in lowered) or (url and url in lowered))
 
 
 def audit_proposals(proposals: Iterable[Mapping[str, Any]], stale_after_days: int = 14) -> dict[str, Any]:
@@ -833,7 +888,9 @@ def audit_proposals(proposals: Iterable[Mapping[str, Any]], stale_after_days: in
             action = "leave_unwithdrawn"
             reason = "Withdrawing does not refund Connects or improve search visibility; leave it unless a specific risk exists"
         counts[action] = counts.get(action, 0) + 1
-        rows.append({**dict(proposal), "age_days": age_days, "maintenance_action": action, "maintenance_reason": reason})
+        rows.append(
+            {**dict(proposal), "age_days": age_days, "maintenance_action": action, "maintenance_reason": reason}
+        )
 
     return {
         "summary": counts,
