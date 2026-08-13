@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -122,12 +123,62 @@ QUARANTINED_CLAIM_PATTERNS: tuple[tuple[str, str], ...] = (
 RESULT_METRIC_PATTERN = re.compile(
     r"\b(?:revenue|roi|roas|cac|customer acquisition cost|cost per (?:case|lead|conversion)|"
     r"cpl|conversion rate|conversions?|leads?|calls?|forms?|transactions?|sales|traffic|"
-    r"clicks?|keywords?|cases?|bookings?|ad spend|google ads spend|return on)\b",
+    r"clicks?|keywords?|cases?|bookings?|ad spend|google ads spend|return on|performance|"
+    r"results?|outcomes?|customers?|clients?|appointments?|enquiries|inquiries|purchases?|"
+    r"orders?|profits?|pipeline|growth|improved?|converted?|grew|grown|increased?|decreased?|"
+    r"reduced?|delivered?|achieved?|reached?|rose|risen|fell|fallen|dropped?|gained?|won|bought)\b",
     re.I,
 )
+WRITTEN_NUMBER_WORD = (
+    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
+    r"sixty|seventy|eighty|ninety|hundred|thousand)"
+)
+WRITTEN_NUMBER = (
+    rf"(?:a |an )?{WRITTEN_NUMBER_WORD}"
+    rf"(?:[- ](?:(?:and|a|an)[- ])?{WRITTEN_NUMBER_WORD})*"
+)
 NUMERIC_VALUE_PATTERN = re.compile(
-    r"(?:\$\s*\d|[+-]?\d[\d,.]*\s*%|\b\d+(?:\.\d+)?\s*x\b|\b\d[\d,.]*\b)",
+    rf"(?:\$\s*\d|[+-]?\d[\d,.]*\s*[%％]|\b\d+(?:\.\d+)?\s*x\b|"
+    rf"\b{WRITTEN_NUMBER}\s+(?:percent|per cent)\b|\b\d[\d,.]*\b)",
     re.I,
+)
+RESULT_TIMEFRAME_PATTERN = re.compile(
+    rf"\b(?:in|within|over|during|across|after|before|throughout|happened in)\s+"
+    rf"(?:the\s+)?(?:\d+(?:\.\d+)?|{WRITTEN_NUMBER}|first|second|third|fourth)\s+"
+    rf"(?:days?|weeks?|months?|quarters?|years?)\b|"
+    rf"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    rf"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{{4}}\s+"
+    rf"(?:to|through|until|[-–—])\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
+    rf"may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    rf"dec(?:ember)?)\s+\d{{4}}\b",
+    re.I,
+)
+UNAPPROVED_NUMBER_PATTERN = re.compile(
+    rf"(?:\$\s*\d|[+-]?\d[\d,.]*\s*[%％]?|\b\d+(?:\.\d+)?\s*x\b|"
+    rf"\b{WRITTEN_NUMBER}\s+(?:percent|per cent)\b)",
+    re.I,
+)
+BENIGN_NUMERIC_PATTERNS = (
+    re.compile(r"\b\d+(?:\.\d+)?\s+years?\s+(?:of\s+)?experience\b", re.I),
+    re.compile(
+        r"\b(?:worked|working|managed|managing|run|running|been|speciali[sz](?:e|ed|ing))\b"
+        r"[^.!?\n]{0,80}\bfor\s+\d+(?:\.\d+)?\s+years?\b",
+        re.I,
+    ),
+    re.compile(
+        r"\$\s*\d[\d,]*(?:\.\d+)?\s*(?:/|per\s+)(?:hr|hour)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:proposed\s+)?(?:rate|bid|budget|fee|price)\s+"
+        r"(?:is|of|at|would be|:)\s*\$\s*\d[\d,]*(?:\.\d+)?\b",
+        re.I,
+    ),
+    re.compile(
+        r"\$\s*\d[\d,]*(?:\.\d+)?\s+(?:hourly\s+)?(?:rate|bid|budget|fee|price)\b",
+        re.I,
+    ),
 )
 
 
@@ -626,6 +677,15 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
             if isinstance(claim, str) and claim.strip():
                 permitted.append((study, _normalise_claim_text(claim)))
 
+    covered_fragments: list[str] = []
+    referenced_studies = [study for study in selected.values() if _study_is_identified(message, study)]
+    for study in referenced_studies:
+        covered_fragments.extend(
+            (
+                _normalise_claim_text(str(study.get("name") or "")),
+                _normalise_claim_text(str(study.get("url") or "")),
+            )
+        )
     for sentence in _numeric_result_sentences(message):
         normalized_sentence = _normalise_claim_text(sentence)
         matches = [
@@ -646,28 +706,37 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
             )
         uncovered = normalized_sentence
         for study, claim in matches:
+            covered_fragments.append(claim)
             uncovered = _remove_exact_fragment(uncovered, claim)
-            uncovered = _remove_exact_fragment(
-                uncovered,
-                _normalise_claim_text(str(study.get("name") or "")),
-            )
-            uncovered = _remove_exact_fragment(
-                uncovered,
-                _normalise_claim_text(str(study.get("url") or "")),
-            )
+            name = _normalise_claim_text(str(study.get("name") or ""))
+            url = _normalise_claim_text(str(study.get("url") or ""))
+            covered_fragments.extend((name, url))
+            uncovered = _remove_exact_fragment(uncovered, name)
+            uncovered = _remove_exact_fragment(uncovered, url)
             for evidence in study.get("claim_evidence") or []:
                 if not isinstance(evidence, Mapping):
                     continue
                 evidence_claim = _normalise_claim_text(str(evidence.get("text") or ""))
                 if evidence_claim == claim:
-                    uncovered = _remove_exact_fragment(
-                        uncovered,
-                        _normalise_claim_text(str(evidence.get("period") or "")),
-                    )
-        if NUMERIC_VALUE_PATTERN.search(uncovered):
+                    period = _normalise_claim_text(str(evidence.get("period") or ""))
+                    covered_fragments.append(period)
+                    uncovered = _remove_exact_fragment(uncovered, period)
+        uncovered = _strip_benign_numeric_context(uncovered)
+        if NUMERIC_VALUE_PATTERN.search(uncovered) or RESULT_TIMEFRAME_PATTERN.search(uncovered):
             errors.append(
                 "Numeric performance sentences cannot add figures or periods beyond the "
                 f"exact permitted claim: {sentence[:160]}"
+            )
+
+    if referenced_studies:
+        residual = _normalise_claim_text(message)
+        for fragment in dict.fromkeys(fragment for fragment in covered_fragments if fragment):
+            residual = _remove_exact_fragment(residual, fragment)
+        residual = _strip_benign_numeric_context(residual)
+        for assertion in _uncovered_result_assertions(residual):
+            errors.append(
+                "Proposal proof contains a quantified result or timeframe outside the exact "
+                f"selected claim and audited period: {assertion[:160]}"
             )
 
     return {"valid": not errors, "errors": list(dict.fromkeys(errors))}
@@ -676,7 +745,8 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
 def _normalise_claim_text(value: str) -> str:
     """Normalize punctuation and spacing without changing a claim's numbers."""
 
-    normalized = value.casefold().replace("’", "'").replace("–", "-").replace("—", "-")
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = normalized.casefold().replace("’", "'").replace("–", "-").replace("—", "-")
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized.rstrip(".!? ")
 
@@ -689,23 +759,48 @@ def _numeric_result_sentences(message: str) -> list[str]:
         sentence.strip()
         for sentence in sentences
         if sentence.strip()
-        and RESULT_METRIC_PATTERN.search(sentence)
-        and NUMERIC_VALUE_PATTERN.search(sentence)
+        and RESULT_METRIC_PATTERN.search(_strip_benign_numeric_context(sentence))
+        and NUMERIC_VALUE_PATTERN.search(_strip_benign_numeric_context(sentence))
     ]
 
 
 def _contains_exact_claim(sentence: str, claim: str) -> bool:
     """Match one full normalized claim as a bounded phrase."""
 
-    pattern = rf"(?<![\w$+.,-]){re.escape(claim)}(?![\w%+.,-])"
+    pattern = rf"(?<![\w$+.-]){re.escape(claim)}(?![\w%+-])"
     return re.search(pattern, sentence) is not None
 
 
 def _remove_exact_fragment(value: str, fragment: str) -> str:
     if not fragment:
         return value
-    pattern = rf"(?<![\w$+.,-]){re.escape(fragment)}(?![\w%+.,-])"
+    pattern = rf"(?<![\w$+.-]){re.escape(fragment)}(?![\w%+-])"
     return re.sub(pattern, " ", value)
+
+
+def _uncovered_result_assertions(value: str) -> list[str]:
+    assertions: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", value):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        quantified_result = UNAPPROVED_NUMBER_PATTERN.search(sentence)
+        written_result = (
+            re.search(WRITTEN_NUMBER, sentence, re.I) and RESULT_METRIC_PATTERN.search(sentence)
+        )
+        result_timeframe = RESULT_TIMEFRAME_PATTERN.search(sentence)
+        if quantified_result or written_result or result_timeframe:
+            assertions.append(sentence)
+    return assertions
+
+
+def _strip_benign_numeric_context(value: str) -> str:
+    """Remove explicit experience and commercial figures that are not case-study proof."""
+
+    stripped = _normalise_claim_text(value)
+    for pattern in BENIGN_NUMERIC_PATTERNS:
+        stripped = pattern.sub(" ", stripped)
+    return stripped
 
 
 def _study_is_identified(message: str, study: Mapping[str, Any]) -> bool:

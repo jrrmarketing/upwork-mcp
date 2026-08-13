@@ -282,6 +282,78 @@ def test_exact_audited_period_is_allowed_with_its_matching_claim():
     assert result["valid"] is True
 
 
+def test_adjacent_and_written_proof_bypasses_are_rejected():
+    selected = [
+        {
+            "key": "priority-one-plumbing",
+            "name": "Priority 1 Plumbing",
+            "url": (
+                "https://josiahroche.co/digital-marketing-case-studies/"
+                "local-plumber-marketing-agency"
+            ),
+            "approved_claims": ["1,258 tracked leads."],
+            "claim_evidence": [
+                {
+                    "text": "1,258 tracked leads.",
+                    "period": "September 2023 to July 2024.",
+                }
+            ],
+        }
+    ]
+    messages = (
+        "Priority 1 Plumbing generated 1,258 tracked leads. That happened in 30 days.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. Performance improved by 99%.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. It converted 99% better.",
+        "Priority 1 Plumbing generated 1,258 tracked leads in thirty days.",
+        "Priority 1 Plumbing generated 1,258 tracked leads in one month.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. September 2020 to July 2021.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. Performance improved by ninety-nine percent.",
+        "Priority 1 Plumbing generated 1,258 tracked leads in one hundred and twenty days.",
+        "Priority 1 Plumbing generated 1,258 tracked leads in a hundred days.",
+        "Priority 1 Plumbing generated 1,258 tracked leads during the first month.",
+        "Priority 1 Plumbing generated 1,258 tracked leads in one quarter.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. September 2020–July 2021.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. Between September 2020 and July 2021.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. Outcomes rose by 99%.",
+        "Priority 1 Plumbing generated 1,258 tracked leads. 99% more became customers.",
+    )
+    for message in messages:
+        result = validate_proof_claims(message, selected)
+        assert result["valid"] is False, message
+        assert any("outside the exact selected claim" in error for error in result["errors"])
+
+
+def test_case_proof_does_not_block_experience_years_or_bid_rate():
+    selected = [
+        {
+            "key": "priority-one-plumbing",
+            "name": "Priority 1 Plumbing",
+            "url": (
+                "https://josiahroche.co/digital-marketing-case-studies/"
+                "local-plumber-marketing-agency"
+            ),
+            "approved_claims": ["1,258 tracked leads."],
+        }
+    ]
+    result = validate_proof_claims(
+        (
+            "Priority 1 Plumbing generated 1,258 tracked leads. "
+            "I've worked in Google Ads for 10 years, and the proposed rate is $63/hr."
+        ),
+        selected,
+    )
+    assert result["valid"] is True
+
+    result = validate_proof_claims(
+        (
+            "Priority 1 Plumbing generated 1,258 tracked leads. "
+            "With 10 years of experience, I can improve results at $63/hr."
+        ),
+        selected,
+    )
+    assert result["valid"] is True
+
+
 def test_exact_numeric_result_must_identify_or_link_the_case_study():
     selected = [
         {

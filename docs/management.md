@@ -83,8 +83,10 @@ the MCP refuses `$100M+`, `$53M+`, and `81% of clients` proposal claims until da
 is attached. It does not change the existing Upwork profile title.
 
 Quantified proposal proof must repeat an exact permitted claim and identify or link the selected
-case study. The validator also rejects any additional number or period in that result sentence
-unless it is the exact audited period attached to the same claim.
+case study. Once a case study is referenced, the validator rejects any other quantified result or
+proof timeframe anywhere in the proposal unless it is the exact audited period attached to the
+same claim. Explicit experience years and clearly labelled proposal rates, bids, budgets, fees, or
+prices are treated as commercial context rather than case-study proof.
 
 Current portfolio-highlight titles must be read from the live owner system. Several old titles
 conflict with audited case-study evidence, so the old digest is not an automatic selection list.
