@@ -1,0 +1,663 @@
+"""Deterministic JRR decision support for Upwork opportunities.
+
+This module deliberately contains no browser automation and performs no writes.  It
+turns live Upwork facts into a recommendation that can be unit tested before those
+facts are used in a proposal workflow.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from .proof_manifest import PROOF_MANIFEST, EvidenceStatus, ProofRecord
+
+CASE_STUDY_INDEX = "https://josiahroche.co/digital-marketing-case-studies"
+
+
+SEARCH_CERTIFICATION = "Google Ads Search Certification"
+
+SERVICE_TERMS: Mapping[str, tuple[str, ...]] = {
+    "google_ads": ("google ads", "adwords", "ppc", "paid search", "pmax", "performance max", "shopping"),
+    "paid_search": ("google ads", "adwords", "ppc", "paid search"),
+    "paid_search_audit": ("audit", "review", "account analysis"),
+    "paid_search_restructure": ("restructure", "campaign structure", "account structure", "audit"),
+    "account_restructure": ("restructure", "campaign structure", "account structure"),
+    "performance_max": ("pmax", "performance max"),
+    "performance_max_audit": ("pmax", "performance max", "audit"),
+    "shopping": ("shopping", "merchant center", "product feed"),
+    "shopping_feed_segmentation": ("shopping", "merchant center", "product feed", "feed segmentation"),
+    "seo": ("seo", "organic search", "search engine optimization"),
+    "local_seo": ("local seo", "google business profile", "organic search"),
+    "landing_pages": ("landing page", "unbounce", "cro", "conversion rate optimisation", "conversion rate optimization"),
+    "website_cro": ("website", "landing page", "cro", "conversion rate"),
+    "conversion_tracking": ("conversion tracking", "offline conversion", "attribution", "call tracking", "whatconverts"),
+    "whatconverts_attribution": ("whatconverts", "offline conversion", "lead attribution", "call tracking"),
+    "revenue_attribution": ("revenue attribution", "conversion value", "roas", "tracked revenue"),
+    "call_tracking": ("call tracking", "phone calls", "whatconverts"),
+    "lead_tracking": ("lead tracking", "call tracking", "form tracking", "whatconverts"),
+    "lead_attribution": ("lead attribution", "offline conversion", "whatconverts"),
+    "local_paid_search": ("local", "google ads", "paid search", "ppc"),
+    "local_lead_generation": ("local", "lead generation", "calls", "bookings"),
+    "geo_targeting": ("geo targeting", "location targeting", "geographic"),
+    "audience_targeting": ("audience", "age targeting", "demographic"),
+    "brand_protection": ("brand campaign", "brand protection", "branded search"),
+    "team_handover": ("team", "training", "handover"),
+}
+
+TAG_TERMS: Mapping[str, tuple[str, ...]] = {
+    "legal": ("law", "legal", "attorney", "lawyer"),
+    "law_firm": ("law firm", "attorney", "lawyer"),
+    "family_law": ("family law", "divorce", "custody"),
+    "criminal_defense": ("criminal defense", "criminal defence", "dui", "dwi"),
+    "ssdi": ("ssdi", "social security disability"),
+    "disability_law": ("disability law", "disability attorney", "ssdi"),
+    "ecommerce": ("ecommerce", "e-commerce", "shopify", "woocommerce", "shopping"),
+    "furniture": ("furniture", "cushion", "home decor"),
+    "home_services": ("home service", "plumber", "plumbing", "hvac", "roofing", "contractor", "window tint"),
+    "plumbing": ("plumber", "plumbing"),
+    "trades": ("trades", "plumber", "plumbing", "hvac", "roofing", "contractor", "cabinet"),
+    "home_improvement": ("home improvement", "remodel", "cabinet", "contractor"),
+    "window_tinting": ("window tint", "architectural tint", "solar film"),
+    "beauty": ("beauty", "aesthetic", "cosmetic", "med spa", "head spa"),
+    "wellness": ("wellness", "spa"),
+    "spa": ("spa", "med spa"),
+    "med_spa_adjacent": ("med spa", "aesthetic", "cosmetic", "beauty clinic", "private surgery"),
+    "healthcare": ("healthcare", "medical", "clinic", "private surgery"),
+    "private_clinic": ("private clinic", "clinic", "private healthcare"),
+    "medical_marketing": ("medical marketing", "healthcare marketing", "clinic"),
+    "b2b": ("b2b", "business to business"),
+    "manufacturing": ("manufacturing", "manufacturer", "industrial"),
+    "industrial": ("industrial", "manufacturing", "manufacturer"),
+    "high_ticket": ("high ticket", "high-ticket", "capital equipment", "large contract"),
+    "local_business": ("local business", "local service"),
+    "cabinet_maker": ("cabinet", "cabinetry", "joinery"),
+}
+
+
+HARD_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\b(?:google tag manager|gtm|server[- ]side tag(?:ging)?)\b", "Google Tag Manager implementation is outside JRR scope"),
+    (r"\b(?:local services ads?|google lsa|lsa management)\b", "Local Services Ads management is outside JRR scope"),
+    (r"\b(?:appsflyer|mobile app campaign|app install campaign)\b", "App campaign tracking is outside JRR scope"),
+)
+
+UNSUPPORTED_CHANNELS = {
+    "meta": ("meta ads", "facebook ads", "instagram ads"),
+    "linkedin": ("linkedin ads", "linkedin campaign manager"),
+    "reddit": ("reddit ads",),
+    "tiktok": ("tiktok ads",),
+    "capterra": ("capterra",),
+}
+
+SALESY_PHRASES = (
+    "i'm an expert",
+    "i am an expert",
+    "i'm highly experienced",
+    "i am highly experienced",
+    "i'd love the opportunity",
+    "best practices",
+    "drive growth",
+    "unlock opportunities",
+    "robust strategy",
+    "tailored approach",
+    "comprehensive solution",
+    "data-driven insights",
+    "synergy",
+    "here's where i'd start",
+    "this is where i'd start",
+    "the first thing i'd look at",
+)
+
+QUARANTINED_CLAIM_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\$?100\s*m(?:illion)?\+?", "The $100M+ aggregate has no audited methodology"),
+    (r"\$?53\s*m(?:illion)?\+?", "The $53M+ aggregate has no audited methodology"),
+    (r"81%\s+of\s+clients", "The 81% client-improvement claim has no audited denominator or period"),
+)
+
+
+@dataclass
+class PricingContext:
+    """Upwork acquisition pricing, distinct from JRR's founder advisory rate.
+
+    The $63 profile rate and $50 conditional floor reflect the owner's approved
+    Upwork-only lead-acquisition positioning. JRR's current founder advisory
+    benchmark is recorded separately so a cheap Upwork profile never becomes the
+    default delivery price or a fabricated project quote.
+    """
+
+    profile_hourly_rate: float = 63.0
+    minimum_hourly_rate: float = 50.0
+    minimum_fixed_fee: float | None = None
+    founder_advisory_benchmark: float = 175.0
+    source_version: str = "upwork-profile-owner-approved-63-usd; jrr-pricing-2026-08-13"
+
+
+@dataclass
+class ScoreComponent:
+    name: str
+    points: int
+    reason: str
+
+
+@dataclass
+class JobAnalysis:
+    recommendation: str
+    score: int
+    components: list[ScoreComponent]
+    blockers: list[str]
+    scope_boundaries: list[str]
+    missing_evidence: list[str]
+    case_studies: list[dict[str, Any]]
+    profile_highlights: list[str]
+    pricing: dict[str, Any]
+    boost: dict[str, Any]
+    proposal_plan: dict[str, Any]
+
+    def model_dump(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _text(job: Mapping[str, Any]) -> str:
+    parts: list[str] = [str(job.get("title") or ""), str(job.get("description") or "")]
+    parts.extend(str(item) for item in (job.get("skills") or []))
+    return " ".join(parts).lower()
+
+
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", "").replace("$", "")
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*([kmb])?", text, re.I)
+    if not match:
+        return None
+    result = float(match.group(1))
+    suffix = (match.group(2) or "").lower()
+    result *= {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(suffix, 1)
+    return result
+
+
+def _client(job: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = job.get("client")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _contains_any(text: str, terms: Iterable[str]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _proof_terms(values: Iterable[str], mapping: Mapping[str, tuple[str, ...]]) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        normalized = value.strip().lower()
+        terms.extend(mapping.get(normalized, (normalized.replace("_", " "),)))
+    return list(dict.fromkeys(terms))
+
+
+def _proof_highlight(record: ProofRecord) -> str | None:
+    """Return only highlights whose visible Upwork title is currently verified.
+
+    Portfolio-card titles have drifted independently from the website proof. Until
+    those titles are audited in the owner system, the certificate is the only safe
+    automatic attachment recommendation.
+    """
+    return None
+
+
+def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:
+    """Return the closest verified proof, with the match strength made explicit."""
+    text = _text(job)
+    ranked: list[tuple[int, ProofRecord, list[str], list[str]]] = []
+    for study in PROOF_MANIFEST:
+        routing_tags = [tag for tag in study.allowed_job_tags if tag in TAG_TERMS]
+        allowed_terms = _proof_terms(routing_tags, TAG_TERMS)
+        service_terms = _proof_terms(study.services, SERVICE_TERMS)
+        blocked_terms = _proof_terms(study.blocked_job_tags, TAG_TERMS)
+        vertical_hits = [term for term in allowed_terms if term in text]
+        service_hits = [term for term in service_terms if term in text]
+        blocked_hits = [term for term in blocked_terms if term in text]
+        # Service overlap alone is not case-study relevance. Require an audited
+        # vertical/business-model tag before exposing any permitted claim.
+        if not vertical_hits:
+            continue
+        score = min(36, len(vertical_hits) * 12) + min(16, len(service_hits) * 4)
+        if vertical_hits:
+            score += 8
+        if blocked_hits:
+            score -= 24
+        if study.status is EvidenceStatus.ROUTE_ONLY_WITH_CAVEAT:
+            score -= 3
+        if score:
+            ranked.append((score, study, vertical_hits + service_hits, blocked_hits))
+
+    ranked.sort(key=lambda item: (-item[0], item[1].name))
+    selected: list[dict[str, Any]] = []
+    for score, study, matched, blocked_hits in ranked:
+        if score <= 0 or blocked_hits:
+            continue
+        selected.append(
+            {
+                "key": study.key,
+                "name": study.name,
+                "match_strength": "exact" if score >= 24 else "adjacent",
+                "matched_on": list(dict.fromkeys(matched)),
+                "approved_claims": [claim.text for claim in study.permitted_claims],
+                "claim_evidence": [
+                    {
+                        "text": claim.text,
+                        "period": claim.period,
+                        "source": claim.source,
+                        "status": claim.status.value,
+                    }
+                    for claim in study.permitted_claims
+                ],
+                "limitations": list(study.limitations),
+                "url": study.current_url,
+                "evidence_status": study.status.value,
+                "source": "Audited dated asset or individual public case-study route",
+                "highlight": _proof_highlight(study),
+            }
+        )
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def recommended_highlights(job: Mapping[str, Any], case_studies: list[dict[str, Any]] | None = None) -> list[str]:
+    studies = case_studies if case_studies is not None else select_case_studies(job, limit=3)
+    highlights = [study["highlight"] for study in studies if study.get("highlight")]
+    if _contains_any(_text(job), ("google ads", "adwords", "paid search", "ppc", "pmax", "performance max")):
+        highlights.append(SEARCH_CERTIFICATION)
+    return list(dict.fromkeys(highlights))[:4]
+
+
+def _proposal_count(job: Mapping[str, Any]) -> int | None:
+    value = job.get("proposal_count") or job.get("proposals") or job.get("applicants_count")
+    if isinstance(value, int):
+        return value
+    if value is None:
+        return None
+    numbers = [int(number) for number in re.findall(r"\d+", str(value))]
+    return max(numbers) if numbers else None
+
+
+def _recommend_price(job: Mapping[str, Any], context: PricingContext, service_fit: int) -> dict[str, Any]:
+    job_type = str(job.get("job_type") or "").lower()
+    rate_min = _number(job.get("hourly_rate_min") or job.get("rate_min"))
+    rate_max = _number(job.get("hourly_rate_max") or job.get("rate_max"))
+    budget_min = _number(job.get("budget_min"))
+    budget_max = _number(job.get("budget_max") or job.get("budget"))
+    assumptions: list[str] = []
+
+    if "hour" in job_type or rate_min is not None or rate_max is not None:
+        if rate_max is None:
+            recommended = context.profile_hourly_rate
+            position = "profile_rate"
+        elif rate_max >= context.profile_hourly_rate:
+            recommended = (
+                min(rate_min, context.founder_advisory_benchmark)
+                if rate_min is not None and rate_min > context.profile_hourly_rate
+                else context.profile_hourly_rate
+            )
+            position = "within_client_range"
+        elif rate_max >= context.minimum_hourly_rate and service_fit >= 30:
+            recommended = rate_max
+            position = "price_conversion_opportunity"
+        else:
+            recommended = context.minimum_hourly_rate
+            position = "above_client_range"
+        defensible_low = min(
+            max(context.minimum_hourly_rate, rate_min or context.minimum_hourly_rate),
+            context.founder_advisory_benchmark,
+        )
+        defensible_high = max(
+            recommended,
+            min(rate_max or context.profile_hourly_rate, context.founder_advisory_benchmark),
+        )
+        return {
+            "type": "hourly",
+            "recommended_bid": recommended,
+            "defensible_range": [defensible_low, defensible_high],
+            "profile_rate": context.profile_hourly_rate,
+            "minimum_hourly_rate": context.minimum_hourly_rate,
+            "founder_advisory_benchmark": context.founder_advisory_benchmark,
+            "pricing_source_version": context.source_version,
+            "client_range": [rate_min, rate_max],
+            "position": position,
+            "requires_owner_approval": True,
+            "below_floor_exception": recommended < context.minimum_hourly_rate,
+            "live_fee_preview_required": True,
+            "expected_net": None,
+            "assumptions": assumptions,
+        }
+
+    if context.minimum_fixed_fee is None:
+        assumptions.append("No current minimum fixed fee is configured, so the owner must choose the fixed bid")
+        recommended_fixed: float | None = None
+        position = "owner_decision_required"
+    elif budget_max is not None and budget_max >= context.minimum_fixed_fee:
+        recommended_fixed = budget_max
+        position = "match_posted_budget"
+    else:
+        recommended_fixed = context.minimum_fixed_fee
+        position = "price_conversion_opportunity" if service_fit >= 30 else "above_client_budget"
+
+    return {
+        "type": "fixed",
+        "recommended_bid": recommended_fixed,
+        "defensible_range": None,
+        "minimum_fixed_fee": context.minimum_fixed_fee,
+        "founder_advisory_benchmark": context.founder_advisory_benchmark,
+        "pricing_source_version": context.source_version,
+        "client_budget": [budget_min, budget_max],
+        "position": position,
+        "requires_owner_approval": True,
+        "below_floor_exception": False,
+        "live_fee_preview_required": True,
+        "expected_net": None,
+        "assumptions": assumptions,
+    }
+
+
+def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -> JobAnalysis:
+    """Evaluate one live job against JRR's current Upwork operating rules."""
+    pricing = pricing or PricingContext()
+    text = _text(job)
+    components: list[ScoreComponent] = []
+    blockers: list[str] = []
+    boundaries: list[str] = []
+    missing: list[str] = []
+
+    google_ads = _contains_any(text, ("google ads", "google adwords", "adwords", "paid search", "ppc", "pmax", "performance max", "shopping"))
+    seo = _contains_any(text, ("seo", "search engine optimization", "organic search", "technical seo"))
+    audit = _contains_any(text, ("audit", "review", "account analysis", "second opinion"))
+    lead_gen = _contains_any(text, ("lead generation", "lead gen", "bookings", "phone calls", "form leads", "qualified leads"))
+    ecommerce = _contains_any(text, ("ecommerce", "e-commerce", "shopify", "woocommerce", "merchant center", "shopping"))
+    tracking = _contains_any(text, ("conversion tracking", "offline conversion", "attribution", "tracking setup", "purchase tracking"))
+    invited = bool(job.get("invited"))
+
+    service_fit = 0
+    if google_ads:
+        service_fit += 32
+        components.append(ScoreComponent("google_ads_fit", 32, "Google Ads is a core JRR service"))
+    if seo:
+        service_fit += 20
+        components.append(ScoreComponent("seo_fit", 20, "SEO is a core JRR service"))
+    if audit:
+        service_fit += 10
+        components.append(ScoreComponent("audit_fit", 10, "Account audits and reviews are strong entry offers"))
+    if lead_gen:
+        service_fit += 6
+        components.append(ScoreComponent("lead_generation_fit", 6, "Lead-generation outcomes match JRR's proof base"))
+    if not (google_ads or seo):
+        blockers.append("The role does not contain a core Google Ads or SEO scope")
+
+    for pattern, reason in HARD_SCOPE_PATTERNS:
+        if re.search(pattern, text, re.I):
+            blockers.append(reason)
+
+    if ecommerce and tracking and _contains_any(text, ("purchase", "checkout", "pixel", "ga4 ecommerce", "ecommerce tracking")):
+        blockers.append("Ecommerce purchase-tracking implementation is outside JRR's WhatConverts lead-tracking scope")
+
+    unsupported = [channel for channel, terms in UNSUPPORTED_CHANNELS.items() if _contains_any(text, terms)]
+    if unsupported:
+        if google_ads or seo:
+            boundaries.append(f"Client must accept a Google Ads/SEO-only scope; unsupported channels: {', '.join(unsupported)}")
+        else:
+            blockers.append(f"The required work is on unsupported channels: {', '.join(unsupported)}")
+
+    employee_style = _contains_any(text, ("full-time", "full time", "35+ hrs", "35+ hours", "40 hrs", "40 hours", "embedded in", "direct client ownership"))
+    if employee_style:
+        blockers.append("The role is employee-style or requires 35+ hours rather than consultancy support")
+
+    agency = "agency" in text
+    white_label = _contains_any(text, ("white label", "white-label", "consultancy", "consultant", "fractional"))
+    if agency and not white_label and not employee_style:
+        boundaries.append("Confirm the agency accepts a white-label consultancy relationship rather than an employee-style role")
+
+    if tracking and not any("Tag Manager" in blocker for blocker in blockers):
+        boundaries.append("Confirm the client is open to WhatConverts for lead and offline-conversion attribution")
+
+    client = _client(job)
+    payment_verified = bool(client.get("payment_verified") or job.get("client_payment_verified"))
+    spent = _number(client.get("total_spent") or job.get("client_total_spent"))
+    hires = _number(client.get("total_hires") or job.get("client_total_hires"))
+    hire_rate = _number(client.get("hire_rate") or job.get("client_hire_rate"))
+    rating = _number(client.get("rating") or job.get("client_feedback_rating"))
+    average_paid = _number(client.get("avg_hourly_rate_paid") or job.get("client_avg_hourly_rate_paid"))
+
+    if payment_verified:
+        components.append(ScoreComponent("payment_verified", 7, "Client payment method is verified"))
+    else:
+        components.append(ScoreComponent("payment_unverified", -5, "Payment verification is missing"))
+        missing.append("client payment verification")
+    if spent is not None:
+        points = 8 if spent >= 10_000 else 4 if spent >= 1_000 else -2
+        components.append(ScoreComponent("client_spend", points, f"Client has ${spent:,.0f} of Upwork spend"))
+    else:
+        missing.append("client total spend")
+    if hire_rate is not None:
+        points = 5 if hire_rate >= 60 else 0 if hire_rate >= 30 else -5
+        components.append(ScoreComponent("hire_rate", points, f"Client hire rate is {hire_rate:g}%"))
+    else:
+        missing.append("client hire rate")
+    if rating is not None and rating >= 4.7:
+        components.append(ScoreComponent("client_rating", 4, f"Client rating is {rating:g}"))
+    if hires and spent is not None and hires > 0:
+        spend_per_hire = spent / hires
+        if spend_per_hire < 100:
+            components.append(ScoreComponent("low_spend_per_hire", -9, f"Client averages only ${spend_per_hire:,.0f} spent per hire"))
+    if average_paid is not None and average_paid < pricing.minimum_hourly_rate * 0.7:
+        components.append(ScoreComponent("low_average_rate", -6, f"Client's average paid rate is ${average_paid:g}/hr"))
+
+    count = _proposal_count(job)
+    if invited:
+        components.append(ScoreComponent("invited", 10, "The client viewed the profile and invited a response"))
+    if count is None:
+        missing.append("live proposal count")
+    elif count <= 5:
+        components.append(ScoreComponent("competition", 12, f"Only {count} proposals"))
+    elif count <= 10:
+        components.append(ScoreComponent("competition", 8, f"Proposal count is {count}"))
+    elif count < 20:
+        components.append(ScoreComponent("competition", 3, f"Proposal count is {count}"))
+    elif count < 50:
+        components.append(ScoreComponent("competition", -10, f"Competition is high at {count} proposals"))
+    else:
+        components.append(ScoreComponent("competition", -18, f"Competition is very high at {count}+ proposals"))
+
+    studies = select_case_studies(job)
+    if studies:
+        proof_points = 14 if studies[0]["match_strength"] == "exact" else 7
+        components.append(ScoreComponent("proof_fit", proof_points, f"Closest proof is {studies[0]['name']} ({studies[0]['match_strength']})"))
+    else:
+        missing.append("a genuinely related individual case study")
+
+    connects = _number(job.get("connects_required"))
+    if connects is not None and connects >= 20:
+        components.append(ScoreComponent("connect_cost", -3, f"Base application costs {connects:g} Connects"))
+
+    price = _recommend_price(job, pricing, service_fit)
+    if price["position"] in {"within_client_range", "profile_rate", "match_posted_budget"}:
+        components.append(ScoreComponent("price_fit", 6, "The client range can accommodate the recommended bid"))
+    elif price["position"] == "price_conversion_opportunity":
+        components.append(ScoreComponent("price_fit", -3, "The posted price needs a consultative conversion"))
+    elif price["position"] in {"above_client_range", "above_client_budget"}:
+        components.append(ScoreComponent("price_fit", -12, "The client range is below the configured minimum"))
+
+    score = max(0, min(100, sum(component.points for component in components)))
+    if blockers:
+        recommendation = "skip"
+    elif price["position"] == "price_conversion_opportunity" and score >= 45:
+        recommendation = "price_conversion"
+    elif score >= 70 and not boundaries:
+        recommendation = "strong_fit"
+    elif score >= 55:
+        recommendation = "fit"
+    elif score >= 40:
+        recommendation = "speculative"
+    else:
+        recommendation = "skip"
+
+    client_quality = sum(component.points for component in components if component.name in {"payment_verified", "client_spend", "hire_rate", "client_rating", "low_spend_per_hire", "low_average_rate"})
+    exact_proof = bool(studies and studies[0]["match_strength"] == "exact")
+    should_consider_boost = recommendation == "strong_fit" and client_quality >= 12 and exact_proof and not invited and (count is None or count < 20)
+    max_extra = min(12, int(connects or 8)) if should_consider_boost else 0
+    boost = {
+        "recommendation": "inspect_live_auction" if should_consider_boost else "no_boost",
+        "max_extra_connects": max_extra,
+        "reason": (
+            "This is an unusually strong fit; inspect the live auction before deciding"
+            if should_consider_boost
+            else "Invites, ordinary fits, scope boundaries, weak proof, or weak client economics should remain unboosted"
+        ),
+        "requires_owner_approval": should_consider_boost,
+    }
+
+    plan = {
+        "opening": "Hey, thanks for the invite." if invited else "Hey, more than happy to take a look at this for you.",
+        "proof_order": [study["name"] for study in studies],
+        "case_study_link": studies[0]["url"] if studies and studies[0]["match_strength"] == "exact" else CASE_STUDY_INDEX,
+        "mention_whatconverts": tracking and not any("Tag Manager" in blocker for blocker in blockers),
+        "diagnose_before_access": False,
+        "plain_text_only": True,
+        "requires_exact_copy_approval": True,
+    }
+
+    return JobAnalysis(
+        recommendation=recommendation,
+        score=score,
+        components=components,
+        blockers=list(dict.fromkeys(blockers)),
+        scope_boundaries=list(dict.fromkeys(boundaries)),
+        missing_evidence=list(dict.fromkeys(missing)),
+        case_studies=studies,
+        profile_highlights=recommended_highlights(job, studies),
+        pricing=price,
+        boost=boost,
+        proposal_plan=plan,
+    )
+
+
+def payload_digest(payload: Mapping[str, Any]) -> str:
+    """Return a stable digest used to lock approved copy and commercial terms."""
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def validate_upwork_copy(message: str, *, invited: bool | None = None) -> dict[str, Any]:
+    """Validate proposal/message copy without generating or sending anything."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    lowered = message.lower()
+    words = re.findall(r"\b[\w'$%+.-]+\b", message)
+
+    if invited is True and not message.startswith("Hey, thanks for the invite."):
+        errors.append('Invited proposals must start with "Hey, thanks for the invite."')
+    if invited is False and not message.startswith("Hey, more than happy to take a look"):
+        warnings.append("The opening does not use the normal non-invited proposal wording")
+    if re.search(r"(?m)^\s*(?:[-*#]|\d+[.)]\s)", message):
+        errors.append("Upwork proposals must be plain paragraphs without Markdown headings or lists")
+    if "—" in message or "–" in message:
+        errors.append("Routine Upwork copy cannot contain em dashes or en dashes")
+    if re.search(r"\bcalendly\b|mailto:|\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", lowered):
+        errors.append("Pre-contract Upwork copy cannot include booking links or email addresses")
+    if re.search(r"(?:\+?\d[\d\s().-]{8,}\d)", message):
+        errors.append("Pre-contract Upwork copy appears to include a phone number")
+    for phrase in SALESY_PHRASES:
+        if phrase in lowered:
+            errors.append(f'Remove salesy or template-like wording: "{phrase}"')
+    if len(words) > 500:
+        errors.append(f"Proposal is {len(words)} words; the maximum is 500")
+    elif len(words) > 250:
+        warnings.append(f"Proposal is {len(words)} words; shorter often performs better")
+    if not re.search(r"\n\s*\n", message):
+        warnings.append("Use blank lines between short paragraphs")
+
+    return {
+        "valid": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "word_count": len(words),
+        "copy_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+    }
+
+
+def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Refuse quarantined or unselected case-study proof in proposal copy."""
+    errors: list[str] = []
+    lowered = message.lower()
+    selected = {str(study.get("key")): study for study in selected_studies}
+
+    for pattern, reason in QUARANTINED_CLAIM_PATTERNS:
+        if re.search(pattern, message, re.I):
+            errors.append(reason)
+
+    for record in PROOF_MANIFEST:
+        referenced = record.current_url.lower() in lowered or record.name.lower() in lowered
+        if referenced and record.key not in selected:
+            errors.append(f"{record.name} was referenced but was not selected by the proof matcher")
+
+    if CASE_STUDY_INDEX.lower() in lowered and selected:
+        exact = [study for study in selected.values() if study.get("match_strength") == "exact"]
+        if exact and not any(str(study.get("url", "")).lower() in lowered for study in exact):
+            errors.append("Use the closest verified individual case-study URL instead of only the general index")
+
+    return {"valid": not errors, "errors": list(dict.fromkeys(errors))}
+
+
+def audit_proposals(proposals: Iterable[Mapping[str, Any]], stale_after_days: int = 14) -> dict[str, Any]:
+    """Classify proposal maintenance without recommending wasteful withdrawals."""
+    now = datetime.now(UTC)
+    rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for proposal in proposals:
+        status = str(proposal.get("status") or "").lower()
+        age_days = _age_in_days(proposal.get("submitted") or proposal.get("submitted_at"), now)
+        viewed = bool(proposal.get("client_viewed"))
+        interviewed = bool(proposal.get("interview_status") or proposal.get("interviewing"))
+        if any(term in status for term in ("archived", "closed", "withdrawn", "declined")):
+            action = "no_action_closed"
+            reason = "Upwork has already closed or archived this item"
+        elif viewed or interviewed:
+            action = "keep"
+            reason = "The client viewed it or an interview signal exists"
+        elif age_days is None or age_days < stale_after_days:
+            action = "keep"
+            reason = "It is recent enough to remain open"
+        else:
+            action = "leave_unwithdrawn"
+            reason = "Withdrawing does not refund Connects or improve search visibility; leave it unless a specific risk exists"
+        counts[action] = counts.get(action, 0) + 1
+        rows.append({**dict(proposal), "age_days": age_days, "maintenance_action": action, "maintenance_reason": reason})
+
+    return {
+        "summary": counts,
+        "proposals": rows,
+        "policy": "Decline unsuitable invitations, but do not withdraw old proposals merely for cosmetic cleanup",
+    }
+
+
+def _age_in_days(value: Any, now: datetime) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    relative = re.search(r"(\d+)\s+(hour|day|week|month)s?\s+ago", text, re.I)
+    if relative:
+        amount = int(relative.group(1))
+        multiplier = {"hour": 0, "day": 1, "week": 7, "month": 30}[relative.group(2).lower()]
+        return amount * multiplier
+    cleaned = re.sub(r"^(?:Initiated|Submitted|Received)\s+", "", text, flags=re.I)
+    for fmt in ("%b %d, %Y", "%Y-%m-%d", "%b %d %Y"):
+        try:
+            parsed = datetime.strptime(cleaned, fmt).replace(tzinfo=UTC)
+            return max(0, (now - parsed).days)
+        except ValueError:
+            continue
+    return None

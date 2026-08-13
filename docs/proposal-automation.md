@@ -2,8 +2,8 @@
 
 How to reliably fill and submit an Upwork invite/proposal through the daemon Chrome,
 learned the hard way. Pair this with the voice/content rules in
-`~/.cursor/rules/upwork-proposals.mdc` and the highlights catalog in
-`~/Projects/jrr-analytics/docs/jrr-case-studies.md`.
+`~/.cursor/rules/upwork-proposals.mdc`, the management policy in `docs/management.md`,
+and the audited proof manifest in `src/upwork_mcp/proof_manifest.py`.
 
 ## Connect to the logged-in session
 
@@ -50,8 +50,8 @@ clicks with `page.evaluate(() => el.click())` instead. Native `.fill()` on plain
 - **Payment:** two radios, "By milestone" (default) and "By project". Click the text
   "By project" for a one-off audit. Selecting it swaps the milestone description/date
   inputs for a single total amount field.
-- **Amount:** `input[placeholder="$0.00"]` → fill the bid (e.g. `300`). Page derives the
-  15% fee and net automatically.
+- **Amount:** `input[placeholder="$0.00"]` → fill the exact approved bid. Read the live
+  Upwork fee and net fields; never assume a fixed service-fee percentage.
 - **Duration:** a custom `.air3-dropdown-toggle` reading "Select a duration". Open it,
   then click the `li.air3-menu-item` whose exact text is one of: "Less than 1 month",
   "1 to 3 months", "3 to 6 months", "More than 6 months". Open + pick must happen in the
@@ -82,14 +82,17 @@ Fixed-price jobs then show **"3 things you need to know"**:
 
 Without the checkbox + Continue, the proposal is **not** sent even if you clicked Send earlier.
 
-The Upwork MCP `upwork_submit_proposal` tool may return **"Could not confirm submission
-status"**. Treat browser automation via CDP as the source of truth; verify on the proposals
-list or the `?success` URL.
+The MCP commits only an unexpired prepared proposal. A result is successful only when the
+owner system shows a proposal success URL/banner or the stored proposal can be read back.
+An unknown result must not be retried automatically.
 
 ## Profile highlights (the "Add profile highlights" modal)
 
 Opened by clicking the card titled **"Add a portfolio project"** (also "Add an Upwork job"
 / "Add a certificate"). Modal "Add profile highlights", **max 4 total**.
+
+Read the current titles from this live modal before preparation. Do not rely on the old
+case-study digest: several historical card titles conflict with the audited public evidence.
 
 - **Tabs** are `button[role=tab][data-ev-tab=...]` with values `portfolio`,
   `certifications`, and the Upwork-jobs tab. Switch via JS click on the tab button.

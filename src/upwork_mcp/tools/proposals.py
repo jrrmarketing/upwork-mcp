@@ -1,25 +1,232 @@
-"""Proposal tools for Upwork MCP."""
+"""Proposal tools for Upwork MCP.
 
-from pydantic import BaseModel, Field
+Every consequential action in this module is approval-gated before the browser is
+created.  Calling an action without approval is therefore a safe prepare step: it
+returns the exact payload and digest that must be approved and committed unchanged.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import json
+import re
+from collections.abc import Mapping
+from typing import Any, Literal
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
 from ..browser.client import get_browser
+from ..prepared_actions import authorize_action
 
 
-class ProposalsParams(BaseModel):
+class StrictToolModel(BaseModel):
+    """Base model that rejects misspelled or unexpected action fields."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+
+def validate_upwork_url(value: str) -> str:
+    """Accept only HTTPS URLs hosted by Upwork."""
+
+    candidate = value.strip()
+    parsed = urlparse(candidate)
+    hostname = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or not (hostname == "upwork.com" or hostname.endswith(".upwork.com"))
+        or parsed.username
+        or parsed.password
+    ):
+        raise ValueError("A full HTTPS Upwork URL is required")
+    return candidate
+
+
+def validate_job_or_invitation_url(value: str) -> str:
+    candidate = validate_upwork_url(value)
+    path = urlparse(candidate).path
+    if not (
+        path.startswith("/jobs/")
+        or "/proposals/job/" in path
+        or "/proposals/interview/" in path
+    ):
+        raise ValueError("URL must point to an Upwork job or invitation route")
+    return candidate
+
+
+def validate_proposal_url(value: str) -> str:
+    candidate = validate_upwork_url(value)
+    path = urlparse(candidate).path
+    if "/proposals/" not in path:
+        raise ValueError("URL must point to an Upwork proposal route")
+    return candidate
+
+
+def approval_payload_digest(payload: Mapping[str, Any]) -> str:
+    """Return the stable SHA-256 used to lock exact approved action payloads."""
+
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def approval_gate(
+    action: str,
+    payload: Mapping[str, Any],
+    *,
+    approved: bool,
+    approval_sha256: str | None,
+    action_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a safe prepare/error response, or ``None`` when commit is authorised."""
+
+    expected = approval_payload_digest(payload)
+    prepared = {
+        "status": "approval_required",
+        "action": action,
+        "exact_payload": dict(payload),
+        "approval_sha256": expected,
+        "action_id": action_id,
+        "external_action_taken": False,
+    }
+    if action_id:
+        action_types = {
+            "submit_proposal": "proposal",
+            "send_message": "message",
+            "withdraw_proposal": "withdrawal",
+            "decline_invitation": "invitation_decline",
+        }
+        try:
+            authorization = authorize_action(action_id, action_types.get(action, action), payload)
+        except ValueError as error:
+            prepared["status"] = "approval_required"
+            prepared["message"] = str(error)
+            return prepared
+        prepared["prepared_action_authorization"] = authorization
+        return None
+    if not approved:
+        prepared["message"] = (
+            "No browser was opened. Show this exact payload to the owner and retry only "
+            "after approval with approved=true and the matching approval_sha256."
+        )
+        return prepared
+    if not approval_sha256 or not hmac.compare_digest(approval_sha256.lower(), expected):
+        prepared["status"] = "approval_mismatch"
+        prepared["message"] = "Approval digest is missing or does not match the exact action payload."
+        return prepared
+    return None
+
+
+class ProposalsParams(StrictToolModel):
     """Parameters for getting proposals."""
-    status: str = Field(
+
+    status: Literal["active", "submitted", "archived", "all"] = Field(
         default="active",
         description="Filter by status: active, submitted, archived, or all"
     )
     limit: int = Field(default=20, ge=1, le=50, description="Maximum number of results")
 
 
-class SubmitProposalParams(BaseModel):
+class InspectProposalFormParams(StrictToolModel):
+    """Parameters for opening and reading an Upwork application form."""
+
+    job_url: str = Field(description="Full Upwork job or invitation URL")
+
+    _validate_job_url = field_validator("job_url")(validate_job_or_invitation_url)
+
+
+class SubmitProposalParams(StrictToolModel):
     """Parameters for submitting a proposal."""
+
     job_url: str = Field(description="Full Upwork job URL")
-    cover_letter: str = Field(description="Cover letter content")
-    rate: float | None = Field(default=None, description="Proposed hourly rate (for hourly jobs)")
-    bid: float | None = Field(default=None, description="Bid amount (for fixed-price jobs)")
-    answers: list[str] | None = Field(default=None, description="Answers to screening questions")
+    cover_letter: str = Field(min_length=1, max_length=10000, description="Exact approved cover letter")
+    rate: float | None = Field(default=None, gt=0, description="Proposed hourly rate")
+    bid: float | None = Field(default=None, gt=0, description="Fixed-price bid")
+    answers: list[str] | None = Field(default=None, max_length=20, description="Exact screening answers")
+    screening_questions: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Exact live screening-question text observed before approval",
+    )
+    duration: Literal[
+        "Less than 1 month",
+        "1 to 3 months",
+        "3 to 6 months",
+        "More than 6 months",
+    ] | None = Field(default=None, description="Exact Upwork duration selection")
+    profile_highlights: list[str] = Field(default_factory=list, max_length=4)
+    base_connects: int | None = Field(
+        default=None,
+        ge=0,
+        description="Base Connects observed in the live form before approval",
+    )
+    boost_connects: int = Field(default=0, ge=0)
+    rate_increase_frequency: Literal["Never"] = "Never"
+    approved: bool = False
+    approval_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    _validate_job_url = field_validator("job_url")(validate_job_or_invitation_url)
+
+    @field_validator("cover_letter")
+    @classmethod
+    def _cover_letter_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Cover letter cannot be blank")
+        return value
+
+    @field_validator("answers", "screening_questions", "profile_highlights")
+    @classmethod
+    def _list_items_must_not_be_blank(cls, values: list[str] | None) -> list[str] | None:
+        if values is not None and any(not value.strip() for value in values):
+            raise ValueError("List items cannot be blank")
+        return values
+
+    @model_validator(mode="after")
+    def _require_exactly_one_price(self) -> SubmitProposalParams:
+        if (self.rate is None) == (self.bid is None):
+            raise ValueError("Provide exactly one of rate or bid")
+        return self
+
+
+class WithdrawProposalParams(StrictToolModel):
+    """Exact approved payload for withdrawing an existing proposal."""
+
+    proposal_url: str = Field(description="Full Upwork proposal URL")
+    reason: str | None = Field(default=None, max_length=1000)
+    approved: bool = False
+    approval_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    _validate_proposal_url = field_validator("proposal_url")(validate_proposal_url)
+
+
+def proposal_submission_payload(params: SubmitProposalParams) -> dict[str, Any]:
+    """Return the consequential fields covered by proposal approval."""
+
+    payload: dict[str, Any] = {
+        "job_url": params.job_url,
+        "cover_letter": params.cover_letter,
+        "rate": params.rate,
+        "bid": params.bid,
+        "answers": params.answers or [],
+        "screening_questions": params.screening_questions,
+        "duration": params.duration,
+        "profile_highlights": params.profile_highlights,
+        "boost_connects": params.boost_connects,
+        "rate_increase_frequency": params.rate_increase_frequency,
+    }
+    # Keep compatibility with proposal artifacts prepared before live-form
+    # inspection was added. New preparation flows should always include it.
+    if params.base_connects is not None:
+        payload["base_connects"] = params.base_connects
+    return payload
+
+
+def proposal_withdrawal_payload(params: WithdrawProposalParams) -> dict[str, Any]:
+    return {"proposal_url": params.proposal_url, "reason": params.reason}
 
 
 async def get_proposals(params: ProposalsParams) -> list[dict]:
@@ -29,7 +236,12 @@ async def get_proposals(params: ProposalsParams) -> list[dict]:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_proposals_on_page(params, page)
+
+
+async def _get_proposals_on_page(params: ProposalsParams, page) -> list[dict]:
+    """Read proposal rows while the browser operation lock is held."""
 
     # Navigate to proposals page
     status_path = {
@@ -124,13 +336,19 @@ async def get_proposal_details(proposal_url: str) -> dict:
 
     Returns details including cover letter, bid, and any messages.
     """
+    proposal_url = validate_proposal_url(proposal_url)
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_proposal_details_on_page(proposal_url, page)
+
+
+async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
+    """Read one proposal while the browser operation lock is held."""
 
     await page.goto(proposal_url, wait_until="networkidle")
 
-    details = {"url": proposal_url}
+    details: dict[str, Any] = {"url": proposal_url}
 
     # Job title
     title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
@@ -164,6 +382,323 @@ async def get_proposal_details(proposal_url: str) -> dict:
     return details
 
 
+async def _page_text(page) -> str:
+    body = await page.query_selector("body")
+    return ((await body.text_content()) if body else "") or ""
+
+
+async def _click(page, element) -> None:
+    """Click through Upwork overlays, falling back to a DOM click."""
+
+    try:
+        await element.click()
+    except Exception:
+        await page.evaluate("element => element.click()", element)
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = re.sub(r"\s+", " ", value).strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            result.append(cleaned)
+    return result
+
+
+def _extract_base_connects(text: str) -> int | None:
+    """Extract base proposal cost without confusing it with account balance."""
+
+    if re.search(r"no connects? (?:are )?required|costs? 0 connects?|send for 0 connects?", text, re.I):
+        return 0
+
+    relevant_lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in text.splitlines()
+        if "connect" in line.lower()
+        and any(term in line.lower() for term in ("required", "submit", "cost", "send for"))
+    ]
+    patterns = (
+        r"send\s+for\s+(\d+)\s+connects?",
+        r"(?:requires?|required|costs?)\D{0,30}(\d+)\s+connects?",
+        r"(\d+)\s+connects?\D{0,30}(?:required|to submit|proposal cost)",
+    )
+    for line in relevant_lines:
+        for pattern in patterns:
+            match = re.search(pattern, line, re.I)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _existing_proposal_evidence(text: str) -> str | None:
+    for pattern in (
+        r"you (?:have )?already submitted a proposal[^\n]*",
+        r"proposal (?:has been )?submitted[^\n]*",
+        r"view (?:my )?proposal[^\n]*",
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            return re.sub(r"\s+", " ", match.group(0)).strip()
+    return None
+
+
+async def _open_proposal_form(page, job_url: str) -> tuple[str, str | None]:
+    """Navigate to a job and open its apply form without committing anything."""
+
+    await page.goto(job_url, wait_until="networkidle")
+    text = await _page_text(page)
+    existing = _existing_proposal_evidence(text)
+    if existing:
+        return "already_applied", existing
+
+    if "/proposals/" in str(getattr(page, "url", "")):
+        return "ready", None
+    if await page.query_selector('[data-test="cover-letter-input"], textarea[name*="cover"]'):
+        return "ready", None
+
+    apply_btn = await page.query_selector(
+        '[data-test="apply-button"], button:has-text("Apply Now"), '
+        'button:has-text("Accept Interview"), a:has-text("Apply Now")'
+    )
+    if not apply_btn:
+        return "unavailable", None
+    await _click(page, apply_btn)
+    try:
+        await page.wait_for_load_state("networkidle")
+    except Exception:
+        pass
+
+    text = await _page_text(page)
+    existing = _existing_proposal_evidence(text)
+    if existing:
+        return "already_applied", existing
+    if (
+        "/proposals/" in str(getattr(page, "url", ""))
+        or await page.query_selector('[data-test="cover-letter-input"], textarea')
+    ):
+        return "ready", None
+    return "unavailable", None
+
+
+async def _inspect_duration_options(page, text: str) -> list[str]:
+    allowed = [
+        "Less than 1 month",
+        "1 to 3 months",
+        "3 to 6 months",
+        "More than 6 months",
+    ]
+    found = [option for option in allowed if option in text]
+    if len(found) > 1:
+        return found
+
+    toggle = await page.query_selector(
+        'button:has-text("Select a duration"), '
+        '.air3-dropdown-toggle:has-text("duration"), '
+        '[data-test*="duration"] .air3-dropdown-toggle'
+    )
+    if toggle:
+        try:
+            await _click(page, toggle)
+            text = await _page_text(page)
+        except Exception:
+            pass
+    return [option for option in allowed if option in text]
+
+
+async def _screening_question_texts(page) -> list[str]:
+    values: list[str] = []
+    question_els = await page.query_selector_all(
+        '[data-test*="screening-question"], .screening-question, '
+        '.question-answer label, label[for*="question"]'
+    )
+    for element in question_els:
+        value = await element.text_content()
+        if value:
+            values.append(value)
+    return _dedupe_text(values)
+
+
+async def inspect_proposal_form(
+    job_url: str | InspectProposalFormParams,
+) -> dict[str, Any]:
+    """Open and inspect an application form without filling or submitting it."""
+
+    params = job_url if isinstance(job_url, InspectProposalFormParams) else InspectProposalFormParams(job_url=job_url)
+    browser = get_browser()
+    await browser.ensure_logged_in()
+    async with browser.operation() as page:
+        return await _inspect_proposal_form_on_page(params, page)
+
+
+async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page) -> dict[str, Any]:
+    """Read an already-leased page for proposal-form facts."""
+
+    form_status, existing_evidence = await _open_proposal_form(page, params.job_url)
+    text = await _page_text(page)
+    normalized = re.sub(r"\s+", " ", text)
+
+    title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
+    title = (await title_el.text_content() or "").strip() if title_el else None
+
+    question_texts = await _screening_question_texts(page)
+
+    if re.search(r"hourly rate|hourly contract|/hr\b", normalized, re.I):
+        job_type: str | None = "hourly"
+    elif re.search(r"fixed[- ]price|by project|project budget", normalized, re.I):
+        job_type = "fixed"
+    else:
+        job_type = None
+
+    fee_net_lines = _dedupe_text(
+        [
+            line
+            for line in text.splitlines()
+            if any(
+                marker in line.lower()
+                for marker in ("service fee", "upwork fee", "you'll receive", "you’ll receive", "net")
+            )
+        ]
+    )
+    boost_lines = _dedupe_text(
+        [
+            line
+            for line in text.splitlines()
+            if "boost" in line.lower()
+            or ("connect" in line.lower() and any(word in line.lower() for word in ("bid", "auction")))
+        ]
+    )
+    duration_options = await _inspect_duration_options(page, text) if form_status == "ready" else []
+
+    return {
+        "job_url": params.job_url,
+        "form_url": str(getattr(page, "url", params.job_url)),
+        "job_title": title,
+        "form_status": form_status,
+        "existing_proposal": existing_evidence is not None,
+        "existing_proposal_evidence": existing_evidence,
+        "screening_questions": question_texts,
+        "job_type": job_type,
+        "base_connects": _extract_base_connects(text),
+        "fee_net_text": fee_net_lines,
+        "duration_options": duration_options,
+        "boost_auction_text": boost_lines,
+        "external_action_taken": False,
+    }
+
+
+async def _first_enabled(page, selector: str):
+    for element in await page.query_selector_all(selector):
+        try:
+            if await element.is_enabled():
+                return element
+        except Exception:
+            return element
+    return None
+
+
+async def _select_duration(page, duration: str) -> bool:
+    toggle = await page.query_selector(
+        'button:has-text("Select a duration"), '
+        '.air3-dropdown-toggle:has-text("duration"), '
+        '[data-test*="duration"] .air3-dropdown-toggle'
+    )
+    if not toggle:
+        return False
+    await _click(page, toggle)
+    for option in await page.query_selector_all('li.air3-menu-item, [role="option"], [role="menuitem"]'):
+        if re.sub(r"\s+", " ", (await option.text_content() or "")).strip() == duration:
+            await _click(page, option)
+            return True
+    return False
+
+
+async def _select_rate_increase_never(page) -> bool:
+    select = await page.query_selector('select[name*="increase"], [data-test*="rate-increase"] select')
+    if select:
+        try:
+            await select.select_option(label="Never")
+            return True
+        except Exception:
+            return False
+
+    toggle = await page.query_selector(
+        '[data-test*="rate-increase"] button, '
+        '.air3-dropdown-toggle:has-text("rate increase"), '
+        'button:has-text("Select a frequency")'
+    )
+    if not toggle:
+        # Not every form offers scheduled increases.
+        return True
+    await _click(page, toggle)
+    for option in await page.query_selector_all('li.air3-menu-item, [role="option"], [role="menuitem"]'):
+        if re.sub(r"\s+", " ", (await option.text_content() or "")).strip().lower() == "never":
+            await _click(page, option)
+            return True
+    return False
+
+
+async def _select_profile_highlights(page, highlights: list[str]) -> tuple[bool, str | None]:
+    if not highlights:
+        return True, None
+    open_button = await page.query_selector(
+        'button:has-text("Add profile highlights"), '
+        'button:has-text("Add a portfolio project"), '
+        '[data-test*="profile-highlight"]'
+    )
+    if not open_button:
+        return False, "Profile highlights control not found"
+    await _click(page, open_button)
+
+    script = r"""fragment => {
+      let best = null;
+      for (const element of document.querySelectorAll('*')) {
+        const text = element.innerText || '';
+        if (text.includes(fragment) && (!best || text.length < best.text.length)) {
+          best = {element, text};
+        }
+      }
+      if (!best) return 'not-found';
+      let card = best.element;
+      for (let index = 0; index < 12 && card; index += 1) {
+        const button = [...card.querySelectorAll('button')]
+          .find(item => /Select highlight/i.test(item.innerText || ''));
+        if (button) { button.click(); return 'selected'; }
+        card = card.parentElement;
+      }
+      return 'button-not-found';
+    }"""
+    for highlight in highlights:
+        if await page.evaluate(script, highlight) != "selected":
+            return False, f"Could not select approved profile highlight: {highlight}"
+
+    add_button = await page.query_selector('button:has-text("Add to highlights")')
+    if not add_button:
+        return False, "Add to highlights button not found"
+    await _click(page, add_button)
+    return True, None
+
+
+async def _proposal_confirmation(page, timeout_seconds: float = 15) -> dict[str, Any]:
+    for _ in range(max(1, int(timeout_seconds * 2))):
+        url = str(getattr(page, "url", ""))
+        text = await _page_text(page)
+        success_text = re.search(
+            r"your proposal was submitted|proposal submitted successfully|proposal has been submitted",
+            text,
+            re.I,
+        )
+        if ("/proposals/" in url and "success" in url.lower()) or success_text:
+            return {
+                "confirmed": True,
+                "url": url,
+                "evidence": success_text.group(0) if success_text else "success URL",
+            }
+        await asyncio.sleep(0.5)
+    return {"confirmed": False, "url": str(getattr(page, "url", "")), "evidence": None}
+
+
 async def submit_proposal(params: SubmitProposalParams) -> dict:
     """Submit a proposal to an Upwork job.
 
@@ -172,107 +707,310 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
 
     Returns submission status and connects used.
     """
+    payload = proposal_submission_payload(params)
+    blocked = approval_gate(
+        "submit_proposal",
+        payload,
+        approved=params.approved,
+        approval_sha256=params.approval_sha256,
+        action_id=params.action_id,
+    )
+    if blocked:
+        return blocked
+    if params.base_connects is None:
+        return {
+            "status": "preflight_required",
+            "message": "Inspect the live proposal form and approve its base Connects before submission.",
+            "external_action_taken": False,
+        }
+    if params.duration is None:
+        return {
+            "status": "preflight_required",
+            "message": "An exact project duration must be approved before submission.",
+            "external_action_taken": False,
+        }
+
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _submit_proposal_on_page(params, page)
 
-    # Navigate to job page first
-    await page.goto(params.job_url, wait_until="networkidle")
 
-    # Click apply button
-    apply_btn = await page.query_selector('[data-test="apply-button"], button:has-text("Apply Now")')
-    if not apply_btn:
-        return {"status": "error", "message": "Apply button not found. Job may be closed or unavailable."}
+async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[str, Any]:
+    """Fill and commit a proposal while the browser operation lock is held."""
+    assert params.duration is not None
 
-    await apply_btn.click()
-    await page.wait_for_load_state("networkidle")
+    form_status, existing_evidence = await _open_proposal_form(page, params.job_url)
+    if form_status == "already_applied":
+        return {
+            "status": "already_submitted",
+            "message": existing_evidence,
+            "external_action_taken": False,
+        }
+    if form_status != "ready":
+        return {
+            "status": "error",
+            "message": "Apply form not found. Job may be closed or unavailable.",
+            "external_action_taken": False,
+        }
+
+    live_text = await _page_text(page)
+    live_base_connects = _extract_base_connects(live_text)
+    invited = bool(re.search(r"invitation to apply|you have been invited", live_text, re.I))
+    if live_base_connects is None and invited and params.base_connects == 0:
+        live_base_connects = 0
+    if live_base_connects is None or live_base_connects != params.base_connects:
+        return {
+            "status": "live_form_mismatch",
+            "message": "Live base Connects could not be confirmed or changed after approval.",
+            "approved_base_connects": params.base_connects,
+            "live_base_connects": live_base_connects,
+            "external_action_taken": False,
+        }
+    live_questions = await _screening_question_texts(page)
+    if live_questions != params.screening_questions:
+        return {
+            "status": "live_form_mismatch",
+            "message": "Live screening questions changed after approval.",
+            "approved_screening_questions": params.screening_questions,
+            "live_screening_questions": live_questions,
+            "external_action_taken": False,
+        }
 
     # Fill in rate/bid
-    if params.rate:
-        rate_input = await page.query_selector('[data-test="hourly-rate-input"], input[name*="rate"]')
-        if rate_input:
-            await rate_input.fill(str(params.rate))
+    if params.rate is not None:
+        rate_input = await _first_enabled(page, '[data-test="hourly-rate-input"], input[name*="rate"]')
+        if not rate_input:
+            return {"status": "error", "message": "Hourly rate input not found", "external_action_taken": False}
+        await rate_input.fill(str(params.rate))
 
-    if params.bid:
-        bid_input = await page.query_selector('[data-test="bid-input"], input[name*="bid"], input[name*="amount"]')
-        if bid_input:
-            await bid_input.fill(str(params.bid))
+    if params.bid is not None:
+        bid_input = await _first_enabled(
+            page,
+            '[data-test="bid-input"], input[name*="bid"], input[name*="amount"], input[placeholder="$0.00"]',
+        )
+        if not bid_input:
+            return {"status": "error", "message": "Fixed-price bid input not found", "external_action_taken": False}
+        await bid_input.fill(str(params.bid))
 
     # Fill cover letter
     cover_textarea = await page.query_selector('[data-test="cover-letter-input"], textarea[name*="cover"], textarea')
-    if cover_textarea:
-        await cover_textarea.fill(params.cover_letter)
+    if not cover_textarea:
+        return {"status": "error", "message": "Cover letter input not found", "external_action_taken": False}
+    await cover_textarea.fill(params.cover_letter)
 
-    # Answer screening questions if provided
-    if params.answers:
-        question_inputs = await page.query_selector_all('[data-test="question-input"], .question-answer textarea, .screening-question textarea')
-        for i, answer in enumerate(params.answers):
-            if i < len(question_inputs):
-                await question_inputs[i].fill(answer)
+    # Answer screening questions only when the live field count still matches.
+    answers = params.answers or []
+    question_inputs = await page.query_selector_all(
+        '[data-test="question-input"], .question-answer textarea, .screening-question textarea'
+    )
+    if len(question_inputs) != len(answers):
+        all_textareas = await page.query_selector_all("textarea")
+        question_inputs = all_textareas[1:]
+    if len(question_inputs) != len(answers):
+        return {
+            "status": "live_form_mismatch",
+            "message": "The number of live screening answer fields differs from the approved answers.",
+            "approved_answers": len(answers),
+            "live_answer_fields": len(question_inputs),
+            "external_action_taken": False,
+        }
+    if answers:
+        for i, answer in enumerate(answers):
+            if not answer.strip():
+                return {
+                    "status": "live_form_mismatch",
+                    "message": "An approved screening answer is blank.",
+                    "external_action_taken": False,
+                }
+            await question_inputs[i].fill(answer)
 
-    # Check for connects required
-    connects_el = await page.query_selector('[data-test="connects-required"], .connects-info')
-    connects_required = 0
-    if connects_el:
-        text = (await connects_el.text_content() or "")
-        import re
-        numbers = re.findall(r'\d+', text)
-        if numbers:
-            connects_required = int(numbers[0])
+    if not await _select_duration(page, params.duration):
+        return {"status": "error", "message": "Approved duration option could not be selected", "external_action_taken": False}
+    if not await _select_rate_increase_never(page):
+        return {"status": "error", "message": 'Rate increase frequency could not be set to "Never"', "external_action_taken": False}
+    highlights_ok, highlights_error = await _select_profile_highlights(page, params.profile_highlights)
+    if not highlights_ok:
+        return {"status": "error", "message": highlights_error, "external_action_taken": False}
 
     # Submit the proposal
-    submit_btn = await page.query_selector('[data-test="submit-proposal"], button[type="submit"]:has-text("Submit"), button:has-text("Send")')
+    submit_btn = await page.query_selector(
+        '[data-test="submit-proposal"], button[type="submit"]:has-text("Submit proposal"), '
+        'button:has-text("Submit proposal")'
+    )
     if not submit_btn:
-        return {"status": "error", "message": "Submit button not found"}
+        return {"status": "error", "message": "Submit proposal button not found", "external_action_taken": False}
 
-    await submit_btn.click()
+    await _click(page, submit_btn)
+    consequential_click_taken = True
 
-    # Wait for confirmation
-    try:
-        await page.wait_for_selector('[data-test="proposal-submitted"], .success-message', timeout=15000)
+    immediate_confirmation = await _proposal_confirmation(page, timeout_seconds=2)
+    if immediate_confirmation["confirmed"]:
         return {
             "status": "submitted",
-            "connects_used": connects_required,
-            "message": "Proposal submitted successfully"
+            "connects_used": params.base_connects + params.boost_connects,
+            "message": "Proposal submitted and read back from Upwork",
+            "owner_system_readback": immediate_confirmation,
+            "external_action_taken": True,
         }
-    except Exception:
-        # Check for error message
-        error_el = await page.query_selector('[data-test="error-message"], .error, .alert-danger')
-        if error_el:
-            error_text = (await error_el.text_content() or "").strip()
-            return {"status": "error", "message": error_text}
 
-        return {"status": "unknown", "message": "Could not confirm submission status"}
+    if params.boost_connects:
+        boost_input = await _first_enabled(
+            page,
+            'input[name*="boost"], input[data-test*="boost"], [data-test*="boost"] input[type="number"]',
+        )
+        if not boost_input:
+            return {
+                "status": "unknown",
+                "message": "Approved boost control was not found after the first submission step.",
+                "external_action_taken": consequential_click_taken,
+            }
+        await boost_input.fill(str(params.boost_connects))
+    else:
+        no_boost = await page.query_selector(
+            'label:has-text("Don\'t boost"), button:has-text("Don\'t boost"), '
+            'label:has-text("No, thanks"), button:has-text("No, thanks")'
+        )
+        if no_boost:
+            await _click(page, no_boost)
+
+    send_btn = await page.query_selector(
+        '[data-test="send-proposal"], button:has-text("Send for"), button:has-text("Send proposal")'
+    )
+    if send_btn:
+        await _click(page, send_btn)
+
+    acknowledgement = await page.query_selector(
+        'input[type="checkbox"] + label:has-text("Yes, I understand"), '
+        'label:has-text("Yes, I understand"), input[type="checkbox"]'
+    )
+    if acknowledgement:
+        try:
+            await acknowledgement.check()
+        except Exception:
+            await _click(page, acknowledgement)
+        continue_btn = await page.query_selector(
+            '[role="dialog"] button:has-text("Continue"), button:has-text("Continue")'
+        )
+        if continue_btn:
+            await _click(page, continue_btn)
+
+    readback = await _proposal_confirmation(page)
+    if readback["confirmed"]:
+        return {
+            "status": "submitted",
+            "connects_used": params.base_connects + params.boost_connects,
+            "message": "Proposal submitted and read back from Upwork",
+            "owner_system_readback": readback,
+            "external_action_taken": True,
+        }
+    error_el = await page.query_selector('[data-test="error-message"], .error, .alert-danger')
+    if error_el:
+        error_text = (await error_el.text_content() or "").strip()
+        return {
+            "status": "error",
+            "message": error_text,
+            "owner_system_readback": readback,
+            "external_action_taken": consequential_click_taken,
+        }
+    return {
+        "status": "unknown",
+        "message": "Upwork did not provide owner-system confirmation; do not retry automatically.",
+        "owner_system_readback": readback,
+        "external_action_taken": consequential_click_taken,
+    }
 
 
-async def withdraw_proposal(proposal_url: str) -> dict:
+async def withdraw_proposal(params: WithdrawProposalParams | str) -> dict:
     """Withdraw a submitted proposal.
 
     Args:
-        proposal_url: URL to the proposal to withdraw
+        params: Exact approved withdrawal, or a legacy proposal URL. A legacy URL
+            produces a safe approval artifact and never opens the browser.
 
     Returns withdrawal status.
     """
+    if isinstance(params, str):
+        params = WithdrawProposalParams(proposal_url=params)
+    payload = proposal_withdrawal_payload(params)
+    blocked = approval_gate(
+        "withdraw_proposal",
+        payload,
+        approved=params.approved,
+        approval_sha256=params.approval_sha256,
+        action_id=params.action_id,
+    )
+    if blocked:
+        return blocked
+
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _withdraw_proposal_on_page(params, page)
 
-    await page.goto(proposal_url, wait_until="networkidle")
+
+async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> dict[str, Any]:
+    """Withdraw while the browser operation lock is held."""
+
+    await page.goto(params.proposal_url, wait_until="networkidle")
+    before_text = await _page_text(page)
+    if re.search(r"proposal (?:was |has been )?withdrawn", before_text, re.I):
+        return {"status": "already_withdrawn", "external_action_taken": False}
 
     # Find withdraw button
     withdraw_btn = await page.query_selector('[data-test="withdraw-button"], button:has-text("Withdraw")')
     if not withdraw_btn:
-        return {"status": "error", "message": "Withdraw button not found. Proposal may already be closed."}
+        return {
+            "status": "error",
+            "message": "Withdraw button not found. Proposal may already be closed.",
+            "external_action_taken": False,
+        }
 
-    await withdraw_btn.click()
+    await _click(page, withdraw_btn)
+
+    if params.reason:
+        reason_input = await page.query_selector(
+            '[role="dialog"] textarea, [data-test*="withdraw-reason"] textarea, textarea[name*="reason"]'
+        )
+        if not reason_input:
+            return {
+                "status": "error",
+                "message": "Approved withdrawal reason input not found; withdrawal was not confirmed.",
+                "external_action_taken": False,
+            }
+        await reason_input.fill(params.reason)
 
     # Confirm withdrawal in modal
     confirm_btn = await page.query_selector('[data-test="confirm-withdraw"], button:has-text("Yes"), button:has-text("Confirm")')
-    if confirm_btn:
-        await confirm_btn.click()
+    if not confirm_btn:
+        return {
+            "status": "error",
+            "message": "Withdrawal confirmation button not found.",
+            "external_action_taken": False,
+        }
+    await _click(page, confirm_btn)
 
-    try:
-        await page.wait_for_selector('[data-test="withdrawal-confirmed"], .success', timeout=10000)
-        return {"status": "withdrawn", "message": "Proposal withdrawn successfully"}
-    except Exception:
-        return {"status": "unknown", "message": "Could not confirm withdrawal"}
+    for _ in range(20):
+        text = await _page_text(page)
+        evidence = re.search(r"proposal (?:was |has been )?withdrawn|withdrawal confirmed", text, re.I)
+        if evidence:
+            return {
+                "status": "withdrawn",
+                "message": "Proposal withdrawal read back from Upwork",
+                "owner_system_readback": {
+                    "confirmed": True,
+                    "evidence": evidence.group(0),
+                    "url": str(getattr(page, "url", params.proposal_url)),
+                },
+                "external_action_taken": True,
+            }
+        await asyncio.sleep(0.5)
+    return {
+        "status": "unknown",
+        "message": "Upwork did not confirm withdrawal; do not retry automatically.",
+        "owner_system_readback": {
+            "confirmed": False,
+            "url": str(getattr(page, "url", params.proposal_url)),
+        },
+        "external_action_taken": True,
+    }

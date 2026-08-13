@@ -1,5 +1,7 @@
 """Profile and connects tools for Upwork MCP."""
 
+from typing import Any
+
 from ..browser.client import get_browser
 
 
@@ -11,11 +13,16 @@ async def get_my_profile() -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_my_profile_on_page(page)
+
+
+async def _get_my_profile_on_page(page) -> dict:
+    """Read profile fields while the browser operation lock is held."""
 
     await page.goto("https://www.upwork.com/freelancers/settings/profile", wait_until="networkidle")
 
-    profile = {}
+    profile: dict[str, Any] = {}
 
     # Name
     name_el = await page.query_selector('[data-test="profile-name"], h1, .profile-name')
@@ -64,7 +71,7 @@ async def get_my_profile() -> dict:
         profile["profile_completeness"] = (await complete_el.text_content() or "").strip()
 
     # Get connects balance
-    connects = await get_connects_balance()
+    connects = await _get_connects_balance_on_page(page)
     profile["connects"] = connects
 
     return profile
@@ -78,7 +85,12 @@ async def get_connects_balance() -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_connects_balance_on_page(page)
+
+
+async def _get_connects_balance_on_page(page) -> dict:
+    """Read Connects while the browser operation lock is held."""
 
     # Navigate to connects page
     await page.goto("https://www.upwork.com/nx/plans/connects/balance", wait_until="networkidle")
@@ -125,7 +137,12 @@ async def get_profile_stats() -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_profile_stats_on_page(page)
+
+
+async def _get_profile_stats_on_page(page) -> dict:
+    """Read profile stats while the browser operation lock is held."""
 
     # Navigate to work diary or stats page
     await page.goto("https://www.upwork.com/nx/wm/contracts", wait_until="networkidle")

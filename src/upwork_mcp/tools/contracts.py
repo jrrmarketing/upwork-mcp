@@ -1,16 +1,32 @@
-"""Contract tools for Upwork MCP."""
+"""Read-only contract tools for Upwork MCP."""
 
-from pydantic import BaseModel, Field
+import urllib.parse
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
 from ..browser.client import get_browser
 
 
 class ContractsParams(BaseModel):
     """Parameters for getting contracts."""
-    status: str = Field(
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["active", "ended", "all"] = Field(
         default="active",
         description="Filter by status: active, ended, or all"
     )
     limit: int = Field(default=20, ge=1, le=50, description="Maximum number of results")
+
+
+def _validate_contract_url(contract_url: str) -> str:
+    parsed = urllib.parse.urlparse(contract_url.strip())
+    if parsed.scheme != "https" or parsed.hostname not in {"upwork.com", "www.upwork.com"}:
+        raise ValueError("contract_url must be an HTTPS Upwork URL")
+    if not any(token in parsed.path for token in ("/contracts/", "/work-diary/", "/ab/f/contracts/", "/nx/wm/workroom/")):
+        raise ValueError("contract_url must point to an Upwork contract route")
+    return contract_url.strip()
 
 
 async def get_contracts(params: ContractsParams | None = None) -> list[dict]:
@@ -23,7 +39,12 @@ async def get_contracts(params: ContractsParams | None = None) -> list[dict]:
 
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_contracts_on_page(params, page)
+
+
+async def _get_contracts_on_page(params: ContractsParams, page) -> list[dict]:
+    """Read contract rows while the browser operation lock is held."""
 
     # Navigate to contracts page
     url = "https://www.upwork.com/nx/wm/contracts"
@@ -117,13 +138,19 @@ async def get_contract_details(contract_url: str) -> dict:
 
     Returns full contract details including milestones, hours logged, and feedback.
     """
+    contract_url = _validate_contract_url(contract_url)
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_contract_details_on_page(contract_url, page)
+
+
+async def _get_contract_details_on_page(contract_url: str, page) -> dict:
+    """Read one contract while the browser operation lock is held."""
 
     await page.goto(contract_url, wait_until="networkidle")
 
-    details = {"url": contract_url}
+    details: dict[str, Any] = {"url": contract_url}
 
     # Job title
     title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
@@ -171,7 +198,7 @@ async def get_contract_details(contract_url: str) -> dict:
         details["total_hours"] = (await total_hours_el.text_content() or "").strip()
 
     # Milestones (for fixed-price)
-    milestones = []
+    milestones: list[dict[str, str]] = []
     milestone_els = await page.query_selector_all('[data-test="milestone"], .milestone-item')
     for el in milestone_els:
         ms = {}
@@ -190,7 +217,7 @@ async def get_contract_details(contract_url: str) -> dict:
         details["milestones"] = milestones
 
     # Feedback (if ended)
-    feedback = {}
+    feedback: dict[str, str] = {}
     feedback_el = await page.query_selector('[data-test="feedback-section"], .feedback')
     if feedback_el:
         rating_el = await feedback_el.query_selector('[data-test="rating"], .rating')
@@ -223,16 +250,23 @@ async def get_work_diary(contract_url: str, week_offset: int = 0) -> dict:
 
     Returns work diary with daily hours and screenshots.
     """
+    contract_url = _validate_contract_url(contract_url)
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
+    async with browser.operation() as page:
+        return await _get_work_diary_on_page(contract_url, week_offset, page)
+
+
+async def _get_work_diary_on_page(contract_url: str, week_offset: int, page) -> dict:
+    """Read a work diary while the browser operation lock is held."""
 
     # Navigate to work diary
     # The exact URL structure may vary
     diary_url = contract_url.replace("/contracts/", "/work-diary/")
     await page.goto(diary_url, wait_until="networkidle")
 
-    diary = {"contract_url": contract_url, "days": []}
+    days: list[dict[str, str]] = []
+    diary: dict[str, Any] = {"contract_url": contract_url, "days": days}
 
     # Extract daily entries
     day_els = await page.query_selector_all('[data-test="day-entry"], .day-row')
@@ -253,7 +287,7 @@ async def get_work_diary(contract_url: str, week_offset: int = 0) -> dict:
             day["earnings"] = (await earnings_el.text_content() or "").strip()
 
         if day.get("date"):
-            diary["days"].append(day)
+            days.append(day)
 
     # Weekly totals
     total_hours_el = await page.query_selector('[data-test="weekly-hours"], .week-total-hours')
