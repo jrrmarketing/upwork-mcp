@@ -233,6 +233,55 @@ def test_exact_claim_cannot_be_hidden_inside_a_larger_number():
     assert any("exact permitted claim" in error for error in result["errors"])
 
 
+def test_exact_claim_cannot_share_a_sentence_with_an_invented_metric():
+    selected = [
+        {
+            "key": "priority-one-plumbing",
+            "name": "Priority 1 Plumbing",
+            "url": (
+                "https://josiahroche.co/digital-marketing-case-studies/"
+                "local-plumber-marketing-agency"
+            ),
+            "approved_claims": ["1,258 tracked leads."],
+        }
+    ]
+    for extra in ("and achieved a 99% conversion rate", "with 500% ROI", "in 30 days"):
+        result = validate_proof_claims(
+            f"Priority 1 Plumbing generated 1,258 tracked leads {extra}.",
+            selected,
+        )
+        assert result["valid"] is False
+        assert any("cannot add figures or periods" in error for error in result["errors"])
+
+
+def test_exact_audited_period_is_allowed_with_its_matching_claim():
+    selected = [
+        {
+            "key": "priority-one-plumbing",
+            "name": "Priority 1 Plumbing",
+            "url": (
+                "https://josiahroche.co/digital-marketing-case-studies/"
+                "local-plumber-marketing-agency"
+            ),
+            "approved_claims": ["1,258 tracked leads."],
+            "claim_evidence": [
+                {
+                    "text": "1,258 tracked leads.",
+                    "period": "September 2023 to July 2024.",
+                }
+            ],
+        }
+    ]
+    result = validate_proof_claims(
+        (
+            "Priority 1 Plumbing generated 1,258 tracked leads. "
+            "September 2023 to July 2024."
+        ),
+        selected,
+    )
+    assert result["valid"] is True
+
+
 def test_exact_numeric_result_must_identify_or_link_the_case_study():
     selected = [
         {

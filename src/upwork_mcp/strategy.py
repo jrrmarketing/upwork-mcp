@@ -644,6 +644,31 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
                 "Numeric performance claims must identify or link the selected case study: "
                 f"{sentence[:160]}"
             )
+        uncovered = normalized_sentence
+        for study, claim in matches:
+            uncovered = _remove_exact_fragment(uncovered, claim)
+            uncovered = _remove_exact_fragment(
+                uncovered,
+                _normalise_claim_text(str(study.get("name") or "")),
+            )
+            uncovered = _remove_exact_fragment(
+                uncovered,
+                _normalise_claim_text(str(study.get("url") or "")),
+            )
+            for evidence in study.get("claim_evidence") or []:
+                if not isinstance(evidence, Mapping):
+                    continue
+                evidence_claim = _normalise_claim_text(str(evidence.get("text") or ""))
+                if evidence_claim == claim:
+                    uncovered = _remove_exact_fragment(
+                        uncovered,
+                        _normalise_claim_text(str(evidence.get("period") or "")),
+                    )
+        if NUMERIC_VALUE_PATTERN.search(uncovered):
+            errors.append(
+                "Numeric performance sentences cannot add figures or periods beyond the "
+                f"exact permitted claim: {sentence[:160]}"
+            )
 
     return {"valid": not errors, "errors": list(dict.fromkeys(errors))}
 
@@ -674,6 +699,13 @@ def _contains_exact_claim(sentence: str, claim: str) -> bool:
 
     pattern = rf"(?<![\w$+.,-]){re.escape(claim)}(?![\w%+.,-])"
     return re.search(pattern, sentence) is not None
+
+
+def _remove_exact_fragment(value: str, fragment: str) -> str:
+    if not fragment:
+        return value
+    pattern = rf"(?<![\w$+.,-]){re.escape(fragment)}(?![\w%+.,-])"
+    return re.sub(pattern, " ", value)
 
 
 def _study_is_identified(message: str, study: Mapping[str, Any]) -> bool:
