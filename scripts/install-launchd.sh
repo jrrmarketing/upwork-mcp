@@ -13,8 +13,9 @@ for label in com.jrr.upwork-chrome com.jrr.upwork-health; do
   dest="${AGENTS_DIR}/${label}.plist"
   cp "$plist" "$dest"
   launchctl bootout "gui/$(id -u)" "$dest" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$dest"
+  # A disabled label cannot be bootstrapped; re-enable it first.
   launchctl enable "gui/$(id -u)/${label}" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$dest"
   echo "Loaded ${label}"
 done
 
