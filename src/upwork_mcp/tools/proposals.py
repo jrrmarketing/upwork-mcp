@@ -425,8 +425,17 @@ async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
         page_text = await _page_text(page)
         if re.search(r"proposal (?:was |has been )?withdrawn", page_text, re.I):
             details["status"] = "withdrawn"
-        elif await page.query_selector('[data-test="withdraw-button"], button:has-text("Withdraw")'):
-            details["status"] = "withdrawable"
+        else:
+            live_status = re.search(
+                r"\b(active|submitted|archived|closed)\s+proposal\b|"
+                r"\bproposal\s+(?:status\s*[:\-]?\s*)?(active|submitted|archived|closed)\b",
+                page_text,
+                re.I,
+            )
+            if live_status:
+                details["status"] = next(
+                    group for group in live_status.groups() if group is not None
+                ).lower()
 
     # Client response/messages
     messages = []

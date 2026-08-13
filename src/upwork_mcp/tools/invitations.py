@@ -199,9 +199,15 @@ async def _read_invitation_identity(page, invitation_url: str) -> dict[str, str]
         re.I,
     ):
         invitation_status = "declined"
-    elif await page.query_selector(
-        '[data-test="decline-button"], button:has-text("Decline invitation"), '
-        'button:has-text("Decline Interview"), button:has-text("Decline")'
+    elif re.search(r"invitation (?:was |has been )?accepted|you accepted (?:this |the )?invitation", text, re.I):
+        invitation_status = "accepted"
+    elif re.search(r"invitation (?:has )?expired|invitation (?:is )?closed", text, re.I):
+        invitation_status = "closed"
+    elif re.search(
+        r"pending invitation|invitation to (?:apply|interview)|"
+        r"invited you to (?:apply|interview)|respond to (?:this |the )?invitation",
+        text,
+        re.I,
     ):
         invitation_status = "pending"
     else:
