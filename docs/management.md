@@ -18,6 +18,13 @@ client, spends Connects, or changes an Upwork record is prepared and approved se
 7. After a fresh exact approval, arm and commit that unchanged action once. A live-state
    change invalidates the action. Success requires owner-system readback.
 
+The commit atomically claims the action before browser work. A claimed action cannot be
+replayed, including when Upwork's post-click result is ambiguous; inspect the owner system and
+prepare a fresh action instead. The approval tool enforces exact-payload integrity and one-shot
+execution, but MCP transport does not cryptographically prove which chat turn came from the
+owner. The calling agent must invoke it only after Josiah's fresh later-turn approval under the
+canonical communication rule.
+
 `upwork_find_opportunities` and `upwork_screen_job` are read-only on Upwork and write only
 minimal decision facts to the private local ledger. They never apply.
 

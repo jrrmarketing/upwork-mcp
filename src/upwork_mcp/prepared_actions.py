@@ -36,11 +36,18 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
             prepared_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             approved_at TEXT,
+            claimed_at TEXT,
             consumed_at TEXT,
             owner_approval_reference TEXT
         )
         """
     )
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(prepared_actions)").fetchall()
+    }
+    if "claimed_at" not in columns:
+        connection.execute("ALTER TABLE prepared_actions ADD COLUMN claimed_at TEXT")
     try:
         db_path.chmod(0o600)
     except OSError:
@@ -72,9 +79,10 @@ def prepare_action(
     with _connect(path) as connection:
         previous = connection.execute(
             """
-            SELECT action_id, idempotency_key, expires_at, approved_at, consumed_at
+            SELECT action_id, idempotency_key, expires_at, approved_at, claimed_at, consumed_at
             FROM prepared_actions
-            WHERE action_type = ? AND payload_sha256 = ? AND consumed_at IS NULL
+            WHERE action_type = ? AND payload_sha256 = ?
+              AND claimed_at IS NULL AND consumed_at IS NULL
             ORDER BY prepared_at DESC
             LIMIT 1
             """,
@@ -133,6 +141,8 @@ def approve_action(
             raise ValueError("Prepared action was not found")
         if row["consumed_at"]:
             raise ValueError("Prepared action has already been consumed")
+        if row["claimed_at"]:
+            raise ValueError("Prepared action has already been claimed for execution")
         if datetime.fromisoformat(row["expires_at"]) <= now:
             raise ValueError("Prepared action has expired; prepare the current live state again")
         if not secrets.compare_digest(row["payload_sha256"], approval_sha256):
@@ -151,29 +161,53 @@ def authorize_action(
     *,
     path: Path | None = None,
 ) -> dict[str, Any]:
-    """Validate an approved, unexpired, unchanged, unconsumed action before UI work."""
+    """Atomically claim an approved exact action before owner-system work.
+
+    A claimed action is terminal even if Upwork's final readback is ambiguous.
+    That prevents concurrent or later retries from repeating a consequential click.
+    """
     now = datetime.now(UTC)
     with _connect(path) as connection:
         row = connection.execute("SELECT * FROM prepared_actions WHERE action_id = ?", (action_id,)).fetchone()
-    if row is None:
-        raise ValueError("Prepared action was not found")
-    if row["action_type"] != action_type.strip().lower():
-        raise ValueError("Prepared action type does not match")
-    if row["approved_at"] is None:
-        raise ValueError("Fresh owner approval has not been recorded")
-    if row["consumed_at"] is not None:
-        raise ValueError("Prepared action has already been consumed")
-    if datetime.fromisoformat(row["expires_at"]) <= now:
-        raise ValueError("Prepared action has expired; prepare the current live state again")
-    digest = payload_digest(payload)
-    if not secrets.compare_digest(row["payload_sha256"], digest):
-        raise ValueError("Prepared payload changed after approval")
+        if row is None:
+            raise ValueError("Prepared action was not found")
+        if row["action_type"] != action_type.strip().lower():
+            raise ValueError("Prepared action type does not match")
+        if row["approved_at"] is None:
+            raise ValueError("Fresh owner approval has not been recorded")
+        if row["consumed_at"] is not None:
+            raise ValueError("Prepared action has already been consumed")
+        if row["claimed_at"] is not None:
+            raise ValueError(
+                "Prepared action has already been claimed for execution; "
+                "inspect Upwork before preparing anything again"
+            )
+        if datetime.fromisoformat(row["expires_at"]) <= now:
+            raise ValueError("Prepared action has expired; prepare the current live state again")
+        digest = payload_digest(payload)
+        if not secrets.compare_digest(row["payload_sha256"], digest):
+            raise ValueError("Prepared payload changed after approval")
+        claimed_at = now.isoformat()
+        claimed = connection.execute(
+            """
+            UPDATE prepared_actions
+            SET claimed_at = ?
+            WHERE action_id = ? AND claimed_at IS NULL AND consumed_at IS NULL
+            """,
+            (claimed_at, action_id),
+        )
+        if claimed.rowcount != 1:
+            raise ValueError(
+                "Prepared action was already claimed concurrently; "
+                "inspect Upwork before preparing anything again"
+            )
     return {
         "action_id": action_id,
         "authorized": True,
         "approval_sha256": digest,
         "idempotency_key": row["idempotency_key"],
         "expires_at": row["expires_at"],
+        "claimed_at": claimed_at,
     }
 
 
