@@ -202,16 +202,3 @@ async def audit_live_proposals(
     result = audit_proposals(proposals, stale_after_days=stale_after_days)
     result["external_action_taken"] = False
     return result
-
-
-def validate_message(room_id: str, message: str) -> dict[str, Any]:
-    validation = validate_upwork_copy(message)
-    payload = {"room_id": room_id, "message": message}
-    prepared_action = prepare_action("message", payload) if validation["valid"] else None
-    return {
-        **validation,
-        "approval_sha256": payload_digest(payload),
-        "prepared_action": prepared_action,
-        "external_action_taken": False,
-        "next_step": "Show the exact message to Josiah and wait for approval before calling upwork_send_message",
-    }

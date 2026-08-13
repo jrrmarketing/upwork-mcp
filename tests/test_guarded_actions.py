@@ -52,7 +52,109 @@ def test_action_schemas_are_strict() -> None:
     with pytest.raises(ValidationError):
         invitations.DeclineInvitationParams(
             invitation_url="https://www.upwork.com/ab/proposals/job/~123/apply/",
+            invitation_id="3333333333333333333",
+            job_title="Wrong route",
+            invitation_status="pending",
             reason="   ",
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.upwork.com/nx/proposals/",
+        "https://www.upwork.com/nx/proposals/archived",
+        "https://www.upwork.com/nx/proposals/1111111111111111111/edit",
+        "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+        "https://www.upwork.com/jobs/~abc?next=/nx/proposals/1111111111111111111",
+    ],
+)
+def test_withdrawal_rejects_everything_except_individual_submitted_proposal(url: str) -> None:
+    with pytest.raises(ValidationError):
+        proposals.WithdrawProposalParams(
+            proposal_url=url,
+            proposal_id="1111111111111111111",
+            job_title="Google Ads review",
+            proposal_status="active",
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333/accept",
+        "https://www.upwork.com/nx/proposals/job/~123/apply/",
+        "https://www.upwork.com/jobs/~123",
+        "https://www.upwork.com/nx/proposals/?next=/nx/proposals/interview/uid/3333333333333333333",
+    ],
+)
+def test_decline_rejects_non_invitation_and_invitation_accept_routes(url: str) -> None:
+    with pytest.raises(ValidationError):
+        invitations.DeclineInvitationParams(
+            invitation_url=url,
+            invitation_id="3333333333333333333",
+            job_title="Agency Google Ads support",
+            invitation_status="pending",
+        )
+
+
+@pytest.mark.parametrize(
+    ("url", "room_id"),
+    [
+        ("https://www.upwork.com/nx/messages/abc123456789", "abc123456789"),
+        ("https://www.upwork.com/ab/messages/rooms/abc123456789", "abc123456789"),
+    ],
+)
+def test_message_accepts_only_observed_individual_room_forms(url: str, room_id: str) -> None:
+    params = messages.SendMessageParams(
+        room_url=url,
+        room_id=room_id,
+        contact_name="Alex Client",
+        message="Exact copy",
+    )
+    assert params.room_id == room_id
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.upwork.com/nx/messages",
+        "https://www.upwork.com/ab/messages/rooms/",
+        "https://www.upwork.com/jobs/~123?next=/nx/messages/abc123456789",
+        "https://www.upwork.com/nx/messages/abc123456789/settings",
+    ],
+)
+def test_message_rejects_indexes_subroutes_and_query_bypass(url: str) -> None:
+    with pytest.raises(ValidationError):
+        messages.SendMessageParams(
+            room_url=url,
+            room_id="abc123456789",
+            contact_name="Alex Client",
+            message="Exact copy",
+        )
+
+
+def test_all_action_ids_must_match_their_exact_routes() -> None:
+    with pytest.raises(ValidationError):
+        proposals.WithdrawProposalParams(
+            proposal_url="https://www.upwork.com/nx/proposals/1111111111111111111",
+            proposal_id="2222222222222222222",
+            job_title="Google Ads review",
+            proposal_status="active",
+        )
+    with pytest.raises(ValidationError):
+        invitations.DeclineInvitationParams(
+            invitation_url="https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+            invitation_id="4444444444444444444",
+            job_title="Agency Google Ads support",
+            invitation_status="pending",
+        )
+    with pytest.raises(ValidationError):
+        messages.SendMessageParams(
+            room_url="https://www.upwork.com/nx/messages/abc123456789",
+            room_id="different",
+            contact_name="Alex Client",
+            message="Exact copy",
         )
 
 
@@ -123,21 +225,24 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
 
 
 @pytest.mark.asyncio
-async def test_legacy_withdrawal_call_is_prepare_only(monkeypatch) -> None:
+async def test_legacy_withdrawal_call_requires_identity_preflight(monkeypatch) -> None:
     monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
-    result = await proposals.withdraw_proposal("https://www.upwork.com/ab/proposals/123")
-    assert result["status"] == "approval_required"
-    assert result["exact_payload"] == {
-        "proposal_url": "https://www.upwork.com/ab/proposals/123",
-        "reason": None,
-    }
+    result = await proposals.withdraw_proposal("https://www.upwork.com/nx/proposals/1111111111111111111")
+    assert result["status"] == "preflight_required"
+    assert result["proposal_url"] == "https://www.upwork.com/nx/proposals/1111111111111111111"
+    assert result["proposal_id"] == "1111111111111111111"
     assert result["external_action_taken"] is False
 
 
 @pytest.mark.asyncio
 async def test_message_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(messages, "get_browser", _browser_must_not_open)
-    params = messages.SendMessageParams(room_id="room-123", message="Exact approved message")
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
 
     prepared = await messages.send_message(params)
     assert prepared["status"] == "approval_required"
@@ -155,7 +260,10 @@ async def test_message_requires_exact_approval_before_browser(monkeypatch) -> No
 async def test_decline_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(invitations, "get_browser", _browser_must_not_open)
     params = invitations.DeclineInvitationParams(
-        invitation_url="https://www.upwork.com/ab/proposals/job/~123/apply/",
+        invitation_url="https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+        invitation_id="3333333333333333333",
+        job_title="Agency Google Ads support",
+        invitation_status="pending",
         reason="Not interested in work described",
         note="We work with agencies on a consultancy basis, but not as a full-time embedded team member.",
     )
@@ -223,8 +331,9 @@ class _MessageElement(_TextElement):
 
 
 class _MessagePage:
-    def __init__(self) -> None:
-        self.url = ""
+    def __init__(self, *, contact_name: str = "Alex Client") -> None:
+        self.url = "https://www.upwork.com/nx/messages/room-1234567"
+        self.contact_name = contact_name
         self.messages: list[_MessageElement] = []
         self.input = _Input()
 
@@ -237,6 +346,8 @@ class _MessagePage:
         return []
 
     async def query_selector(self, selector: str):
+        if "contact-name" in selector or ".contact-name" in selector or "h2" in selector:
+            return _TextElement(self.contact_name)
         if "message-input" in selector or "textarea" in selector:
             return self.input
         if "send-button" in selector or "Send" in selector:
@@ -246,6 +357,53 @@ class _MessagePage:
 
             return _Button(send)
         return None
+
+
+class _ProposalPage:
+    def __init__(self, *, title: str, status: str = "active") -> None:
+        self.url = "https://www.upwork.com/nx/proposals/1111111111111111111"
+        self.title = title
+        self.status = status
+        self.body = "Submitted proposal details"
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.url = url
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return _TextElement(self.body)
+        if "job-title" in selector or "h1" in selector:
+            return _TextElement(self.title)
+        if "proposal-status" in selector or selector == ".status":
+            return _TextElement(self.status)
+        if "withdraw-button" in selector or "Withdraw" in selector:
+            return _Button(lambda: None, "Withdraw")
+        return None
+
+    async def query_selector_all(self, _selector: str) -> list[Any]:
+        return []
+
+
+class _InvitationPage:
+    def __init__(self, *, title: str) -> None:
+        self.url = "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333"
+        self.title = title
+        self.body = "Pending invitation"
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.url = url
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return _TextElement(self.body)
+        if "job-title" in selector or "h1" in selector:
+            return _TextElement(self.title)
+        if "decline-button" in selector or "Decline" in selector:
+            return _Button(lambda: None, "Decline invitation")
+        return None
+
+    async def query_selector_all(self, _selector: str) -> list[Any]:
+        return []
 
 
 class _Browser:
@@ -267,7 +425,12 @@ class _Browser:
 async def test_approved_message_requires_exact_owner_system_readback(monkeypatch) -> None:
     page = _MessagePage()
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(room_id="room-123", message="Exact approved message")
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
     params = _approved(params, messages.message_payload(params))
 
     result = await messages.send_message(params)
@@ -275,6 +438,96 @@ async def test_approved_message_requires_exact_owner_system_readback(monkeypatch
     assert result["external_action_taken"] is True
     assert result["owner_system_readback"]["confirmed"] is True
     assert result["owner_system_readback"]["exact_visible_copy"] is True
+    assert result["owner_system_readback"]["conversation_identity"]["contact_name"] == "Alex Client"
+
+
+@pytest.mark.asyncio
+async def test_approved_message_stops_if_live_recipient_changed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(contact_name="Different Client")
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+    payload = messages.message_payload(params)
+    prepared = prepare_action("message", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await messages.send_message(params)
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    assert page.messages == []
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+async def test_approved_withdrawal_stops_if_live_proposal_identity_changed(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _ProposalPage(title="Different Google Ads job")
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+    params = proposals.WithdrawProposalParams(
+        proposal_url="https://www.upwork.com/nx/proposals/1111111111111111111",
+        proposal_id="1111111111111111111",
+        job_title="Approved Google Ads job",
+        proposal_status="active",
+    )
+    payload = proposals.proposal_withdrawal_payload(params)
+    prepared = prepare_action("withdrawal", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await proposals.withdraw_proposal(params)
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    replay = await proposals.withdraw_proposal(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+async def test_approved_decline_stops_if_live_invitation_identity_changed(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _InvitationPage(title="Different agency role")
+    monkeypatch.setattr(invitations, "get_browser", lambda: _Browser(page))
+    params = invitations.DeclineInvitationParams(
+        invitation_url="https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333",
+        invitation_id="3333333333333333333",
+        job_title="Approved agency role",
+        invitation_status="pending",
+    )
+    payload = invitations.invitation_decline_payload(params)
+    prepared = prepare_action("invitation_decline", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await invitations.decline_invitation(params)
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    replay = await invitations.decline_invitation(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
 
 
 class _InspectPage:

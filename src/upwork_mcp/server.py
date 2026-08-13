@@ -12,14 +12,14 @@ from pydantic import Field
 from .browser.auth import check_session, login_interactive, logout
 from .browser.client import close_browser, get_browser
 from .ledger import bidding_report, record_outcome
-from .prepared_actions import approve_action, consume_action, prepare_action
+from .prepared_actions import approve_action, consume_action
 from .tools.contracts import ContractsParams, get_contract_details, get_contracts, get_work_diary
 from .tools.invitations import (
     DeclineInvitationParams,
     InvitationsParams,
     decline_invitation,
     get_invitations,
-    prepare_invitation_decline,
+    prepare_invitation_decline_from_live,
 )
 from .tools.jobs import (
     JobDetailsParams,
@@ -33,7 +33,6 @@ from .tools.management import (
     audit_live_proposals,
     find_opportunities,
     prepare_proposal,
-    validate_message,
 )
 from .tools.messages import (
     MessagesParams,
@@ -41,6 +40,7 @@ from .tools.messages import (
     get_conversation_messages,
     get_messages,
     get_unread_count,
+    prepare_message_from_live,
     send_message,
 )
 from .tools.profile import get_connects_balance, get_my_profile, get_profile_stats
@@ -52,7 +52,7 @@ from .tools.proposals import (
     get_proposal_details,
     get_proposals,
     inspect_proposal_form,
-    proposal_withdrawal_payload,
+    prepare_proposal_withdrawal,
     submit_proposal,
     withdraw_proposal,
 )
@@ -321,28 +321,28 @@ async def upwork_prepare_withdrawal(
     reason: str | None = None,
 ) -> dict:
     """Read the proposal and prepare one exact withdrawal; never withdraws."""
-    params = WithdrawProposalParams(proposal_url=proposal_url, reason=reason)
-    current = await get_proposal_details(params.proposal_url)
-    payload = proposal_withdrawal_payload(params)
-    return {
-        "ready_for_owner_approval": True,
-        "warning": "Withdrawing does not refund Connects or improve freelancer search visibility.",
-        "current_proposal": current,
-        "exact_withdrawal": payload,
-        "prepared_action": prepare_action("withdrawal", payload),
-        "external_action_taken": False,
-    }
+    return await prepare_proposal_withdrawal(proposal_url, reason)
 
 
 @mcp.tool()
 async def upwork_confirm_withdrawal(
     action_id: str,
     proposal_url: str,
+    proposal_id: str,
+    job_title: str,
+    proposal_status: str,
     reason: str | None = None,
 ) -> dict:
     """Commit one unexpired approved withdrawal and consume its action after Upwork readback."""
     result = await withdraw_proposal(
-        WithdrawProposalParams(action_id=action_id, proposal_url=proposal_url, reason=reason)
+        WithdrawProposalParams(
+            action_id=action_id,
+            proposal_url=proposal_url,
+            proposal_id=proposal_id,
+            job_title=job_title,
+            proposal_status=proposal_status,
+            reason=reason,
+        )
     )
     if result.get("status") == "withdrawn" and result.get("owner_system_readback", {}).get("confirmed"):
         result["prepared_action"] = consume_action(action_id)
@@ -375,14 +375,28 @@ async def upwork_get_conversation(
 
 @mcp.tool()
 async def upwork_prepare_message(room_id: str, message: str) -> dict:
-    """Validate exact on-platform copy and create an expiring approval record; never sends."""
-    return validate_message(room_id, message)
+    """Read the exact recipient, validate copy, and prepare approval state; never sends."""
+    return await prepare_message_from_live(room_id, message)
 
 
 @mcp.tool()
-async def upwork_send_prepared_message(action_id: str, room_id: str, message: str) -> dict:
+async def upwork_send_prepared_message(
+    action_id: str,
+    room_url: str,
+    room_id: str,
+    contact_name: str,
+    message: str,
+) -> dict:
     """Send one unexpired approved exact-copy message and consume its action after readback."""
-    result = await send_message(SendMessageParams(action_id=action_id, room_id=room_id, message=message))
+    result = await send_message(
+        SendMessageParams(
+            action_id=action_id,
+            room_url=room_url,
+            room_id=room_id,
+            contact_name=contact_name,
+            message=message,
+        )
+    )
     if result.get("status") == "sent" and result.get("owner_system_readback", {}).get("confirmed"):
         result["prepared_action"] = consume_action(action_id)
     return result
@@ -414,8 +428,10 @@ async def upwork_prepare_invitation_decline(
     note: str | None = None,
 ) -> dict:
     """Prepare one decline with future-invitation blocking locked off; never declines."""
-    return prepare_invitation_decline(
-        DeclineInvitationParams(invitation_url=invitation_url, reason=reason, note=note)
+    return await prepare_invitation_decline_from_live(
+        invitation_url,
+        reason=reason,
+        note=note,
     )
 
 
@@ -423,6 +439,9 @@ async def upwork_prepare_invitation_decline(
 async def upwork_confirm_invitation_decline(
     action_id: str,
     invitation_url: str,
+    invitation_id: str,
+    job_title: str,
+    invitation_status: str,
     reason: Literal["Not interested in work described"] = "Not interested in work described",
     note: str | None = None,
 ) -> dict:
@@ -430,6 +449,9 @@ async def upwork_confirm_invitation_decline(
     params = DeclineInvitationParams(
         action_id=action_id,
         invitation_url=invitation_url,
+        invitation_id=invitation_id,
+        job_title=job_title,
+        invitation_status=invitation_status,
         reason=reason,
         note=note,
         block_future_invitations=False,

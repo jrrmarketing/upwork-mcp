@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..browser.client import get_browser
-from ..prepared_actions import authorize_action
+from ..prepared_actions import authorize_action, prepare_action
 
 
 class StrictToolModel(BaseModel):
@@ -57,12 +57,28 @@ def validate_job_or_invitation_url(value: str) -> str:
     return candidate
 
 
-def validate_proposal_url(value: str) -> str:
+_SUBMITTED_PROPOSAL_PATH = re.compile(r"^/nx/proposals/(?P<proposal_id>[0-9]{19})/?$")
+
+
+def parse_submitted_proposal_url(value: str) -> tuple[str, str]:
+    """Return the canonical individual submitted-proposal URL and its ID.
+
+    Proposal indexes, application forms, invitations, and a matching route hidden
+    in the query string are intentionally rejected.
+    """
+
     candidate = validate_upwork_url(value)
-    path = urlparse(candidate).path
-    if "/proposals/" not in path:
-        raise ValueError("URL must point to an Upwork proposal route")
-    return candidate
+    match = _SUBMITTED_PROPOSAL_PATH.fullmatch(urlparse(candidate).path)
+    if not match:
+        raise ValueError(
+            "URL must point to one individual submitted proposal at /nx/proposals/<proposal_id>"
+        )
+    proposal_id = match.group("proposal_id")
+    return f"https://www.upwork.com/nx/proposals/{proposal_id}", proposal_id
+
+
+def validate_proposal_url(value: str) -> str:
+    return parse_submitted_proposal_url(value)[0]
 
 
 def approval_payload_digest(payload: Mapping[str, Any]) -> str:
@@ -195,12 +211,29 @@ class WithdrawProposalParams(StrictToolModel):
     """Exact approved payload for withdrawing an existing proposal."""
 
     proposal_url: str = Field(description="Full Upwork proposal URL")
+    proposal_id: str = Field(
+        pattern=r"^[0-9]{19}$",
+        description="Exact 19-digit submitted proposal ID",
+    )
+    job_title: str = Field(min_length=1, max_length=1000, description="Live job title bound at preparation")
+    proposal_status: str = Field(
+        min_length=1,
+        max_length=200,
+        description="Live proposal status bound at preparation",
+    )
     reason: str | None = Field(default=None, max_length=1000)
     approved: bool = False
     approval_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
     action_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     _validate_proposal_url = field_validator("proposal_url")(validate_proposal_url)
+
+    @model_validator(mode="after")
+    def _proposal_id_must_match_url(self) -> WithdrawProposalParams:
+        _, route_id = parse_submitted_proposal_url(self.proposal_url)
+        if route_id != self.proposal_id:
+            raise ValueError("proposal_id does not match the individual proposal URL")
+        return self
 
 
 def proposal_submission_payload(params: SubmitProposalParams) -> dict[str, Any]:
@@ -226,7 +259,13 @@ def proposal_submission_payload(params: SubmitProposalParams) -> dict[str, Any]:
 
 
 def proposal_withdrawal_payload(params: WithdrawProposalParams) -> dict[str, Any]:
-    return {"proposal_url": params.proposal_url, "reason": params.reason}
+    return {
+        "proposal_url": params.proposal_url,
+        "proposal_id": params.proposal_id,
+        "job_title": params.job_title,
+        "proposal_status": params.proposal_status,
+        "reason": params.reason,
+    }
 
 
 async def get_proposals(params: ProposalsParams) -> list[dict]:
@@ -346,9 +385,20 @@ async def get_proposal_details(proposal_url: str) -> dict:
 async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
     """Read one proposal while the browser operation lock is held."""
 
+    proposal_url, proposal_id = parse_submitted_proposal_url(proposal_url)
     await page.goto(proposal_url, wait_until="networkidle")
 
-    details: dict[str, Any] = {"url": proposal_url}
+    try:
+        live_url, live_proposal_id = parse_submitted_proposal_url(str(getattr(page, "url", "")))
+    except ValueError as error:
+        raise ValueError("Upwork did not remain on an individual submitted-proposal route") from error
+    if live_proposal_id != proposal_id:
+        raise ValueError("Upwork opened a different submitted proposal than requested")
+
+    details: dict[str, Any] = {
+        "url": live_url,
+        "proposal_id": proposal_id,
+    }
 
     # Job title
     title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
@@ -366,9 +416,17 @@ async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
         details["bid"] = (await bid_el.text_content() or "").strip()
 
     # Status
-    status_el = await page.query_selector('[data-test="proposal-status"], .status')
+    status_el = await page.query_selector(
+        '[data-test="proposal-status"], .proposal-status, [data-test*="proposal-status"]'
+    )
     if status_el:
         details["status"] = (await status_el.text_content() or "").strip()
+    if not details.get("status"):
+        page_text = await _page_text(page)
+        if re.search(r"proposal (?:was |has been )?withdrawn", page_text, re.I):
+            details["status"] = "withdrawn"
+        elif await page.query_selector('[data-test="withdraw-button"], button:has-text("Withdraw")'):
+            details["status"] = "withdrawable"
 
     # Client response/messages
     messages = []
@@ -380,6 +438,61 @@ async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
     details["messages"] = messages
 
     return details
+
+
+def _proposal_identity(details: Mapping[str, Any]) -> dict[str, str] | None:
+    """Return the live identity/status fields that must survive owner approval."""
+
+    proposal_id = str(details.get("proposal_id") or "").strip()
+    job_title = re.sub(r"\s+", " ", str(details.get("job_title") or "")).strip()
+    proposal_status = re.sub(r"\s+", " ", str(details.get("status") or "")).strip()
+    if not proposal_id or not job_title or not proposal_status:
+        return None
+    return {
+        "proposal_id": proposal_id,
+        "job_title": job_title,
+        "proposal_status": proposal_status,
+    }
+
+
+async def prepare_proposal_withdrawal(
+    proposal_url: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Read and bind one submitted proposal before creating approval state."""
+
+    canonical_url, _ = parse_submitted_proposal_url(proposal_url)
+    current = await get_proposal_details(canonical_url)
+    identity = _proposal_identity(current)
+    errors: list[str] = []
+    if identity is None:
+        errors.append("The proposal identity and live status could not be read back from Upwork")
+    elif identity["proposal_status"].casefold() == "withdrawn":
+        errors.append("The proposal is already withdrawn")
+
+    payload: dict[str, Any] | None = None
+    prepared = None
+    if identity is not None:
+        params = WithdrawProposalParams(
+            proposal_url=canonical_url,
+            proposal_id=identity["proposal_id"],
+            job_title=identity["job_title"],
+            proposal_status=identity["proposal_status"],
+            reason=reason,
+        )
+        payload = proposal_withdrawal_payload(params)
+        if not errors:
+            prepared = prepare_action("withdrawal", payload)
+
+    return {
+        "ready_for_owner_approval": not errors,
+        "errors": errors,
+        "warning": "Withdrawing does not refund Connects or improve freelancer search visibility.",
+        "current_proposal": current,
+        "exact_withdrawal": payload,
+        "prepared_action": prepared,
+        "external_action_taken": False,
+    }
 
 
 async def _page_text(page) -> str:
@@ -925,13 +1038,23 @@ async def withdraw_proposal(params: WithdrawProposalParams | str) -> dict:
     """Withdraw a submitted proposal.
 
     Args:
-        params: Exact approved withdrawal, or a legacy proposal URL. A legacy URL
-            produces a safe approval artifact and never opens the browser.
+        params: Exact approved withdrawal. A legacy URL alone is not enough to
+            bind the proposal identity and status, so it never opens the browser.
 
     Returns withdrawal status.
     """
     if isinstance(params, str):
-        params = WithdrawProposalParams(proposal_url=params)
+        canonical_url, proposal_id = parse_submitted_proposal_url(params)
+        return {
+            "status": "preflight_required",
+            "message": (
+                "Read the individual proposal identity and status with the withdrawal "
+                "preparation workflow before requesting owner approval."
+            ),
+            "proposal_url": canonical_url,
+            "proposal_id": proposal_id,
+            "external_action_taken": False,
+        }
     payload = proposal_withdrawal_payload(params)
     blocked = approval_gate(
         "withdraw_proposal",
@@ -952,10 +1075,34 @@ async def withdraw_proposal(params: WithdrawProposalParams | str) -> dict:
 async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> dict[str, Any]:
     """Withdraw while the browser operation lock is held."""
 
-    await page.goto(params.proposal_url, wait_until="networkidle")
-    before_text = await _page_text(page)
-    if re.search(r"proposal (?:was |has been )?withdrawn", before_text, re.I):
-        return {"status": "already_withdrawn", "external_action_taken": False}
+    current = await _get_proposal_details_on_page(params.proposal_url, page)
+    live_identity = _proposal_identity(current)
+    approved_identity = {
+        "proposal_id": params.proposal_id,
+        "job_title": re.sub(r"\s+", " ", params.job_title).strip(),
+        "proposal_status": re.sub(r"\s+", " ", params.proposal_status).strip(),
+    }
+    if live_identity and live_identity["proposal_status"].casefold() == "withdrawn":
+        return {
+            "status": "already_withdrawn",
+            "owner_system_readback": {
+                "confirmed": True,
+                "proposal_identity": live_identity,
+                "url": current["url"],
+            },
+            "external_action_taken": False,
+        }
+    if live_identity != approved_identity:
+        return {
+            "status": "live_identity_mismatch",
+            "message": (
+                "The live proposal identity or status differs from the approved payload; "
+                "nothing was withdrawn. Prepare the current proposal again before any new approval."
+            ),
+            "approved_proposal_identity": approved_identity,
+            "live_proposal_identity": live_identity,
+            "external_action_taken": False,
+        }
 
     # Find withdraw button
     withdraw_btn = await page.query_selector('[data-test="withdraw-button"], button:has-text("Withdraw")')
@@ -994,12 +1141,39 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
         text = await _page_text(page)
         evidence = re.search(r"proposal (?:was |has been )?withdrawn|withdrawal confirmed", text, re.I)
         if evidence:
+            try:
+                readback_details = await _get_proposal_details_on_page(params.proposal_url, page)
+            except ValueError:
+                readback_details = {}
+            readback_identity = _proposal_identity(readback_details)
+            same_target = bool(
+                readback_identity
+                and readback_identity["proposal_id"] == params.proposal_id
+                and readback_identity["job_title"] == approved_identity["job_title"]
+                and "withdraw" in readback_identity["proposal_status"].casefold()
+            )
+            if not same_target:
+                return {
+                    "status": "unknown",
+                    "message": (
+                        "Upwork showed withdrawal text but the same proposal identity and withdrawn "
+                        "status could not be read back; do not retry automatically."
+                    ),
+                    "owner_system_readback": {
+                        "confirmed": False,
+                        "evidence": evidence.group(0),
+                        "proposal_identity": readback_identity,
+                        "url": str(getattr(page, "url", params.proposal_url)),
+                    },
+                    "external_action_taken": True,
+                }
             return {
                 "status": "withdrawn",
                 "message": "Proposal withdrawal read back from Upwork",
                 "owner_system_readback": {
                     "confirmed": True,
                     "evidence": evidence.group(0),
+                    "proposal_identity": readback_identity,
                     "url": str(getattr(page, "url", params.proposal_url)),
                 },
                 "external_action_taken": True,
@@ -1010,6 +1184,7 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
         "message": "Upwork did not confirm withdrawal; do not retry automatically.",
         "owner_system_readback": {
             "confirmed": False,
+            "proposal_identity": approved_identity,
             "url": str(getattr(page, "url", params.proposal_url)),
         },
         "external_action_taken": True,
