@@ -301,6 +301,39 @@ class _Button(_TextElement):
         self.callback()
 
 
+class _HighlightOption(_TextElement):
+    def __init__(self, title: str | None) -> None:
+        super().__init__("Select highlight")
+        self.title = title
+
+    async def evaluate(self, _script: str) -> str | None:
+        return self.title
+
+    async def is_visible(self) -> bool:
+        return True
+
+
+class _HighlightTab(_Button):
+    def __init__(self, tab_id: str, callback: Callable[[], None]) -> None:
+        super().__init__(callback, tab_id.replace("_", " ").title())
+        self.tab_id = tab_id
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.tab_id if name == "data-ev-tab" else None
+
+    async def is_visible(self) -> bool:
+        return True
+
+
+class _Keyboard:
+    def __init__(self, callback: Callable[[], None]) -> None:
+        self.callback = callback
+
+    async def press(self, key: str) -> None:
+        if key == "Escape":
+            self.callback()
+
+
 class _Input(_TextElement):
     def __init__(self) -> None:
         super().__init__()
@@ -541,15 +574,38 @@ async def test_approved_decline_stops_if_live_invitation_identity_changed(
 
 
 class _InspectPage:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        unresolved_highlight: bool = False,
+        dismiss_highlight: bool = True,
+        escape_dismisses_highlight: bool = False,
+    ) -> None:
         self.url = "https://www.upwork.com/jobs/~123"
         self.form_open = False
+        self.highlight_open = False
+        self.highlight_tab = "portfolio"
+        self.dismiss_highlight = dismiss_highlight
+        self.escape_dismisses_highlight = escape_dismisses_highlight
+        self.keyboard = _Keyboard(self._escape)
         self.body = "Google Ads audit job"
+        self.highlight_options: dict[str, list[str | None]] = {
+            "portfolio": ["  Family   Law Growth  ", "Home Services Lead Generation"],
+            "certifications": ["Google Ads Search Certification"],
+            "upwork_jobs": [None if unresolved_highlight else "Google Ads Account Audit"],
+        }
+
+    def _escape(self) -> None:
+        if self.escape_dismisses_highlight:
+            self.highlight_open = False
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
 
     async def wait_for_load_state(self, _state: str) -> None:
+        return None
+
+    async def wait_for_timeout(self, _milliseconds: int) -> None:
         return None
 
     async def query_selector(self, selector: str):
@@ -576,11 +632,28 @@ Boost your proposal auction: top bid 8 Connects
 """
 
             return _Button(open_form, "Apply Now")
+        if self.form_open and "Add a portfolio project" in selector:
+            return _Button(lambda: setattr(self, "highlight_open", True), "Add a portfolio project")
+        if self.highlight_open and "aria-label" in selector and "Close" in selector:
+            def close_highlights() -> None:
+                if self.dismiss_highlight:
+                    self.highlight_open = False
+
+            return _Button(close_highlights, "Close")
+        if self.highlight_open and "Add profile highlights" in selector:
+            return _TextElement("Add profile highlights")
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
         if "screening-question" in selector:
             return [_TextElement("What similar work have you done?")]
+        if self.highlight_open and 'role="tab"' in selector:
+            return [
+                _HighlightTab(tab_id, lambda tab_id=tab_id: setattr(self, "highlight_tab", tab_id))
+                for tab_id in self.highlight_options
+            ]
+        if self.highlight_open and "Select highlight" in selector:
+            return [_HighlightOption(title) for title in self.highlight_options[self.highlight_tab]]
         return []
 
 
@@ -602,4 +675,59 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
     ]
     assert result["fee_net_text"]
     assert result["boost_auction_text"]
+    assert result["available_profile_highlights"] == [
+        "Family Law Growth",
+        "Home Services Lead Generation",
+        "Google Ads Search Certification",
+        "Google Ads Account Audit",
+    ]
+    assert result["available_profile_highlights_status"] == "complete"
+    assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
+    assert result["available_profile_highlights_details"]["tabs_inspected"] == [
+        "portfolio",
+        "certifications",
+        "upwork_jobs",
+    ]
+    assert page.highlight_open is False
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_marks_unreadable_highlight_titles_incomplete(monkeypatch) -> None:
+    page = _InspectPage(unresolved_highlight=True)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "incomplete"
+    assert result["available_profile_highlights_details"]["selectable_options_seen"] == 4
+    assert result["available_profile_highlights_details"]["titles_extracted"] == 3
+    assert "1 selectable option" in result["available_profile_highlights_details"]["message"]
+    assert page.highlight_open is False
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_marks_undismissed_highlight_chooser_incomplete(monkeypatch) -> None:
+    page = _InspectPage(dismiss_highlight=False)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "incomplete"
+    assert result["available_profile_highlights_details"]["chooser_dismissed"] is False
+    assert "could not be dismissed" in result["available_profile_highlights_details"]["message"]
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_uses_escape_when_close_does_not_dismiss(monkeypatch) -> None:
+    page = _InspectPage(dismiss_highlight=False, escape_dismisses_highlight=True)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "complete"
+    assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
+    assert page.highlight_open is False
     assert result["external_action_taken"] is False

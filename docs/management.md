@@ -84,6 +84,9 @@ is attached. It does not change the existing Upwork profile title.
 
 Current portfolio-highlight titles must be read from the live owner system. Several old titles
 conflict with audited case-study evidence, so the old digest is not an automatic selection list.
+Proposal preparation requires a `complete` live chooser enumeration and rejects any requested
+highlight title that is not in `available_profile_highlights`. An unavailable or incomplete
+chooser inspection blocks preparation rather than claiming the title was validated.
 
 ## Boosts
 

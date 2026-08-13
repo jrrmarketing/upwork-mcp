@@ -642,6 +642,284 @@ async def _screening_question_texts(page) -> list[str]:
     return _dedupe_text(values)
 
 
+_PROFILE_HIGHLIGHT_OPENER = (
+    'button:has-text("Add profile highlights"), '
+    'button:has-text("Add a portfolio project"), '
+    'button:has-text("Add an Upwork job"), '
+    'button:has-text("Add a certificate"), '
+    'button[data-test*="add"][data-test*="profile-highlight"]'
+)
+_PROFILE_HIGHLIGHT_CHOOSER = (
+    '[role="dialog"]:has-text("Add profile highlights"), '
+    '.air3-modal:has-text("Add profile highlights"), '
+    '.is-modal-fullscreen:has-text("Add profile highlights")'
+)
+_PROFILE_HIGHLIGHT_TABS = (
+    'button[role="tab"][data-ev-tab], '
+    '[role="dialog"] button[role="tab"], '
+    '.is-modal-fullscreen button[role="tab"]'
+)
+_PROFILE_HIGHLIGHT_SELECT_BUTTONS = (
+    'button:text-is("Select highlight"), '
+    'button[data-test*="select-highlight"], '
+    '[data-test*="profile-highlight"] button:text-is("Select")'
+)
+_PROFILE_HIGHLIGHT_CLOSE = (
+    '[role="dialog"] button[aria-label="Close"], '
+    '[role="dialog"] button[aria-label*="close" i], '
+    '.is-modal-fullscreen button[aria-label="Close"], '
+    '.is-modal-fullscreen button:has-text("Cancel"), '
+    '[role="dialog"] button:has-text("Cancel")'
+)
+
+
+def _normalize_visible_title(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+async def _element_is_visible(element) -> bool:
+    try:
+        return bool(await element.is_visible())
+    except Exception:
+        # Older mocks and some detached handles do not expose visibility. The
+        # surrounding selector is already visibility-oriented, so keep reading.
+        return True
+
+
+async def _highlight_title_for_button(button) -> str | None:
+    """Read the title belonging to one Select highlight button without clicking it."""
+
+    script = r"""button => {
+      const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+      const visible = element => {
+        if (!element) return false;
+        const style = window.getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const usable = value => {
+        const text = clean(value);
+        return text && text.length <= 300
+          && !/^(select highlight|selected|add to highlights|view details)$/i.test(text)
+          && !/^add profile highlights$/i.test(text);
+      };
+
+      const ariaLabel = clean(button.getAttribute('aria-label'));
+      const ariaMatch = ariaLabel.match(/^select highlight(?: for)?\s*[:\-]?\s*(.+)$/i);
+      if (ariaMatch && usable(ariaMatch[1])) return clean(ariaMatch[1]);
+
+      const labelledBy = clean(button.getAttribute('aria-labelledby'));
+      for (const id of labelledBy.split(' ')) {
+        const labelled = document.getElementById(id);
+        const text = clean(labelled && labelled.innerText);
+        if (usable(text)) return text;
+      }
+
+      let card = button.parentElement;
+      for (let depth = 0; depth < 12 && card; depth += 1, card = card.parentElement) {
+        const selectButtons = [...card.querySelectorAll('button')].filter(candidate =>
+          /^select highlight$/i.test(clean(candidate.innerText)) && visible(candidate)
+        );
+        if (selectButtons.length !== 1) continue;
+
+        const preferred = card.querySelectorAll(
+          '[data-test*="title"], [data-test*="name"], [data-qa*="title"], '
+          '[role="heading"], h1, h2, h3, h4, h5, h6'
+        );
+        for (const candidate of preferred) {
+          const text = clean(candidate.innerText);
+          if (candidate !== button && visible(candidate) && usable(text)) return text;
+        }
+
+        const buttonText = new Set(
+          [...card.querySelectorAll('button')].flatMap(candidate =>
+            (candidate.innerText || '').split('\n').map(clean).filter(Boolean)
+          )
+        );
+        const generic = /^(portfolio project|portfolio|upwork job|certificate|certification)$/i;
+        for (const line of (card.innerText || '').split('\n').map(clean)) {
+          if (usable(line) && !buttonText.has(line) && !generic.test(line)) return line;
+        }
+      }
+      return null;
+    }"""
+    try:
+        value = await button.evaluate(script)
+    except Exception:
+        return None
+    if not isinstance(value, str):
+        return None
+    title = _normalize_visible_title(value)
+    return title or None
+
+
+async def _visible_profile_highlight_options(page) -> tuple[list[str], int]:
+    """Return normalized visible titles and the visible selectable-card count."""
+
+    titles: list[str] = []
+    option_count = 0
+    for button in await page.query_selector_all(_PROFILE_HIGHLIGHT_SELECT_BUTTONS):
+        if not await _element_is_visible(button):
+            continue
+        label = _normalize_visible_title((await button.text_content()) or "")
+        if label and not re.search(r"select highlight", label, re.I):
+            continue
+        option_count += 1
+        title = await _highlight_title_for_button(button)
+        if title:
+            titles.append(title)
+    return _dedupe_text(titles), option_count
+
+
+async def _profile_highlight_tabs(page) -> list[tuple[str, Any]]:
+    tabs: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for index, tab in enumerate(await page.query_selector_all(_PROFILE_HIGHLIGHT_TABS)):
+        if not await _element_is_visible(tab):
+            continue
+        try:
+            tab_id = _normalize_visible_title((await tab.get_attribute("data-ev-tab")) or "")
+        except Exception:
+            tab_id = ""
+        label = _normalize_visible_title((await tab.text_content()) or "")
+        identity = tab_id or label or f"tab-{index + 1}"
+        if identity not in seen:
+            seen.add(identity)
+            tabs.append((identity, tab))
+    return tabs
+
+
+async def _profile_highlight_chooser_visible(page) -> bool:
+    chooser = await page.query_selector(_PROFILE_HIGHLIGHT_CHOOSER)
+    if chooser and await _element_is_visible(chooser):
+        return True
+    _, option_count = await _visible_profile_highlight_options(page)
+    return option_count > 0
+
+
+async def _settle_profile_highlight_view(page) -> None:
+    try:
+        await page.wait_for_timeout(100)
+    except Exception:
+        await asyncio.sleep(0)
+
+
+async def _wait_for_profile_highlight_chooser(page) -> None:
+    try:
+        await page.wait_for_selector(_PROFILE_HIGHLIGHT_CHOOSER, state="visible", timeout=3000)
+    except Exception:
+        await _settle_profile_highlight_view(page)
+
+
+async def _dismiss_profile_highlight_chooser(page) -> bool:
+    close_button = await page.query_selector(_PROFILE_HIGHLIGHT_CLOSE)
+    if close_button and await _element_is_visible(close_button):
+        try:
+            await _click(page, close_button)
+            await _settle_profile_highlight_view(page)
+            if not await _profile_highlight_chooser_visible(page):
+                return True
+        except Exception:
+            pass
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        return False
+    await _settle_profile_highlight_view(page)
+    return not await _profile_highlight_chooser_visible(page)
+
+
+async def _inspect_available_profile_highlights(page) -> dict[str, Any]:
+    """Enumerate every visible chooser tab without selecting or committing anything."""
+
+    result: dict[str, Any] = {
+        "titles": [],
+        "status": "unavailable",
+        "details": {
+            "chooser_opened": False,
+            "chooser_dismissed": True,
+            "tabs_found": [],
+            "tabs_inspected": [],
+            "selectable_options_seen": 0,
+            "titles_extracted": 0,
+            "message": "The live profile-highlight chooser was not inspected.",
+        },
+    }
+    open_button = await page.query_selector(_PROFILE_HIGHLIGHT_OPENER)
+    if not open_button:
+        result["details"]["message"] = "The live profile-highlight chooser control was not found."
+        return result
+
+    chooser_opened = False
+    opener_clicked = False
+    try:
+        await _click(page, open_button)
+        opener_clicked = True
+        await _wait_for_profile_highlight_chooser(page)
+        tabs = await _profile_highlight_tabs(page)
+        _, first_option_count = await _visible_profile_highlight_options(page)
+        chooser_opened = bool(tabs or first_option_count or await _profile_highlight_chooser_visible(page))
+        result["details"]["chooser_opened"] = chooser_opened
+        result["details"]["tabs_found"] = [identity for identity, _ in tabs]
+        if not chooser_opened:
+            result["details"]["message"] = "The profile-highlight chooser did not open."
+            return result
+
+        titles: list[str] = []
+        selectable_options_seen = 0
+        unresolved_options = 0
+        tab_failures: list[str] = []
+        views = tabs or [("current_view", None)]
+        for identity, tab in views:
+            if tab is not None:
+                try:
+                    await _click(page, tab)
+                    await _settle_profile_highlight_view(page)
+                except Exception:
+                    refreshed = dict(await _profile_highlight_tabs(page)).get(identity)
+                    if refreshed is None:
+                        tab_failures.append(identity)
+                        continue
+                    try:
+                        await _click(page, refreshed)
+                        await _settle_profile_highlight_view(page)
+                    except Exception:
+                        tab_failures.append(identity)
+                        continue
+            view_titles, view_option_count = await _visible_profile_highlight_options(page)
+            titles.extend(view_titles)
+            selectable_options_seen += view_option_count
+            unresolved_options += max(0, view_option_count - len(view_titles))
+            result["details"]["tabs_inspected"].append(identity)
+
+        result["titles"] = _dedupe_text(titles)
+        result["details"]["selectable_options_seen"] = selectable_options_seen
+        result["details"]["titles_extracted"] = len(result["titles"])
+        if tab_failures or unresolved_options:
+            result["status"] = "incomplete"
+            reasons = []
+            if tab_failures:
+                reasons.append(f"tabs could not be inspected: {', '.join(tab_failures)}")
+            if unresolved_options:
+                reasons.append(f"{unresolved_options} selectable option titles could not be read")
+            result["details"]["message"] = "Live profile-highlight enumeration is incomplete: " + "; ".join(reasons)
+        else:
+            result["status"] = "complete"
+            result["details"]["message"] = "All visible profile-highlight chooser tabs were enumerated."
+    except Exception as error:
+        result["status"] = "incomplete" if chooser_opened else "unavailable"
+        result["details"]["message"] = f"Profile-highlight enumeration failed: {type(error).__name__}."
+    finally:
+        if opener_clicked:
+            dismissed = await _dismiss_profile_highlight_chooser(page)
+            result["details"]["chooser_dismissed"] = dismissed
+            if not dismissed:
+                result["status"] = "incomplete"
+                result["details"]["message"] = (
+                    "Live profile-highlight enumeration is incomplete because the chooser could not be dismissed."
+                )
+    return result
+
+
 async def inspect_proposal_form(
     job_url: str | InspectProposalFormParams,
 ) -> dict[str, Any]:
@@ -691,7 +969,24 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
             or ("connect" in line.lower() and any(word in line.lower() for word in ("bid", "auction")))
         ]
     )
-    duration_options = await _inspect_duration_options(page, text) if form_status == "ready" else []
+    if form_status == "ready":
+        highlight_inspection = await _inspect_available_profile_highlights(page)
+        duration_options = await _inspect_duration_options(page, text)
+    else:
+        highlight_inspection = {
+            "titles": [],
+            "status": "unavailable",
+            "details": {
+                "chooser_opened": False,
+                "chooser_dismissed": True,
+                "tabs_found": [],
+                "tabs_inspected": [],
+                "selectable_options_seen": 0,
+                "titles_extracted": 0,
+                "message": "The proposal form is not ready, so profile highlights were not inspected.",
+            },
+        }
+        duration_options = []
 
     return {
         "job_url": params.job_url,
@@ -706,6 +1001,9 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
         "fee_net_text": fee_net_lines,
         "duration_options": duration_options,
         "boost_auction_text": boost_lines,
+        "available_profile_highlights": highlight_inspection["titles"],
+        "available_profile_highlights_status": highlight_inspection["status"],
+        "available_profile_highlights_details": highlight_inspection["details"],
         "external_action_taken": False,
     }
 

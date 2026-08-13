@@ -95,6 +95,20 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         errors.append("Upwork allows no more than 4 profile highlights")
     if not params.profile_highlights:
         errors.append("Select at least one current owner-system profile highlight before approval")
+    available_highlights_status = form.get("available_profile_highlights_status")
+    available_highlights = set(form.get("available_profile_highlights") or [])
+    if available_highlights_status != "complete":
+        errors.append(
+            "Live profile-highlight enumeration is not complete, so highlight titles cannot be validated for approval"
+        )
+    else:
+        invalid_highlights = [
+            highlight for highlight in params.profile_highlights if highlight not in available_highlights
+        ]
+        if invalid_highlights:
+            errors.append(
+                "These profile highlights are not selectable in the live form: " + ", ".join(invalid_highlights)
+            )
     if form.get("form_status") != "ready":
         errors.append(f"The live proposal form is not ready: {form.get('form_status')}")
     if form.get("existing_proposal"):
@@ -113,6 +127,14 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         warnings.append("Upwork did not expose a live fee/net preview during read-only inspection")
 
     recommended = set(analysis["profile_highlights"])
+    if available_highlights_status == "complete":
+        unavailable_recommended = sorted(recommended - available_highlights)
+        if unavailable_recommended:
+            warnings.append(
+                "Policy-suggested highlights are not selectable in the live form: "
+                + ", ".join(unavailable_recommended)
+            )
+        recommended &= available_highlights
     supplied = set(params.profile_highlights)
     missing_recommended = sorted(recommended - supplied)
     if missing_recommended:
