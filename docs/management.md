@@ -86,8 +86,9 @@ Proposal proof must use a standalone `proposal_safe_proof_lines` value exposed w
 case study. Each generated line binds the study name and one exact permitted claim; the period
 variant also binds that claim's audited period. Paraphrases, mixed-client attribution, swapped
 periods, and extra proof on the same line fail closed. Ordinary scope, experience, and commercial
-copy can remain natural on separate lines, but raw result assertions cannot replace the generated
-proof line.
+copy can remain natural on separate lines. The MCP does not claim to prove arbitrary English has
+no implied result; draft and exact owner approval remain required, and audited client evidence may
+only enter the auto-submittable copy through the generated line.
 
 Current portfolio-highlight titles must be read from the live owner system. Several old titles
 conflict with audited case-study evidence, so the old digest is not an automatic selection list.

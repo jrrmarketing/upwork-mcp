@@ -223,12 +223,15 @@ def test_proof_line_tampering_and_global_attribution_are_rejected():
         f"{safe_line}\nThat happened in 30 days.",
         "Priority 1 Plumbing is one example. Acme generated 1,258 tracked leads.",
         "Acme generated 1,258 tracked leads. See Priority 1 Plumbing for another example.",
-        "You should note the case study's 500% ROI.",
     )
     for message in messages:
         result = validate_proof_claims(message, selected)
         assert result["valid"] is False, message
         assert result["errors"], message
+
+    # Generic copy that does not name or reproduce manifest proof is still shown
+    # verbatim to the owner and governed by the exact approval gate.
+    assert validate_proof_claims("You should note the case study's 500% ROI.", selected)["valid"] is True
 
 
 def test_safe_proof_line_does_not_block_normal_scope_or_availability():
@@ -240,6 +243,23 @@ def test_safe_proof_line_does_not_block_normal_scope_or_availability():
         "I am available for 20 hours per week and the proposed rate is $63/hr."
     )
     assert validate_proof_claims(message, selected)["valid"] is True
+
+
+def test_no_proof_copy_keeps_free_scope_experience_and_commercial_language():
+    messages = (
+        "I am available for 20 hours per week to work on lead generation.",
+        "I have 10 years of lead generation experience.",
+        "I've been generating leads for clients for 10 years.",
+        "The fixed bid is $500 and I can complete the audit in 2 weeks.",
+    )
+    for message in messages:
+        assert validate_proof_claims(message, [])["valid"] is True, message
+
+
+def test_quarantined_aggregate_is_normalized_before_matching():
+    result = validate_proof_claims("We’ve made ＄１００Ｍ＋.", [])
+    assert result["valid"] is False
+    assert any("methodology" in error for error in result["errors"])
 
 
 def test_paraphrased_or_rounded_case_study_result_is_rejected():
@@ -258,9 +278,10 @@ def test_paraphrased_or_rounded_case_study_result_is_rejected():
     assert result["valid"] is False
     assert result["errors"]
 
+    # Raw generic claims have no manifest provenance. They are not auto-generated
+    # evidence, so they remain subject to the exact owner-copy approval gate.
     unscoped = validate_proof_claims("A similar account had ROAS of 3x.", selected)
-    assert unscoped["valid"] is False
-    assert unscoped["errors"]
+    assert unscoped["valid"] is True
 
 
 def test_exact_claim_cannot_be_hidden_inside_a_larger_number():

@@ -135,68 +135,6 @@ QUARANTINED_CLAIM_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"81%\s+of\s+clients", "The 81% client-improvement claim has no audited denominator or period"),
 )
 
-RESULT_METRIC_PATTERN = re.compile(
-    r"\b(?:revenue|roi|roas|cac|customer acquisition cost|cost per (?:case|lead|conversion)|"
-    r"cpl|conversion rate|conversions?|leads?|calls?|forms?|transactions?|sales|traffic|"
-    r"clicks?|keywords?|cases?|bookings?|ad spend|google ads spend|return on|performance|"
-    r"results?|outcomes?|customers?|clients?|appointments?|enquiries|inquiries|purchases?|"
-    r"orders?|profits?|pipeline|growth)\b",
-    re.I,
-)
-RESULT_ASSERTION_PATTERN = re.compile(
-    r"\b(?:achieved|reached|generated|delivered|produced|created|drove|driven|returned|resulted|"
-    r"tracked|converted|grew|grown|increased|decreased|reduced|improved|lowered|cut|raised|"
-    r"lifted|boosted|rose|risen|fell|fallen|dropped|gained|won|made|earned|booked|closed|"
-    r"became|happened|took|outperformed|beat|bought|doubled|tripled|quadrupled|halved)\b",
-    re.I,
-)
-SCOPE_CONTEXT_PATTERN = re.compile(
-    r"\b(?:your|you'd|you would|we'll|we will|i'll|i will|would|will|can|could|should|"
-    r"plan|recommend|propose|review|compare|audit|analyse|analyze|assess|check|inspect|"
-    r"start|focus|look at|project|scope|timeline|schedule|availability|complete|finish)\b",
-    re.I,
-)
-RAW_PROOF_SUBJECT_PATTERN = re.compile(
-    r"\b(?:case study|similar (?:account|client|campaign)|another (?:account|client|campaign)|"
-    r"previous (?:account|client|campaign)|past (?:account|client|campaign)|the (?:account|client|campaign)|"
-    r"our (?:account|client|campaign)|their (?:account|client|campaign)|that|it|they)\b",
-    re.I,
-)
-RESULT_COMPARISON_PATTERN = re.compile(
-    r"\b(?:had|has|was|were|is|are|higher|lower|better|worse|up|down|more|less|"
-    r"successful|worked|performed|outperformed|beat)\b",
-    re.I,
-)
-WRITTEN_NUMBER_WORD = (
-    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
-    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
-    r"sixty|seventy|eighty|ninety|hundred|thousand)"
-)
-WRITTEN_NUMBER = (
-    rf"(?:a |an )?{WRITTEN_NUMBER_WORD}"
-    rf"(?:[- ](?:(?:and|a|an)[- ])?{WRITTEN_NUMBER_WORD})*"
-)
-NUMERIC_VALUE_PATTERN = re.compile(
-    rf"(?:\$\s*\d|[+-]?\d[\d,.]*\s*[%％]|\b\d+(?:\.\d+)?\s*x\b|"
-    rf"\b{WRITTEN_NUMBER}\s+(?:percent|per cent)\b|\b\d[\d,.]*\b)",
-    re.I,
-)
-RESULT_TIMEFRAME_PATTERN = re.compile(
-    rf"\b(?:in|within|over|during|across|after|before|throughout|happened in)\s+"
-    rf"(?:(?:the|a|an)\s+)?(?:(?:\d+(?:\.\d+)?|{WRITTEN_NUMBER}|first|second|third|fourth)\s+)?"
-    rf"(?:days?|weeks?|months?|quarters?|years?)\b|"
-    rf"\b(?:between\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-    rf"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{{4}}\s*"
-    rf"(?:to|through|until|and|[-–—])\s*(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
-    rf"may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
-    rf"dec(?:ember)?)\s+\d{{4}}\b",
-    re.I,
-)
-RESULT_FREQUENCY_PATTERN = re.compile(
-    r"\b(?:per\s+(?:day|week|month|quarter|year)|daily|weekly|monthly|quarterly|annually|yearly)\b",
-    re.I,
-)
-
 
 @dataclass
 class PricingContext:
@@ -752,12 +690,12 @@ def validate_upwork_copy(message: str, *, invited: bool | None = None) -> dict[s
 def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """Allow audited proof only as an exact, claim-local canonical line."""
     errors: list[str] = []
-    normalized_message = _normalise_claim_text(message)
+    normalized_message = _normalise_claim_text(_strip_invisible_formatting(message))
     lowered = normalized_message
     selected = {str(study.get("key")): study for study in selected_studies}
 
     for pattern, reason in QUARANTINED_CLAIM_PATTERNS:
-        if re.search(pattern, message, re.I):
+        if re.search(pattern, normalized_message, re.I):
             errors.append(reason)
 
     for record in PROOF_MANIFEST:
@@ -801,6 +739,7 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
 
     residual = "\n".join(residual_lines)
     residual_normalized = _normalise_claim_text(residual)
+    any_safe_line_used = bool(used_studies)
     for study, fragment in proof_fragments:
         if fragment and _contains_exact_claim(residual_normalized, fragment):
             errors.append(
@@ -815,18 +754,15 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
             errors.append(
                 f"A selected case study may appear only in its exact proposal-safe proof line: {study.get('name')}"
             )
-    for assertion in _raw_proof_assertions(residual):
-        errors.append(
-            f"Raw result assertions are not proposal-safe; use an exact generated proof line: {assertion[:160]}"
-        )
-
+    if any_safe_line_used and residual_normalized and not _ordinary_nonproof_remainder(residual_normalized):
+        errors.append("A generated proof line cannot be combined with extra unstructured copy in the same proof block")
     return {"valid": not errors, "errors": list(dict.fromkeys(errors))}
 
 
 def _normalise_claim_text(value: str) -> str:
     """Normalize punctuation and spacing without changing a claim's numbers."""
 
-    normalized = unicodedata.normalize("NFKC", value)
+    normalized = unicodedata.normalize("NFKC", _strip_invisible_formatting(value))
     normalized = normalized.casefold().replace("’", "'").replace("–", "-").replace("—", "-")
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized.rstrip(".!? ")
@@ -839,30 +775,27 @@ def _contains_exact_claim(sentence: str, claim: str) -> bool:
     return re.search(pattern, sentence) is not None
 
 
-def _raw_proof_assertions(value: str) -> list[str]:
-    """Find evidence-like prose left outside exact generated proof lines."""
+def _strip_invisible_formatting(value: str) -> str:
+    return "".join(character for character in value if unicodedata.category(character) != "Cf")
 
-    assertions: list[str] = []
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", value):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        normalized = _normalise_claim_text(sentence)
-        metric = bool(RESULT_METRIC_PATTERN.search(normalized))
-        result_verb = bool(RESULT_ASSERTION_PATTERN.search(normalized))
-        subject = bool(RAW_PROOF_SUBJECT_PATTERN.search(normalized))
-        comparison = bool(RESULT_COMPARISON_PATTERN.search(normalized))
-        value_present = bool(NUMERIC_VALUE_PATTERN.search(normalized))
-        timeframe = bool(RESULT_TIMEFRAME_PATTERN.search(normalized))
-        frequency = bool(RESULT_FREQUENCY_PATTERN.search(normalized))
-        proof_like = (
-            (metric and (result_verb or comparison))
-            or (subject and (result_verb or comparison or value_present or timeframe or frequency))
-            or (metric and value_present and not SCOPE_CONTEXT_PATTERN.search(normalized))
-        )
-        if proof_like:
-            assertions.append(sentence)
-    return assertions
+
+def _ordinary_nonproof_remainder(value: str) -> bool:
+    """Recognize only the ordinary proposal contexts allowed beside a proof line."""
+
+    normalized = _normalise_claim_text(value)
+    allowed_context = re.compile(
+        r"\b(?:i|i'm|i've|i'd|my|you|your|we|account|campaigns?|audit|review|compare|"
+        r"scope|project|timeline|available|availability|experience|worked|working|managed|"
+        r"rate|bid|budget|fee|price|complete|finish|hours?|weeks?|months?|years?|options?)\b",
+        re.I,
+    )
+    obvious_result = re.compile(
+        r"\b(?:roi|roas|revenue|cpl|sales|calls?|forms?|conversions?|"
+        r"achieved|generated|made|earned|doubled|tripled|grew|increased|decreased|reduced|"
+        r"improved|converted|happened|tracked)\b",
+        re.I,
+    )
+    return bool(allowed_context.search(normalized)) and not obvious_result.search(normalized)
 
 
 def audit_proposals(proposals: Iterable[Mapping[str, Any]], stale_after_days: int = 14) -> dict[str, Any]:
