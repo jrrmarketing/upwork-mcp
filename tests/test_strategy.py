@@ -191,7 +191,12 @@ def test_unknown_competition_never_recommends_a_boost():
 def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
     for description in (
         "Do not use GTM; use WhatConverts for offline conversion outcomes.",
+        "GTM isn't required; use WhatConverts instead.",
+        "We won't use Google Tag Manager for this account.",
+        "There is no need for GTM in this engagement.",
         "This is not a full-time role; the consultant will work five hours a week.",
+        "We don't need a full-time person; this is five hours a week.",
+        "We are not looking for full-time support.",
         "This ecommerce account does not need purchase tracking; Google Ads management only.",
     ):
         result = analyze_job(
@@ -205,6 +210,24 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
             }
         )
         assert not result.blockers, description
+
+
+def test_negation_does_not_leak_across_but_into_a_required_scope():
+    result = analyze_job(
+        {
+            "title": "Google Ads consultant",
+            "description": (
+                "We do not require web development, but require Google Tag Manager implementation."
+            ),
+            "job_type": "hourly",
+            "hourly_rate_max": 80,
+            "proposal_count": 5,
+            "client": _client(),
+        }
+    )
+
+    assert result.recommendation == "skip"
+    assert any("Tag Manager" in blocker for blocker in result.blockers)
 
 
 def test_low_rate_is_a_price_conversion_not_an_automatic_discount():
@@ -223,6 +246,51 @@ def test_low_rate_is_a_price_conversion_not_an_automatic_discount():
     assert result.pricing["recommended_bid"] == 55
     assert result.pricing["position"] == "price_conversion_opportunity"
     assert result.pricing["requires_owner_approval"] is True
+
+
+def test_client_range_below_floor_is_skipped_and_never_boosted():
+    result = analyze_job(
+        {
+            "title": "Google Ads audit for criminal defense law firm",
+            "description": "Paid search lead generation and account review",
+            "job_type": "hourly",
+            "hourly_rate_min": 10,
+            "hourly_rate_max": 30,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.pricing["position"] == "above_client_range"
+    assert result.recommendation == "skip"
+    assert result.boost["recommendation"] == "no_boost"
+
+
+def test_inconsistent_client_rate_range_is_never_inverted():
+    result = analyze_job(
+        {
+            "title": "Google Ads audit for law firm",
+            "description": "Paid search lead generation",
+            "job_type": "hourly",
+            "hourly_rate_min": 100,
+            "hourly_rate_max": 60,
+            "proposal_count": 5,
+            "client": _client(),
+        }
+    )
+
+    low, high = result.pricing["defensible_range"]
+    assert low <= high
+    assert any("minimum exceeded" in item for item in result.pricing["assumptions"])
+
+
+@pytest.mark.parametrize("external_url", ["bit.ly/call", "example.dev/path"])
+def test_proposal_copy_rejects_bare_external_urls_with_any_normal_tld(external_url: str):
+    result = validate_upwork_copy(f"I can review the account. Details: {external_url}")
+
+    assert result["valid"] is False
+    assert any("external URL" in error for error in result["errors"])
 
 
 def test_fixed_bid_requires_owner_choice_without_a_current_floor():

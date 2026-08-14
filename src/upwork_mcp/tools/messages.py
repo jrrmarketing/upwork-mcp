@@ -542,7 +542,7 @@ def _exact_message_matches(history: dict[str, Any], message: str) -> list[dict[s
     return [
         record
         for record in history.get("messages", [])
-        if record.get("content") == message
+        if record.get("is_mine") is True and record.get("content") == message
     ]
 
 

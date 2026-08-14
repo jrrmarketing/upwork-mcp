@@ -234,20 +234,28 @@ def _contains_bounded_term(text: str, term: str) -> bool:
 def _match_is_negated(text: str, start: int, end: int) -> bool:
     """Recognize explicit same-clause exclusions around a scope phrase."""
 
-    prefix = re.split(r"[.;!?\n]", text[max(0, start - 100) : start])[-1]
-    suffix = re.split(r"[.;!?\n]", text[end : end + 100])[0]
-    if re.search(
-        r"\b(?:(?:do|does|did)\s+not|don't|doesn't|didn't)\b[^.;!?\n]{0,60}"
-        r"\b(?:want|need|require|use|include|implement|manage|run|support)\s+$",
-        prefix,
+    clause_boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
+    prefix = re.split(clause_boundary, text[max(0, start - 120) : start], flags=re.I)[-1]
+    suffix = re.split(clause_boundary, text[end : end + 120], flags=re.I)[0]
+    negated_prefix = re.search(
+        r"(?:"
+        r"\b(?:no\s+need\s+for|not\s+looking\s+for|without)"
+        r"|\b(?:no|not)(?:\s+(?:a|an|the))?"
+        r"|\b(?:is|are|was|were)\s+not(?:\s+(?:a|an|the))?"
+        r"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't|"
+        r"will\s+not|won't|would\s+not|wouldn't|should\s+not|shouldn't|"
+        r"cannot|can't)\s+(?:want|need|require|use|include|implement|manage|run|support)"
+        r"(?:\s+(?:a|an|the))?"
+        r")$",
+        prefix.strip(),
         re.I,
-    ):
-        return True
-    if re.search(r"\b(?:no|not)\s+(?:(?:a|an|the)\s+)?$|\bwithout\s+$", prefix, re.I):
+    )
+    if negated_prefix:
         return True
     return bool(
         re.match(
-            r"^\s*(?:is|are|was|were|will be|would be)?\s*(?:not|never)\s+"
+            r"^\s*(?:(?:is|are|was|were)\s+not|isn't|aren't|wasn't|weren't|"
+            r"will\s+not\s+be|won't\s+be|would\s+not\s+be|wouldn't\s+be)\s+"
             r"(?:required|needed|included|used|managed|implemented|part of|in scope)\b",
             suffix,
             re.I,
@@ -431,10 +439,15 @@ def _recommend_price(job: Mapping[str, Any], context: PricingContext, service_fi
             recommended,
             min(rate_max or context.profile_hourly_rate, context.founder_advisory_benchmark),
         )
+        if rate_min is not None and rate_max is not None and rate_min > rate_max:
+            assumptions.append(
+                "The observed client hourly minimum exceeded its maximum, so the defensible range was normalized"
+            )
+        defensible_range = sorted((defensible_low, defensible_high))
         return {
             "type": "hourly",
             "recommended_bid": recommended,
-            "defensible_range": [defensible_low, defensible_high],
+            "defensible_range": defensible_range,
             "profile_rate": context.profile_hourly_rate,
             "minimum_hourly_rate": context.minimum_hourly_rate,
             "founder_advisory_benchmark": context.founder_advisory_benchmark,
@@ -657,6 +670,8 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     )
     if blockers:
         recommendation = "skip"
+    elif price["position"] in {"above_client_range", "above_client_budget"}:
+        recommendation = "skip"
     elif price["position"] == "price_conversion_opportunity" and score >= 45:
         recommendation = "price_conversion"
     elif score >= 70 and client_quality >= 8 and not boundaries:
@@ -673,6 +688,7 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         recommendation == "strong_fit"
         and client_quality >= 12
         and exact_proof
+        and price["position"] in {"within_client_range", "profile_rate", "match_posted_budget"}
         and not invited
         and count is not None
         and count < 20
@@ -855,7 +871,7 @@ def _strip_invisible_formatting(value: str) -> str:
 _URL_CANDIDATE = re.compile(
     r"(?ix)(?<![@\w])((?:https?://|www\.)[^\s<>()]+|"
     r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"(?:com|co|org|net|io|ai|uk|au)(?:/[^\s<>()]*)?)"
+    r"[a-z]{2,63}(?:/[^\s<>()]*)?)"
 )
 
 

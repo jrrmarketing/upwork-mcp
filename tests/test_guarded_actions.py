@@ -675,7 +675,7 @@ async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_hist
 ) -> None:
     page = _MessagePage()
     page.messages = [
-        _MessageElement("Exact approved message", is_mine=False),
+        _MessageElement("Exact approved message", is_mine=True),
         _MessageElement("A newer different message", is_mine=True),
     ]
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
@@ -694,6 +694,28 @@ async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_hist
     assert result["owner_system_readback"]["rendered_record_count"] == 2
     assert result["external_action_taken"] is False
     assert page.action_controls_queried == 0
+
+
+@pytest.mark.asyncio
+async def test_approved_message_does_not_treat_matching_inbound_copy_as_our_duplicate(
+    monkeypatch,
+) -> None:
+    page = _MessagePage()
+    page.messages = [_MessageElement("Thanks!", is_mine=False)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Thanks!",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "sent"
+    assert result["owner_system_readback"]["matching_messages_before"] == 0
 
 
 @pytest.mark.asyncio

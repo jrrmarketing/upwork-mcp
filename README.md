@@ -20,7 +20,7 @@ uv run upwork-mcp --login    # sign in to Upwork in the opened browser
 
 ## Background Chrome (automatic)
 
-Three layers — you shouldn't need to open Chrome manually:
+Three layers are available so Chrome does not need to be opened manually after setup:
 
 1. **Mac login** — `com.jrr.upwork-chrome` launchd agent (off-screen Chrome on port 9222)
 2. **Cursor session start** — `~/.cursor/hooks.json` runs `start-chrome-daemon.sh`
@@ -32,8 +32,9 @@ Install launchd once:
 cd ~/Projects/upwork-mcp && ./scripts/install-launchd.sh
 ```
 
-Codex, Cursor, and Claude MCP configs point at `scripts/mcp-server.sh`, so Chrome is checked
-before the server starts.
+Each MCP client must be registered with `scripts/mcp-server.sh` as its command. Start from
+`mcp-config.example.json` and use the canonical checkout's absolute path. Registration is a local
+deployment step; repository tests do not prove that a particular client is already configured.
 
 ## Use in Cursor
 
