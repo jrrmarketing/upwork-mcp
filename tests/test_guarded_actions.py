@@ -122,6 +122,12 @@ def test_message_accepts_only_observed_individual_room_forms(url: str, room_id: 
         "https://www.upwork.com/ab/messages/rooms/",
         "https://www.upwork.com/jobs/~123?next=/nx/messages/abc123456789",
         "https://www.upwork.com/nx/messages/abc123456789/settings",
+        "https://www.upwork.com/nx/messages/abc123456789?next=/nx/messages/different123",
+        "https://www.upwork.com/ab/messages/rooms/abc123456789?room=other123456",
+        "https://www.upwork.com/nx/messages/abc123456789#different-room",
+        "https://www.upwork.com/nx/messages/abc123456789?",
+        "https://www.upwork.com/nx/messages/abc123456789#",
+        "https://www.upwork.com.evil.example/nx/messages/abc123456789",
     ],
 )
 def test_message_rejects_indexes_subroutes_and_query_bypass(url: str) -> None:
@@ -132,6 +138,32 @@ def test_message_rejects_indexes_subroutes_and_query_bypass(url: str) -> None:
             contact_name="Alex Client",
             message="Exact copy",
         )
+
+
+@pytest.mark.parametrize(
+    ("url", "canonical"),
+    [
+        (
+            "https://www.upwork.com/nx/messages/abc123456789",
+            "https://www.upwork.com/nx/messages/abc123456789",
+        ),
+        (
+            "https://www.upwork.com/ab/messages/rooms/abc123456789",
+            "https://www.upwork.com/ab/messages/rooms/abc123456789",
+        ),
+    ],
+)
+def test_message_room_parser_returns_exact_room_not_route_container(
+    url: str, canonical: str
+) -> None:
+    assert messages.parse_message_room(url) == (canonical, "abc123456789")
+
+
+def test_message_room_parser_does_not_mistake_http_prefixed_id_for_url() -> None:
+    assert messages.parse_message_room("http12345678") == (
+        "https://www.upwork.com/nx/messages/http12345678",
+        "http12345678",
+    )
 
 
 def test_all_action_ids_must_match_their_exact_routes() -> None:
@@ -303,6 +335,12 @@ class _TextElement:
     async def is_visible(self) -> bool:
         return True
 
+    async def is_enabled(self) -> bool:
+        return True
+
+    async def get_attribute(self, _name: str) -> str | None:
+        return None
+
     async def query_selector(self, _selector: str):
         return None
 
@@ -311,12 +349,22 @@ class _TextElement:
 
 
 class _Button(_TextElement):
-    def __init__(self, callback: Callable[[], None], text: str = "") -> None:
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        text: str = "",
+        *,
+        attributes: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(text)
         self.callback = callback
+        self.attributes = attributes or {}
 
     async def click(self) -> None:
         self.callback()
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.attributes.get(name)
 
 
 class _HighlightOption(_TextElement):
@@ -356,15 +404,21 @@ class _Input(_TextElement):
     def __init__(self) -> None:
         super().__init__()
         self.value = ""
+        self.corrupt_readback = False
+        self.fail_restore = False
+        self.press_count = 0
 
     async def fill(self, value: str) -> None:
+        if not value and self.value and self.fail_restore:
+            raise RuntimeError("restore failed")
         self.value = value
 
     async def press(self, _key: str) -> None:
+        self.press_count += 1
         self.value = ""
 
     async def input_value(self) -> str:
-        return self.value
+        return f"{self.value} " if self.corrupt_readback and self.value else self.value
 
 
 class _MessageElement(_TextElement):
@@ -380,21 +434,87 @@ class _MessageElement(_TextElement):
             return _TextElement()
         return None
 
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == '[data-test="content"]':
+            return [_TextElement(self.content)]
+        return []
+
+
+class _Link(_TextElement):
+    def __init__(self, href: str) -> None:
+        super().__init__()
+        self.href = href
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.href if name == "href" else None
+
+
+class _ConversationListElement(_TextElement):
+    def __init__(self, href: str) -> None:
+        super().__init__()
+        self.href = href
+
+    async def query_selector(self, selector: str):
+        if "contact-name" in selector:
+            return _TextElement("Alex Client")
+        if selector == 'a[href*="/messages/"]':
+            return _Link(self.href)
+        return None
+
+
+class _MessageComposer(_TextElement):
+    def __init__(self, page: _MessagePage) -> None:
+        super().__init__()
+        self.page = page
+
+        def send() -> None:
+            self.page.messages.append(_MessageElement(self.page.input.value, is_mine=True))
+            self.page.input.value = ""
+
+        self.send_button = _Button(
+            send,
+            "Send",
+            attributes={"data-test": "send-button", "type": "submit"},
+        )
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == messages._COMPOSER_INPUT_SELECTOR:
+            self.page.action_controls_queried += 1
+            return [self.page.input]
+        if selector == messages._SCOPED_SEND_CANDIDATE_SELECTOR:
+            self.page.action_controls_queried += 1
+            return [self.send_button] if self.page.scoped_send_available else []
+        return []
+
 
 class _MessagePage:
-    def __init__(self, *, contact_name: str = "Alex Client") -> None:
+    def __init__(
+        self,
+        *,
+        contact_name: str = "Alex Client",
+        composer_count: int = 1,
+        scoped_send_available: bool = True,
+    ) -> None:
         self.url = "https://www.upwork.com/nx/messages/room-1234567"
         self.contact_name = contact_name
         self.action_controls_queried = 0
+        self.page_wide_send_queries = 0
         self.messages: list[_MessageElement] = []
         self.input = _Input()
+        self.scoped_send_available = scoped_send_available
+        self.composers = [_MessageComposer(self) for _ in range(composer_count)]
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
 
     async def query_selector_all(self, selector: str) -> list[Any]:
-        if "message" in selector:
+        if selector == messages._ROOM_CONTACT_SELECTOR:
+            return [_TextElement(self.contact_name)]
+        if selector == messages._MESSAGE_RECORD_SELECTOR:
             return self.messages
+        if selector == messages._COMPOSER_SELECTOR:
+            self.action_controls_queried += 1
+            return self.composers
         return []
 
     async def query_selector(self, selector: str):
@@ -404,6 +524,7 @@ class _MessagePage:
             self.action_controls_queried += 1
             return self.input
         if "send-button" in selector or "Send" in selector:
+            self.page_wide_send_queries += 1
             self.action_controls_queried += 1
             def send() -> None:
                 self.messages.append(_MessageElement(self.input.value, is_mine=True))
@@ -480,6 +601,40 @@ class _Browser:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("href", "canonical"),
+    [
+        (
+            "/nx/messages/abc123456789",
+            "https://www.upwork.com/nx/messages/abc123456789",
+        ),
+        (
+            "/ab/messages/rooms/abc123456789",
+            "https://www.upwork.com/ab/messages/rooms/abc123456789",
+        ),
+    ],
+)
+async def test_conversation_list_extraction_uses_exact_room_parser(
+    href: str, canonical: str
+) -> None:
+    result = await messages._extract_conversation(_ConversationListElement(href))
+    assert result is not None
+    assert result["room_url"] == canonical
+    assert result["room_id"] == "abc123456789"
+    assert result["room_id"] != "rooms"
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_extraction_rejects_query_room_bypass() -> None:
+    result = await messages._extract_conversation(
+        _ConversationListElement(
+            "/ab/messages/rooms/abc123456789?next=/nx/messages/different123"
+        )
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_approved_message_requires_exact_owner_system_readback(monkeypatch) -> None:
     page = _MessagePage()
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
@@ -496,7 +651,192 @@ async def test_approved_message_requires_exact_owner_system_readback(monkeypatch
     assert result["external_action_taken"] is True
     assert result["owner_system_readback"]["confirmed"] is True
     assert result["owner_system_readback"]["exact_visible_copy"] is True
+    assert result["owner_system_readback"]["exact_composer_copy_before_send"] is True
+    assert result["owner_system_readback"]["composer_cleared_after_send"] is True
+    assert result["owner_system_readback"]["exact_copy_is_last_visible_message"] is True
+    assert result["owner_system_readback"]["visible_history_complete"] is True
     assert result["owner_system_readback"]["conversation_identity"]["contact_name"] == "Alex Client"
+    assert page.page_wide_send_queries == 0
+    assert page.input.press_count == 0
+
+
+@pytest.mark.asyncio
+async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_history(
+    monkeypatch,
+) -> None:
+    page = _MessagePage()
+    page.messages = [
+        _MessageElement("Exact approved message", is_mine=False),
+        _MessageElement("A newer different message", is_mine=True),
+    ]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "duplicate_blocked"
+    assert result["owner_system_readback"]["rendered_record_count"] == 2
+    assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
+
+
+@pytest.mark.asyncio
+async def test_approved_message_requires_byte_exact_duplicate_before_blocking(monkeypatch) -> None:
+    page = _MessagePage()
+    page.messages = [_MessageElement("Exact approved message ", is_mine=True)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "sent"
+    assert result["owner_system_readback"]["matching_messages_before"] == 0
+
+
+class _UnreadableMessageElement(_MessageElement):
+    async def query_selector_all(self, _selector: str) -> list[Any]:
+        raise RuntimeError("detached")
+
+
+@pytest.mark.asyncio
+async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
+    monkeypatch,
+) -> None:
+    page = _MessagePage()
+    page.messages = [_UnreadableMessageElement("Unreadable", is_mine=True)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "history_unreadable"
+    assert result["visible_history_readback"]["status"] == "incomplete"
+    assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
+
+
+@pytest.mark.asyncio
+async def test_approved_message_never_uses_page_send_or_enter_fallback(monkeypatch) -> None:
+    page = _MessagePage(scoped_send_available=False)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "send_control_unavailable"
+    assert result["external_action_taken"] is False
+    assert page.page_wide_send_queries == 0
+    assert page.input.press_count == 0
+    assert page.input.value == ""
+    assert result["composer_restored"] is True
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+async def test_approved_message_requires_one_exact_visible_composer(monkeypatch) -> None:
+    page = _MessagePage(composer_count=2)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "composer_unavailable"
+    assert result["external_action_taken"] is False
+    assert page.input.value == ""
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+async def test_approved_message_requires_byte_exact_composer_readback(monkeypatch) -> None:
+    page = _MessagePage()
+    page.input.corrupt_readback = True
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "composer_readback_mismatch"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.input.value == ""
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+async def test_unrestorable_preclick_draft_is_terminal_and_action_remains_one_shot(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(scoped_send_available=False)
+    page.input.fail_restore = True
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+    payload = messages.message_payload(params)
+    prepared = prepare_action("message", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await messages.send_message(params)
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "send_control_unavailable"
+    assert result["external_action_taken"] is True
+    assert result["composer_restored"] is False
+    assert page.input.value == "Exact approved message"
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
 
 
 @pytest.mark.asyncio

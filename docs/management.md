@@ -147,6 +147,15 @@ At present, automated proposal preparation accepts `boost_connects=0` only. A po
 remain a manual exact-approved flow until the live two-stage Upwork sequence proves that its first
 Submit click is non-consequential and the chosen bid is applied before the final send.
 
+### Boost a message
+
+Upwork's **Boost a message** is a separate acquisition product, not a proposal boost or an
+ordinary conversation reply. The MCP intentionally does not auto-activate it or expose a
+speculative spend tool. It must remain read-only until an authenticated live UI mapping can bind
+one exact target, the exact introductory copy, the exact duration, and one owner-approved total
+Connect cap, then read those values back from Upwork before any activation. Proposal-boost logic,
+generic Send controls, and inferred Connect spend must never be reused for this product.
+
 ## Maintenance
 
 Decline unsuitable invitations with the validated Upwork reason
