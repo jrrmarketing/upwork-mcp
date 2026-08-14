@@ -477,6 +477,7 @@ class _MessageComposer(_TextElement):
         self.page = page
 
         def send() -> None:
+            self.page.send_clicks += 1
             self.page.messages.append(_MessageElement(self.page.input.value, is_mine=True))
             self.page.input.value = ""
 
@@ -492,6 +493,10 @@ class _MessageComposer(_TextElement):
             return [self.page.input]
         if selector == messages._SCOPED_SEND_CANDIDATE_SELECTOR:
             self.page.action_controls_queried += 1
+            if self.page.on_send_resolution is not None:
+                callback = self.page.on_send_resolution
+                self.page.on_send_resolution = None
+                callback()
             return [self.send_button] if self.page.scoped_send_available else []
         return []
 
@@ -508,9 +513,11 @@ class _MessagePage:
         self.contact_name = contact_name
         self.action_controls_queried = 0
         self.page_wide_send_queries = 0
+        self.send_clicks = 0
         self.messages: list[_MessageElement] = []
         self.input = _Input()
         self.scoped_send_available = scoped_send_available
+        self.on_send_resolution: Callable[[], None] | None = None
         self.composers = [_MessageComposer(self) for _ in range(composer_count)]
 
     async def goto(self, url: str, **_kwargs) -> None:
@@ -833,6 +840,117 @@ async def test_approved_message_requires_byte_exact_composer_readback(monkeypatc
     assert result["composer_restored"] is True
     assert page.input.value == ""
     assert page.messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("new_content", "is_mine"),
+    [
+        ("Exact approved message", False),
+        ("A different new outbound message", True),
+    ],
+    ids=["matching-inbound", "different-outbound"],
+)
+async def test_approved_message_stops_if_history_changes_during_send_resolution(
+    monkeypatch,
+    new_content: str,
+    is_mine: bool,
+) -> None:
+    page = _MessagePage()
+    page.on_send_resolution = lambda: page.messages.append(
+        _MessageElement(new_content, is_mine=is_mine)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "message_history_changed"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.input.value == ""
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_unrestorable_history_race_draft_is_terminal_and_action_remains_one_shot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage()
+    page.input.fail_restore = True
+    page.on_send_resolution = lambda: page.messages.append(
+        _MessageElement("A new inbound message", is_mine=False)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+    payload = messages.message_payload(params)
+    prepared = prepare_action("message", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await messages.send_message(params)
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "message_history_changed"
+    assert result["external_action_taken"] is True
+    assert result["composer_restored"] is False
+    assert page.input.value == "Exact approved message"
+    assert page.send_clicks == 0
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_field", ["contact", "room"])
+async def test_approved_message_stops_if_identity_changes_during_send_resolution(
+    monkeypatch,
+    changed_field: str,
+) -> None:
+    page = _MessagePage()
+
+    def change_identity() -> None:
+        if changed_field == "contact":
+            page.contact_name = "Different Client"
+        else:
+            page.url = "https://www.upwork.com/nx/messages/different-room-123"
+
+    page.on_send_resolution = change_identity
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = messages.SendMessageParams(
+        room_url="https://www.upwork.com/nx/messages/room-1234567",
+        room_id="room-1234567",
+        contact_name="Alex Client",
+        message="Exact approved message",
+    )
+
+    result = await messages.send_message(
+        _approved(params, messages.message_payload(params))
+    )
+
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.input.value == ""
+    assert page.send_clicks == 0
 
 
 @pytest.mark.asyncio

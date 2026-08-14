@@ -566,6 +566,40 @@ def _same_utf8_bytes(left: str, right: str) -> bool:
         return False
 
 
+def _same_complete_visible_history(
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    """Compare complete rendered histories without normalising message bodies."""
+
+    if baseline.get("status") != "complete" or current.get("status") != "complete":
+        return False
+    if baseline.get("rendered_record_count") != current.get("rendered_record_count"):
+        return False
+    baseline_messages = baseline.get("messages")
+    current_messages = current.get("messages")
+    if not isinstance(baseline_messages, list) or not isinstance(current_messages, list):
+        return False
+    if len(baseline_messages) != len(current_messages):
+        return False
+    for baseline_record, current_record in zip(baseline_messages, current_messages, strict=True):
+        if not isinstance(baseline_record, dict) or not isinstance(current_record, dict):
+            return False
+        baseline_content = baseline_record.get("content")
+        current_content = current_record.get("content")
+        if not isinstance(baseline_content, str) or not isinstance(current_content, str):
+            return False
+        if not _same_utf8_bytes(baseline_content, current_content):
+            return False
+        baseline_is_mine = baseline_record.get("is_mine")
+        current_is_mine = current_record.get("is_mine")
+        if type(baseline_is_mine) is not bool or type(current_is_mine) is not bool:
+            return False
+        if baseline_is_mine is not current_is_mine:
+            return False
+    return True
+
+
 async def _restore_composer_value(input_element, original_value: str) -> bool:
     """Restore and exactly verify a composer after a pre-click failure."""
 
@@ -806,6 +840,51 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
             status="send_control_unavailable",
             message=send_error or "The exact composer-scoped Send control was unavailable",
         )
+
+    # Resolving the action control yields to the live page. Rebind every approved
+    # target and mutable input immediately before the irreversible click so a room
+    # switch or newly rendered inbound/outbound message cannot race the approval.
+    final_identity, final_identity_error = await _current_conversation_identity(page)
+    if final_identity != approved_identity:
+        return await _preclick_failure(
+            input_el,
+            status="live_identity_mismatch",
+            message=(
+                "The live conversation or recipient changed while the Send control was "
+                "resolved; nothing was sent."
+            ),
+            details={
+                "identity_read_error": final_identity_error,
+                "approved_conversation_identity": approved_identity,
+                "live_conversation_identity": final_identity,
+            },
+        )
+
+    final_history = await _visible_message_history(page)
+    if final_history["status"] != "complete":
+        return await _preclick_failure(
+            input_el,
+            status="history_unreadable",
+            message=(
+                "The complete visible message history could not be re-read immediately before "
+                "Send; nothing was sent."
+            ),
+            details={"visible_history_readback": final_history},
+        )
+    if not _same_complete_visible_history(history_before, final_history):
+        return await _preclick_failure(
+            input_el,
+            status="message_history_changed",
+            message=(
+                "The visible message history changed after the composer was filled; nothing was "
+                "sent. Review the new activity and prepare the message again."
+            ),
+            details={
+                "baseline_rendered_record_count": history_before["rendered_record_count"],
+                "current_rendered_record_count": final_history["rendered_record_count"],
+            },
+        )
+
     final_composer_readback = await _read_composer_value(input_el)
     if (
         final_composer_readback is None
