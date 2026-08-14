@@ -114,6 +114,33 @@ def test_non_law_firm_business_models_never_receive_exact_law_firm_proof(title: 
     assert result.boost["recommendation"] == "no_boost"
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Paid search for an attorney practice management platform sold to law firms.",
+        "Paid search for a lawyer recruitment marketplace serving law firms.",
+        "Paid search for a criminal defense software platform.",
+    ],
+)
+def test_business_model_mismatch_in_description_cannot_supply_exact_law_proof(
+    description: str,
+):
+    result = analyze_job(
+        {
+            "title": "Google Ads specialist",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert not any(study["match_strength"] == "exact" for study in result.case_studies)
+    assert result.boost["recommendation"] == "no_boost"
+
+
 def test_specific_plumbing_proof_outranks_generic_home_services_proof():
     result = analyze_job(
         {
@@ -241,15 +268,23 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "There is no need for GTM in this engagement.",
         "GTM not required; use WhatConverts instead.",
         "GTM, which is not required, can be ignored.",
+        "GTM won't be necessary.",
+        "GTM is specifically not required.",
         "GTM isn't required.",
         "GTM isn’t required.",
+        "No requirement for GTM.",
+        "There is no requirement to use GTM.",
+        "We have no plans to use GTM.",
+        "Please avoid GTM and use WhatConverts.",
         "We are not using GTM for this account.",
         "We aren't using GTM.",
         "We aren’t using GTM.",
         "We are not planning to use GTM.",
+        "We don't plan to use GTM.",
         "We will not be using Google Tag Manager.",
         "This is not a full-time role; the consultant will work five hours a week.",
         "This isn't a full-time role.",
+        "Full-time support is unnecessary.",
         "This will not be a full-time position.",
         "Part-time rather than full-time support.",
         "We don't need a full-time person; this is five hours a week.",

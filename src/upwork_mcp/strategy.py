@@ -110,13 +110,14 @@ ADJACENT_PROOF_TAGS = frozenset(
     }
 )
 
-# A vertical word in a title for software, education, recruitment, or law
+# A vertical word in a job for software, education, recruitment, or law
 # enforcement does not describe the same business model as a client-services
 # case study. Such jobs may still be good opportunities, but unrelated proof is
 # not exposed or used to justify a boost.
-NON_CLIENT_SERVICE_MODEL_TITLE_PATTERN = re.compile(
-    r"\b(?:saas|software|platform|marketplace|app|school|university|college|"
-    r"recruit(?:er|ing|ment)?|staffing|law enforcement|police)\b",
+NON_CLIENT_SERVICE_MODEL_PATTERN = re.compile(
+    r"\b(?:saas|software|marketplace|mobile app|school|university|college|"
+    r"recruit(?:er|ing|ment)?|staffing|law enforcement|police|"
+    r"legal tech|law tech|practice management (?:platform|system|tool))\b",
     re.I,
 )
 
@@ -274,7 +275,10 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
     excluded_verbs = r"(?:use|require|need|include|implement|manage|run|support)"
     negated_prefix = re.search(
         r"(?:"
-        r"\b(?:no\s+need\s+for|not\s+looking\s+for|without|rather\s+than)"
+        rf"\b(?:no\s+(?:need|requirement)\s+(?:for|to\s+{excluded_verbs})|"
+        rf"no\s+plans?\s+to\s+{excluded_verbs}|no\s+intention\s+of\s+{excluded_actions}|"
+        r"not\s+looking\s+for|without|rather\s+than|except(?:\s+for)?|"
+        r"avoid(?:ing)?|exclud(?:e|ing)|omit(?:ting)?)"
         r"|\b(?:no|not)(?:\s+(?:a|an|the))?"
         r"|\b(?:is|are|was|were)\s+not(?:\s+(?:a|an|the))?"
         r"|\b(?:isn't|aren't|wasn't|weren't)(?:\s+(?:a|an|the))?"
@@ -282,6 +286,8 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         rf"|\b(?:isn't|aren't|wasn't|weren't)\s+{excluded_actions}(?:\s+(?:a|an|the))?"
         rf"|\b(?:am|is|are|was|were)\s+not\s+(?:planning|going|intending)\s+to\s+{excluded_verbs}"
         rf"|\b(?:isn't|aren't|wasn't|weren't)\s+(?:planning|going|intending)\s+to\s+{excluded_verbs}"
+        rf"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't)\s+"
+        rf"(?:plan|intend|expect)\s+to\s+{excluded_verbs}"
         rf"|\b(?:will|would|should)\s+not\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
         rf"|\b(?:won't|wouldn't|shouldn't)\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
         rf"|\bnot\s+{excluded_actions}(?:\s+(?:a|an|the))?"
@@ -297,11 +303,17 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         return True
     return bool(
         re.match(
-            r"^\s*,?\s*(?:which\s+)?(?:"
-            r"(?:not|(?:is|are|was|were)\s+not|isn't|aren't|wasn't|weren't|"
-            r"will\s+not\s+be|won't\s+be|would\s+not\s+be|wouldn't\s+be)\s+"
-            r"(?:required|needed|included|used|managed|implemented|part of|in scope)"
+            r"^\s*,?\s*(?:which\s+)?"
+            r"(?:(?:support|role|position|work|implementation|integration|use|usage|"
+            r"management|service)\s+){0,2}(?:"
+            r"(?:not|(?:is|are|was|were)\s+"
+            r"(?:(?:specifically|definitely|explicitly|currently|absolutely)\s+)?not|"
+            r"isn't|aren't|wasn't|weren't|will\s+not\s+be|won't\s+be|"
+            r"would\s+not\s+be|wouldn't\s+be)\s+"
+            r"(?:required|needed|necessary|included|used|managed|implemented|part of|in scope|"
+            r"a requirement)"
             r"|(?:is|are|was|were)\s+(?:unnecessary|optional|excluded|out of scope)"
+            r"|(?:can|could|should)\s+be\s+(?:ignored|excluded|omitted|avoided)"
             r")\b",
             suffix,
             re.I,
@@ -367,8 +379,7 @@ def proposal_safe_proof_lines(study: Mapping[str, Any]) -> list[dict[str, str]]:
 def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:
     """Return the closest verified proof, with the match strength made explicit."""
     text = _text(job)
-    title = str(job.get("title") or "").casefold()
-    if NON_CLIENT_SERVICE_MODEL_TITLE_PATTERN.search(title):
+    if NON_CLIENT_SERVICE_MODEL_PATTERN.search(text):
         return []
 
     ranked: list[
