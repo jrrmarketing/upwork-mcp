@@ -195,6 +195,58 @@ def test_internal_software_mentions_do_not_erase_genuine_vertical_proof(
     assert result.boost["recommendation"] == "inspect_live_auction"
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Recruit new family-law clients through paid search.",
+        "The partners sometimes teach at the local law school.",
+        "The firm uses proprietary case software internally.",
+        "The plumbing company relies on proprietary dispatch software internally.",
+    ],
+)
+def test_incidental_model_words_do_not_erase_real_client_service_proof(description: str):
+    plumbing = "plumbing" in description
+    result = analyze_job(
+        {
+            "title": (
+                "Google Ads for a plumbing company"
+                if plumbing
+                else "Google Ads for a family law firm"
+            ),
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    expected_key = "priority-one-plumbing" if plumbing else "cage-and-miles-family-law"
+    assert result.case_studies[0]["key"] == expected_key
+    assert result.case_studies[0]["match_strength"] == "exact"
+    assert result.boost["recommendation"] == "inspect_live_auction"
+
+
+def test_internal_software_use_does_not_hide_a_separate_licensed_product_model():
+    result = analyze_job(
+        {
+            "title": "Google Ads specialist",
+            "description": (
+                "We use software internally and sell licenses to criminal-defense law firms."
+            ),
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert not any(study["match_strength"] == "exact" for study in result.case_studies)
+    assert result.boost["recommendation"] == "no_boost"
+
+
 def test_specific_plumbing_proof_outranks_generic_home_services_proof():
     result = analyze_job(
         {
@@ -355,6 +407,13 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "Part-time rather than full-time support.",
         "We don't need a full-time person; this is five hours a week.",
         "We are not looking for full-time support.",
+        "GTM is out of scope.",
+        "Skip GTM.",
+        "Omit GTM.",
+        "Use WhatConverts instead of GTM.",
+        "This is part-time instead of full-time.",
+        "Candidates who can't use GTM may still apply.",
+        "We won't reject candidates without GTM experience.",
         "This ecommerce account does not need purchase tracking; Google Ads management only.",
     ):
         result = analyze_job(
@@ -386,6 +445,13 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "GTM is not optional.",
         "GTM cannot be omitted.",
         "GTM is not only required but central to the brief.",
+        "GTM is required and not currently configured.",
+        "We need GTM because conversions are not tracked.",
+        "Our GTM is broken and not sending conversions.",
+        "Not optional: GTM is required.",
+        "GTM isn't needed for analytics, and GTM is required for Ads.",
+        "Candidates without GTM must not apply.",
+        "Applications without GTM will be rejected.",
     ],
 )
 def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):

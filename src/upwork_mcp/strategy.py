@@ -112,23 +112,32 @@ ADJACENT_PROOF_TAGS = frozenset(
 
 # A vertical word in a job for software, education, recruitment, or law
 # enforcement does not describe the same business model as a client-services
-# case study. Such jobs may still be good opportunities, but unrelated proof is
-# not exposed or used to justify a boost.
-NON_CLIENT_SERVICE_MODEL_PATTERN = re.compile(
-    r"\b(?:saas|software|marketplace|mobile app|school|university|college|"
-    r"recruit(?:er|ing|ment)?|staffing|law enforcement|police|"
-    r"legal tech|law tech|subscription (?:product|service|business)|"
-    r"practice management (?:platform|system|tool))\b",
+# case study. Match explicit marketed models rather than broad nouns: a law firm
+# may recruit clients, mention a law school, or use software internally without
+# becoming a recruiting, education, or software business.
+NON_CLIENT_TITLE_MODEL_PATTERN = re.compile(
+    r"\b(?:saas|legal[- ]tech|law[- ]tech|law[- ]school|law[- ]enforcement|"
+    r"practice[- ]management\s+(?:software|platform|system|tool)|"
+    r"(?:software|subscription|mobile[- ]app)\s+(?:company|product|platform|business)|"
+    r"(?:recruiting|recruitment|staffing)\s+(?:agency|company|firm|marketplace|platform|software)|"
+    r"(?:legal|lawyer|attorney|criminal[- ]defen[cs]e|family[- ]law)[- ]+"
+    r"(?:software|platform|marketplace|app))\b",
     re.I,
 )
-INTERNAL_TOOL_CONTEXT_PATTERN = re.compile(
-    r"\b(?:use|uses|using|utilise|utilises|utilising|utilize|utilizes|utilizing|"
-    r"run|runs|running|rely|relies|relying|connect|connects|connected|connecting|"
-    r"integrate|integrates|integrated|integrating)\b[^.;!?]{0,80}\b"
-    r"(?:software|platform|marketplace|"
-    r"practice management (?:platform|system|tool))\b|"
-    r"\b(?:software|platform|marketplace)\b[^.;!?]{0,50}\b(?:internally|in-house|"
-    r"for (?:our|their) (?:operations|team|firm|company))\b",
+NON_CLIENT_DESCRIPTION_MODEL_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:saas|legal[- ]tech|law[- ]tech|subscription\s+(?:product|service|business))\b|"
+    r"\b(?:attorney|lawyer|legal|law[- ]firm|criminal[- ]defen[cs]e|family[- ]law)"
+    r"[^.;!?]{0,55}\b(?:software|platform|marketplace|mobile[- ]app)\b|"
+    r"\bpractice[- ]management\s+(?:software|platform|system|tool)\b"
+    r"[^.;!?]{0,80}\b(?:sold|selling|serv(?:e|es|ing)|market(?:ed|ing)?|for\s+sale)\b|"
+    r"\b(?:sell|sells|selling|sold|license|licenses|licensing|offer|offers|offering)\b"
+    r"[^.;!?]{0,90}\b(?:licenses?|subscriptions?|saas|software|platform|marketplace|"
+    r"mobile[- ]app|digital\s+product)\b|"
+    r"\b(?:google\s+ads|adwords|paid\s+search|ppc|marketing)\b[^.;!?]{0,45}\bfor\b"
+    r"[^.;!?]{0,65}\b(?:law[- ]school|university|college|law[- ]enforcement|police|"
+    r"recruiting\s+(?:marketplace|platform|agency)|software\s+(?:company|platform|product))\b"
+    r")",
     re.I,
 )
 
@@ -277,31 +286,59 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
     """Classify the same contrast-bounded clause around one scope phrase."""
 
     normalized = text.replace("’", "'")
-    boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
-    prefix = re.split(boundary, normalized[max(0, start - 220) : start], flags=re.I)[-1]
-    suffix = re.split(boundary, normalized[end : end + 180], flags=re.I)[0]
-    clause = re.sub(r"\s+", " ", f"{prefix} <scope> {suffix}").strip().casefold()
+    sentence_boundary = r"[.;!?\n]"
+    sentence_prefix = re.split(
+        sentence_boundary,
+        normalized[max(0, start - 260) : start],
+        flags=re.I,
+    )[-1]
+    sentence_suffix = re.split(
+        sentence_boundary,
+        normalized[end : end + 220],
+        flags=re.I,
+    )[0]
+    sentence = re.sub(
+        r"\s+",
+        " ",
+        f"{sentence_prefix} <scope> {sentence_suffix}",
+    ).strip().casefold()
 
-    eligibility_actor = re.search(
-        r"\b(?:applicants?|candidates?|apply|application|hire|hiring|eligible|"
-        r"ineligible|considered|accepted|qualif(?:y|ied))\b",
-        clause,
+    allowed_eligibility = (
+        r"(?:\b(?:candidates?|applicants?).{0,80}(?:cannot|can't|without).{0,50}"
+        r"<scope>.{0,70}\b(?:may|can)\s+(?:still\s+)?apply\b|"
+        r"\b(?:will\s+not|won't)\s+reject\b.{0,90}(?:without|cannot|can't).{0,40}"
+        r"<scope>|"
+        r"\b(?:will|would)\s+(?:accept|consider)\b.{0,90}(?:without|cannot|can't)"
+        r".{0,40}<scope>)"
     )
-    missing_scope = re.search(
-        r"\b(?:without|cannot|can't|unable|lack(?:ing|s)?|no one)\b",
-        clause,
+    if re.search(allowed_eligibility, sentence):
+        return True
+
+    required_eligibility = (
+        r"(?:\b(?:do\s+not|don't)\s+apply\b.{0,100}(?:cannot|can't|without).{0,50}"
+        r"<scope>|"
+        r"\b(?:if|who)\b.{0,90}(?:cannot|can't|without).{0,50}<scope>.{0,90}"
+        r"(?:do\s+not|don't|must\s+not|should\s+not|cannot|can't)\s+apply\b|"
+        r"\b(?:applicants?|candidates?|applications?).{0,100}"
+        r"(?:without|cannot|can't|unable).{0,50}<scope>.{0,100}"
+        r"(?:(?:must\s+not|should\s+not|cannot|can't|do\s+not|don't)\s+apply|"
+        r"(?:will\s+not|won't)\s+be\s+(?:considered|accepted)|"
+        r"(?:will|would)\s+be\s+rejected|(?:are|will\s+be)\s+ineligible)\b|"
+        r"\bno one\b.{0,80}\bwithout\b.{0,40}<scope>.{0,80}\bshould\s+apply\b|"
+        r"\b(?:will\s+not|won't)\s+hire\b.{0,100}\bwithout\b.{0,40}<scope>|"
+        r"\b(?:cannot|can't)\s+apply\b.{0,80}\bwithout\b.{0,40}<scope>|"
+        r"\bwithout\b.{0,40}<scope>.{0,80}\b(?:cannot|can't)\s+apply\b)"
     )
-    negative_outcome = re.search(
-        r"\b(?:do not|don't|should not|shouldn't|will not|won't|cannot|can't|"
-        r"ineligible|not eligible|not considered|not accepted|no one)\b",
-        clause,
-    )
-    no_one_excludes_scope = re.search(
-        r"\bno one\b.{0,50}\b(?:needs?|requires?|has to use)\b.{0,40}<scope>",
-        clause,
-    )
-    if eligibility_actor and missing_scope and negative_outcome and not no_one_excludes_scope:
+    if re.search(required_eligibility, sentence):
         return False
+
+    local_boundary = (
+        r"[;:!?\n]|,(?!\s*(?:which|that)\b)|"
+        r"\b(?:but|however|although|though|yet|and|because|while|whereas|so)\b"
+    )
+    prefix = re.split(local_boundary, normalized[max(0, start - 180) : start], flags=re.I)[-1]
+    suffix = re.split(local_boundary, normalized[end : end + 140], flags=re.I)[0]
+    clause = re.sub(r"\s+", " ", f"{prefix} <scope> {suffix}").strip().casefold()
 
     required_despite_negative = (
         r"(?:\b(?:cannot|can't)\b.{0,90}\bwithout\s+<scope>|"
@@ -317,13 +354,23 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
     if re.search(required_despite_negative, clause):
         return False
 
+    positive_requirement = (
+        r"(?:\b(?<!not )(?<!no )(?<!n't )(?:need|needs|require|requires|implement|configure|"
+        r"repair|fix|set up)\b.{0,50}<scope>|"
+        r"<scope>.{0,50}(?<!not )(?<!n't )\b(?:required|mandatory|essential|broken)|"
+        r"<scope>.{0,50}\b(?:must|will)\s+be\s+(?:used|implemented|configured))"
+    )
+    if re.search(positive_requirement, clause):
+        return False
+
     # After eligibility and double-negative requirements are resolved, any
     # explicit negative marker in the same clause makes the scope an exclusion.
     exclusion_marker = re.compile(
         r"\b(?:no|not|never|without|cannot|can't|isn't|aren't|wasn't|weren't|"
         r"won't|wouldn't|shouldn't|mustn't|don't|doesn't|didn't|unnecessary|"
-        r"optional|excluded|omitted|prohibited|forbidden|avoid(?:ed|ing)?|"
-        r"outside|rather than|except)\b"
+        r"optional|exclude(?:d|ing)?|omit(?:ted|ting)?|skip(?:ped|ping)?|"
+        r"prohibited|forbidden|avoid(?:ed|ing)?|outside|out\s+of\s+scope|"
+        r"rather\s+than|instead(?:\s+of)?|except)\b"
     )
     return bool(exclusion_marker.search(clause))
 
@@ -384,15 +431,14 @@ def proposal_safe_proof_lines(study: Mapping[str, Any]) -> list[dict[str, str]]:
 
 
 def _has_non_client_service_business_model(job: Mapping[str, Any]) -> bool:
-    """Detect a marketed non-client-service model without penalising internal tools."""
+    """Detect explicit marketed models without penalising incidental wording."""
 
-    chunks = [str(job.get("title") or ""), str(job.get("description") or "")]
-    for chunk in chunks:
-        for sentence in re.split(r"[.;!?\n]+", chunk):
-            without_internal_tools = INTERNAL_TOOL_CONTEXT_PATTERN.sub("", sentence)
-            if NON_CLIENT_SERVICE_MODEL_PATTERN.search(without_internal_tools):
-                return True
-    return False
+    title = str(job.get("title") or "")
+    description = str(job.get("description") or "")
+    return bool(
+        NON_CLIENT_TITLE_MODEL_PATTERN.search(title)
+        or NON_CLIENT_DESCRIPTION_MODEL_PATTERN.search(description)
+    )
 
 
 def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:
