@@ -20,11 +20,10 @@ uv run upwork-mcp --login    # sign in to Upwork in the opened browser
 
 ## Background Chrome (automatic)
 
-Three layers are available so Chrome does not need to be opened manually after setup:
+Two built-in layers keep Chrome available after setup:
 
 1. **Mac login** — `com.jrr.upwork-chrome` launchd agent (off-screen Chrome on port 9222)
-2. **Cursor session start** — `~/.cursor/hooks.json` runs `start-chrome-daemon.sh`
-3. **MCP startup** — `scripts/mcp-server.sh` ensures Chrome before `upwork-mcp` starts
+2. **MCP startup** — `scripts/mcp-server.sh` ensures Chrome before `upwork-mcp` starts
 
 Install launchd once:
 
