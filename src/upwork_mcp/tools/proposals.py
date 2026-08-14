@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -28,6 +28,15 @@ class StrictToolModel(BaseModel):
     """Base model that rejects misspelled or unexpected action fields."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+
+type DiscoveryStatus = Literal["complete", "incomplete", "unavailable"]
+type RateIncreaseControlStatus = Literal[
+    "complete",
+    "not_applicable",
+    "incomplete",
+    "unavailable",
+]
 
 
 def validate_upwork_url(value: str) -> str:
@@ -269,6 +278,18 @@ class SubmitProposalParams(StrictToolModel):
     job_title: str = Field(min_length=1, max_length=1000, description="Exact live job title")
     job_type: Literal["hourly", "fixed"]
     cover_letter: str = Field(min_length=1, max_length=10000, description="Exact approved cover letter")
+    fee_net_text: list[str] = Field(
+        description="Normalized live Upwork fee/net context shown during preparation",
+    )
+    fee_net_status: DiscoveryStatus = Field(
+        description="Completeness of the live fee/net inspection bound during preparation",
+    )
+    boost_auction_text: list[str] = Field(
+        description="Normalized live boost-auction context shown during preparation",
+    )
+    boost_auction_status: DiscoveryStatus = Field(
+        description="Completeness of the live boost-auction inspection bound during preparation",
+    )
     rate: float | None = Field(default=None, gt=0, description="Proposed hourly rate")
     bid: float | None = Field(default=None, gt=0, description="Fixed-price bid")
     payment_structure: Literal["by_project", "by_milestone"] | None = Field(
@@ -282,13 +303,22 @@ class SubmitProposalParams(StrictToolModel):
         max_length=20,
         description="Exact live screening-question text observed before approval",
     )
+    screening_questions_status: DiscoveryStatus = Field(
+        description="Completeness of live screening-question enumeration",
+    )
     duration: Literal[
         "Less than 1 month",
         "1 to 3 months",
         "3 to 6 months",
         "More than 6 months",
     ] | None = Field(default=None, description="Exact Upwork duration selection")
+    duration_options_status: DiscoveryStatus = Field(
+        description="Completeness of live duration-option enumeration",
+    )
     profile_highlights: list[str] = Field(default_factory=list, max_length=4)
+    available_profile_highlights_status: DiscoveryStatus = Field(
+        description="Completeness of live profile-highlight enumeration",
+    )
     base_connects: int | None = Field(
         default=None,
         ge=0,
@@ -296,6 +326,9 @@ class SubmitProposalParams(StrictToolModel):
     )
     boost_connects: int = Field(default=0, ge=0)
     rate_increase_frequency: Literal["Never"] = "Never"
+    rate_increase_control_status: RateIncreaseControlStatus = Field(
+        description="Whether the live form exposed a complete rate-increase control or proved it inapplicable",
+    )
     action_id: str = Field(min_length=1, max_length=128, description="Approved one-time prepared action ID")
 
     _validate_job_url = field_validator("job_url")(lambda value: parse_job_url(value)[0])
@@ -323,6 +356,11 @@ class SubmitProposalParams(StrictToolModel):
             raise ValueError("List items cannot be blank")
         return values
 
+    @field_validator("fee_net_text", "boost_auction_text")
+    @classmethod
+    def _normalise_live_context(cls, values: list[str]) -> list[str]:
+        return normalize_live_context_lines(values)
+
     @model_validator(mode="after")
     def _bind_identity_and_terms(self) -> SubmitProposalParams:
         _, job_route_id = parse_job_url(self.job_url)
@@ -339,6 +377,34 @@ class SubmitProposalParams(StrictToolModel):
             payment_structure=self.payment_structure,
             milestones=self.milestones,
         )
+        required_complete = {
+            "fee/net": self.fee_net_status,
+            "screening-question": self.screening_questions_status,
+            "duration-option": self.duration_options_status,
+            "profile-highlight": self.available_profile_highlights_status,
+        }
+        incomplete = [label for label, status in required_complete.items() if status != "complete"]
+        if incomplete:
+            raise ValueError(
+                "Approved proposal payload requires complete live inspection for: "
+                + ", ".join(incomplete)
+            )
+        if not self.fee_net_text:
+            raise ValueError("Complete fee/net inspection requires normalized live fee/net text")
+        if len(self.screening_questions) != len(self.answers or []):
+            raise ValueError("Screening questions and exact approved answers must have equal counts")
+        if self.boost_auction_status == "complete" and not self.boost_auction_text:
+            raise ValueError("Complete boost-auction inspection requires normalized live auction text")
+        if self.boost_auction_status == "unavailable" and self.boost_auction_text:
+            raise ValueError("Unavailable boost-auction inspection cannot include live auction text")
+        if self.boost_connects and self.boost_auction_status != "complete":
+            raise ValueError("A nonzero boost requires a complete live boost-auction inspection")
+        if self.rate_increase_control_status not in {"complete", "not_applicable"}:
+            raise ValueError(
+                "Rate-increase control inspection must be complete or explicitly not_applicable"
+            )
+        if self.job_type == "fixed" and self.rate_increase_control_status != "not_applicable":
+            raise ValueError("Fixed-price proposals require rate_increase_control_status=not_applicable")
         return self
 
 
@@ -381,16 +447,24 @@ def proposal_submission_payload(params: SubmitProposalParams) -> dict[str, Any]:
         "job_title": params.job_title,
         "job_type": params.job_type,
         "cover_letter": params.cover_letter,
+        "fee_net_text": params.fee_net_text,
+        "fee_net_status": params.fee_net_status,
+        "boost_auction_text": params.boost_auction_text,
+        "boost_auction_status": params.boost_auction_status,
         "rate": params.rate,
         "bid": params.bid,
         "payment_structure": params.payment_structure,
         "milestones": [item.model_dump(mode="json") for item in params.milestones],
         "answers": params.answers or [],
         "screening_questions": params.screening_questions,
+        "screening_questions_status": params.screening_questions_status,
         "duration": params.duration,
+        "duration_options_status": params.duration_options_status,
         "profile_highlights": params.profile_highlights,
+        "available_profile_highlights_status": params.available_profile_highlights_status,
         "boost_connects": params.boost_connects,
         "rate_increase_frequency": params.rate_increase_frequency,
+        "rate_increase_control_status": params.rate_increase_control_status,
     }
     # Keep compatibility with proposal artifacts prepared before live-form
     # inspection was added. New preparation flows should always include it.
@@ -682,6 +756,122 @@ def _dedupe_text(values: list[str]) -> list[str]:
     return result
 
 
+def normalize_live_context_lines(values: list[str]) -> list[str]:
+    """Normalize read-only Upwork context before it enters an approval digest."""
+
+    return _dedupe_text([str(value) for value in values])
+
+
+def _inspect_fee_net_context(text: str) -> dict[str, Any]:
+    """Classify the live fee/net preview without guessing from unrelated page copy."""
+
+    lines = normalize_live_context_lines(
+        [
+            line
+            for line in text.splitlines()
+            if re.search(
+                r"service fee|upwork fee|you(?:'|’)?ll receive|you will receive|\bnet\b",
+                line,
+                re.I,
+            )
+        ]
+    )
+    fee_lines = [line for line in lines if re.search(r"service fee|upwork fee", line, re.I)]
+    net_lines = [
+        line
+        for line in lines
+        if re.search(r"you(?:'|’)?ll receive|you will receive|\bnet\b", line, re.I)
+    ]
+    if fee_lines and net_lines:
+        status: DiscoveryStatus = "complete"
+        message = "Both the live Upwork fee and freelancer net preview were read."
+    elif lines:
+        status = "incomplete"
+        message = "Only part of the live fee/net preview could be read."
+    else:
+        status = "unavailable"
+        message = "The live form did not expose a readable fee/net preview."
+    return {
+        "text": lines,
+        "status": status,
+        "details": {
+            "fee_lines_seen": len(fee_lines),
+            "net_lines_seen": len(net_lines),
+            "message": message,
+        },
+    }
+
+
+def _inspect_boost_auction_context(text: str) -> dict[str, Any]:
+    """Classify visible boost-auction evidence for exact approval binding."""
+
+    all_lines = normalize_live_context_lines(text.splitlines())
+    page_has_boost_context = any(
+        re.search(r"\bboost(?:ed|ing)?\b|\bauction\b", line, re.I)
+        for line in all_lines
+    )
+    lines = normalize_live_context_lines(
+        [
+            line
+            for line in all_lines
+            if re.search(r"\bboost(?:ed|ing)?\b|\bauction\b", line, re.I)
+            or (
+                re.search(r"\bconnects?\b", line, re.I)
+                and re.search(r"\bbid(?:s|ding)?\b|\bauction\b|\brank(?:ed|ing)?\b", line, re.I)
+            )
+            or (
+                page_has_boost_context
+                and re.search(
+                    r"\btop\s+bid\b|\bno\s+bids?\b|\bbe\s+the\s+first\b|"
+                    r"\brank(?:ed|ing)?\b|\bslot\b|\b(?:1st|2nd|3rd|4th)\s+place\b",
+                    line,
+                    re.I,
+                )
+            )
+        ]
+    )
+    has_boost_context = any(re.search(r"\bboost(?:ed|ing)?\b|\bauction\b", line, re.I) for line in lines)
+    has_auction_state = any(
+        re.search(
+            r"\d+\s+connects?\b|\btop\s+bid\b|\bno\s+bids?\b|\bbe\s+the\s+first\b|"
+            r"\brank(?:ed|ing)?\b|\bslot\b|\b(?:1st|2nd|3rd|4th)\s+place\b",
+            line,
+            re.I,
+        )
+        for line in lines
+    )
+    if has_boost_context and has_auction_state:
+        status: DiscoveryStatus = "complete"
+        message = "The live boost auction and its current state were read."
+    elif lines:
+        status = "incomplete"
+        message = "Boost copy was visible, but the live auction state could not be proven complete."
+    else:
+        status = "unavailable"
+        message = "The live form did not expose readable boost-auction context."
+    return {
+        "text": lines,
+        "status": status,
+        "details": {
+            "boost_context_seen": has_boost_context,
+            "auction_state_seen": has_auction_state,
+            "message": message,
+        },
+    }
+
+
+async def _inspect_fee_net_state(page, text: str | None = None) -> dict[str, Any]:
+    """Return the normalized live fee/net state used by prepare and commit checks."""
+
+    return _inspect_fee_net_context(text if text is not None else await _page_text(page))
+
+
+async def _inspect_boost_auction_state(page, text: str | None = None) -> dict[str, Any]:
+    """Return the normalized live boost-auction state used by prepare and commit checks."""
+
+    return _inspect_boost_auction_context(text if text is not None else await _page_text(page))
+
+
 def _extract_base_connects(text: str) -> int | None:
     """Extract base proposal cost without confusing it with account balance."""
 
@@ -819,29 +1009,94 @@ async def _open_proposal_form(page, job_url: str) -> tuple[str, str | None]:
     return "identity_mismatch", None
 
 
-async def _inspect_duration_options(page, text: str) -> list[str]:
-    allowed = [
-        "Less than 1 month",
-        "1 to 3 months",
-        "3 to 6 months",
-        "More than 6 months",
-    ]
-    found = [option for option in allowed if option in text]
-    if len(found) > 1:
-        return found
+_DURATION_OPTIONS = [
+    "Less than 1 month",
+    "1 to 3 months",
+    "3 to 6 months",
+    "More than 6 months",
+]
+_DURATION_TOGGLE = (
+    'button:has-text("Select a duration"), '
+    '.air3-dropdown-toggle:has-text("duration"), '
+    '[data-test*="duration"] .air3-dropdown-toggle'
+)
+_DURATION_MENU_OPTIONS = (
+    '[role="listbox"] [role="option"], .air3-menu [role="menuitem"], '
+    '.air3-menu li.air3-menu-item, [data-test*="duration"] [role="option"]'
+)
 
-    toggle = await page.query_selector(
-        'button:has-text("Select a duration"), '
-        '.air3-dropdown-toggle:has-text("duration"), '
-        '[data-test*="duration"] .air3-dropdown-toggle'
+
+async def _visible_texts(page, selector: str) -> list[str]:
+    values: list[str] = []
+    for element in await page.query_selector_all(selector):
+        if not await _element_is_visible(element):
+            continue
+        value = _normalise_identity_text(await element.text_content())
+        if value:
+            values.append(value)
+    return _dedupe_text(values)
+
+
+async def _inspect_duration_options(page) -> dict[str, Any]:
+    """Open, enumerate, and dismiss the duration menu without selecting a value."""
+
+    details: dict[str, Any] = {
+        "expected_options": list(_DURATION_OPTIONS),
+        "toggle_count": 0,
+        "menu_opened": False,
+        "menu_dismissed": True,
+        "visible_options": [],
+        "missing_options": list(_DURATION_OPTIONS),
+        "unexpected_options": [],
+        "message": "The duration menu was not inspected.",
+    }
+    toggles = [
+        element
+        for element in await page.query_selector_all(_DURATION_TOGGLE)
+        if await _element_is_visible(element)
+    ]
+    details["toggle_count"] = len(toggles)
+    if not toggles:
+        details["message"] = "Exactly one visible duration control could not be identified."
+        return {"options": [], "status": "unavailable", "details": details}
+    if len(toggles) != 1:
+        details["message"] = "Multiple visible duration controls made enumeration ambiguous."
+        return {"options": [], "status": "incomplete", "details": details}
+
+    try:
+        await _click(page, toggles[0])
+        await _settle_profile_highlight_view(page)
+    except Exception as error:
+        details["message"] = f"The duration menu could not be opened: {type(error).__name__}."
+        return {"options": [], "status": "unavailable", "details": details}
+
+    visible_options = await _visible_texts(page, _DURATION_MENU_OPTIONS)
+    details["menu_opened"] = bool(visible_options)
+    details["visible_options"] = visible_options
+    options = [option for option in _DURATION_OPTIONS if option in visible_options]
+    details["missing_options"] = [option for option in _DURATION_OPTIONS if option not in options]
+    details["unexpected_options"] = [option for option in visible_options if option not in _DURATION_OPTIONS]
+
+    try:
+        await page.keyboard.press("Escape")
+        await _settle_profile_highlight_view(page)
+        details["menu_dismissed"] = not bool(await _visible_texts(page, _DURATION_MENU_OPTIONS))
+    except Exception:
+        details["menu_dismissed"] = False
+
+    complete = bool(
+        details["menu_opened"]
+        and details["menu_dismissed"]
+        and not details["missing_options"]
+        and not details["unexpected_options"]
     )
-    if toggle:
-        try:
-            await _click(page, toggle)
-            text = await _page_text(page)
-        except Exception:
-            pass
-    return [option for option in allowed if option in text]
+    if complete:
+        details["message"] = "All exact duration options were enumerated and the menu was dismissed."
+        status = "complete"
+    else:
+        details["message"] = "Duration-option enumeration could not be proven complete."
+        status = "incomplete"
+    return {"options": options, "status": status, "details": details}
 
 
 async def _screening_question_texts(page) -> list[str]:
@@ -855,6 +1110,181 @@ async def _screening_question_texts(page) -> list[str]:
         if value:
             values.append(value)
     return _dedupe_text(values)
+
+
+_SCREENING_QUESTION_PROMPTS = (
+    '[data-test*="screening-question"], .screening-question, '
+    '.question-answer label, label[for*="question"]'
+)
+_SCREENING_ANSWER_CONTROLS = (
+    '[data-test="question-input"], .question-answer textarea, .screening-question textarea'
+)
+_COVER_LETTER_CONTROL = '[data-test="cover-letter-input"], textarea[name*="cover"]'
+
+
+async def _inspect_screening_questions(page) -> dict[str, Any]:
+    """Prove question enumeration against the corresponding live answer controls."""
+
+    try:
+        prompt_elements = [
+            element
+            for element in await page.query_selector_all(_SCREENING_QUESTION_PROMPTS)
+            if await _element_is_visible(element)
+        ]
+        raw_prompts = [
+            _normalise_identity_text(await element.text_content())
+            for element in prompt_elements
+        ]
+        questions = _dedupe_text([prompt for prompt in raw_prompts if prompt])
+        answer_controls = [
+            element
+            for element in await page.query_selector_all(_SCREENING_ANSWER_CONTROLS)
+            if await _element_is_visible(element)
+        ]
+        all_textareas = [
+            element
+            for element in await page.query_selector_all("textarea")
+            if await _element_is_visible(element)
+        ]
+        cover_controls = [
+            element
+            for element in await page.query_selector_all(_COVER_LETTER_CONTROL)
+            if await _element_is_visible(element)
+        ]
+    except Exception as error:
+        return {
+            "questions": [],
+            "status": "unavailable",
+            "details": {
+                "prompt_elements_seen": 0,
+                "blank_prompt_elements_seen": 0,
+                "questions_extracted": 0,
+                "answer_controls_seen": 0,
+                "cover_letter_controls_seen": 0,
+                "total_textareas_seen": 0,
+                "expected_total_textareas": None,
+                "message": f"Screening-question inspection failed: {type(error).__name__}.",
+            },
+        }
+    details: dict[str, Any] = {
+        "prompt_elements_seen": len(raw_prompts),
+        "blank_prompt_elements_seen": len([prompt for prompt in raw_prompts if not prompt]),
+        "questions_extracted": len(questions),
+        "answer_controls_seen": len(answer_controls),
+        "cover_letter_controls_seen": len(cover_controls),
+        "total_textareas_seen": len(all_textareas),
+        "expected_total_textareas": len(answer_controls) + 1,
+        "message": "Screening-question enumeration could not be proven complete.",
+    }
+    complete = bool(
+        len(cover_controls) == 1
+        and all(raw_prompts)
+        and len(questions) == len(answer_controls)
+        and len(all_textareas) == len(answer_controls) + 1
+    )
+    if complete:
+        details["message"] = (
+            "Every visible screening prompt matches one answer control; "
+            "the remaining textarea is the cover letter."
+        )
+        status = "complete"
+    elif not cover_controls and not raw_prompts and not answer_controls and not all_textareas:
+        status = "unavailable"
+        details["message"] = "The proposal form controls were unavailable for question enumeration."
+    else:
+        status = "incomplete"
+    return {"questions": questions, "status": status, "details": details}
+
+
+_RATE_INCREASE_SELECT = 'select[name*="increase"], [data-test*="rate-increase"] select'
+_RATE_INCREASE_TOGGLE = (
+    '[data-test*="rate-increase"] button, '
+    '.air3-dropdown-toggle:has-text("rate increase"), '
+    'button:has-text("Select a frequency")'
+)
+
+
+async def _inspect_rate_increase_control(
+    page,
+    job_type: Literal["hourly", "fixed"] | None,
+) -> dict[str, Any]:
+    """Read whether the exact live form supports choosing the required Never value."""
+
+    details: dict[str, Any] = {
+        "job_type": job_type,
+        "select_controls_seen": 0,
+        "toggle_controls_seen": 0,
+        "visible_options": [],
+        "menu_dismissed": True,
+        "message": "The rate-increase control was not inspected.",
+    }
+    if job_type == "fixed":
+        details["message"] = "Rate increases do not apply to this fixed-price form."
+        return {"status": "not_applicable", "details": details}
+    if job_type != "hourly":
+        details["message"] = "The job type is unavailable, so rate-increase applicability is unknown."
+        return {"status": "unavailable", "details": details}
+
+    try:
+        selects = [
+            element
+            for element in await page.query_selector_all(_RATE_INCREASE_SELECT)
+            if await _element_is_visible(element)
+        ]
+        toggles = [
+            element
+            for element in await page.query_selector_all(_RATE_INCREASE_TOGGLE)
+            if await _element_is_visible(element)
+        ]
+    except Exception as error:
+        details["message"] = f"Rate-increase control inspection failed: {type(error).__name__}."
+        return {"status": "unavailable", "details": details}
+
+    details["select_controls_seen"] = len(selects)
+    details["toggle_controls_seen"] = len(toggles)
+    if not selects and not toggles:
+        details["message"] = "The exact hourly form exposes no rate-increase control."
+        return {"status": "not_applicable", "details": details}
+    if len(selects) + len(toggles) != 1:
+        details["message"] = "Multiple visible rate-increase controls made inspection ambiguous."
+        return {"status": "incomplete", "details": details}
+
+    if selects:
+        try:
+            option_elements = await selects[0].query_selector_all("option")
+            options = _dedupe_text(
+                [
+                    _normalise_identity_text(await option.text_content())
+                    for option in option_elements
+                ]
+            )
+        except Exception as error:
+            details["message"] = f"Rate-increase options could not be read: {type(error).__name__}."
+            return {"status": "incomplete", "details": details}
+        details["visible_options"] = options
+        if options.count("Never") == 1:
+            details["message"] = 'The native rate-increase control exposes the exact "Never" option.'
+            return {"status": "complete", "details": details}
+        details["message"] = 'The native rate-increase control did not expose one exact "Never" option.'
+        return {"status": "incomplete", "details": details}
+
+    try:
+        await _click(page, toggles[0])
+        await _settle_profile_highlight_view(page)
+        options = await _visible_texts(page, _DURATION_MENU_OPTIONS)
+        details["visible_options"] = options
+        await page.keyboard.press("Escape")
+        await _settle_profile_highlight_view(page)
+        details["menu_dismissed"] = not bool(await _visible_texts(page, _DURATION_MENU_OPTIONS))
+    except Exception as error:
+        details["menu_dismissed"] = False
+        details["message"] = f"Rate-increase menu inspection failed: {type(error).__name__}."
+        return {"status": "incomplete", "details": details}
+    if options.count("Never") == 1 and details["menu_dismissed"]:
+        details["message"] = 'The rate-increase menu exposes the exact "Never" option.'
+        return {"status": "complete", "details": details}
+    details["message"] = 'The rate-increase menu did not expose one exact "Never" option and dismiss cleanly.'
+    return {"status": "incomplete", "details": details}
 
 
 _PROFILE_HIGHLIGHT_OPENER = (
@@ -886,10 +1316,22 @@ _PROFILE_HIGHLIGHT_CLOSE = (
     '.is-modal-fullscreen button:has-text("Cancel"), '
     '[role="dialog"] button:has-text("Cancel")'
 )
+_REQUIRED_PROFILE_HIGHLIGHT_TABS = {"portfolio", "certifications", "upwork_jobs"}
 
 
 def _normalize_visible_title(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _canonical_highlight_tab(identity: str) -> str | None:
+    token = re.sub(r"[^a-z0-9]+", "_", identity.casefold()).strip("_")
+    if "portfolio" in token:
+        return "portfolio"
+    if "cert" in token:
+        return "certifications"
+    if "job" in token or "work_history" in token or "workhistory" in token:
+        return "upwork_jobs"
+    return None
 
 
 async def _element_is_visible(element) -> bool:
@@ -996,7 +1438,8 @@ async def _profile_highlight_tabs(page) -> list[tuple[str, Any]]:
         except Exception:
             tab_id = ""
         label = _normalize_visible_title((await tab.text_content()) or "")
-        identity = tab_id or label or f"tab-{index + 1}"
+        raw_identity = tab_id or label or f"tab-{index + 1}"
+        identity = _canonical_highlight_tab(raw_identity) or raw_identity
         if identity not in seen:
             seen.add(identity)
             tabs.append((identity, tab))
@@ -1054,6 +1497,9 @@ async def _inspect_available_profile_highlights(page) -> dict[str, Any]:
             "chooser_dismissed": True,
             "tabs_found": [],
             "tabs_inspected": [],
+            "required_tabs": sorted(_REQUIRED_PROFILE_HIGHLIGHT_TABS),
+            "missing_required_tabs": sorted(_REQUIRED_PROFILE_HIGHLIGHT_TABS),
+            "missing_inspected_tabs": sorted(_REQUIRED_PROFILE_HIGHLIGHT_TABS),
             "selectable_options_seen": 0,
             "titles_extracted": 0,
             "message": "The live profile-highlight chooser was not inspected.",
@@ -1075,6 +1521,12 @@ async def _inspect_available_profile_highlights(page) -> dict[str, Any]:
         chooser_opened = bool(tabs or first_option_count or await _profile_highlight_chooser_visible(page))
         result["details"]["chooser_opened"] = chooser_opened
         result["details"]["tabs_found"] = [identity for identity, _ in tabs]
+        found_required_tabs = _REQUIRED_PROFILE_HIGHLIGHT_TABS.intersection(
+            result["details"]["tabs_found"]
+        )
+        result["details"]["missing_required_tabs"] = sorted(
+            _REQUIRED_PROFILE_HIGHLIGHT_TABS - found_required_tabs
+        )
         if not chooser_opened:
             result["details"]["message"] = "The profile-highlight chooser did not open."
             return result
@@ -1109,17 +1561,31 @@ async def _inspect_available_profile_highlights(page) -> dict[str, Any]:
         result["titles"] = _dedupe_text(titles)
         result["details"]["selectable_options_seen"] = selectable_options_seen
         result["details"]["titles_extracted"] = len(result["titles"])
-        if tab_failures or unresolved_options:
+        missing_required_tabs = result["details"]["missing_required_tabs"]
+        inspected_required_tabs = _REQUIRED_PROFILE_HIGHLIGHT_TABS.intersection(
+            result["details"]["tabs_inspected"]
+        )
+        missing_inspected_tabs = sorted(_REQUIRED_PROFILE_HIGHLIGHT_TABS - inspected_required_tabs)
+        result["details"]["missing_inspected_tabs"] = missing_inspected_tabs
+        if tab_failures or unresolved_options or missing_required_tabs or missing_inspected_tabs:
             result["status"] = "incomplete"
             reasons = []
             if tab_failures:
                 reasons.append(f"tabs could not be inspected: {', '.join(tab_failures)}")
             if unresolved_options:
                 reasons.append(f"{unresolved_options} selectable option titles could not be read")
+            if missing_required_tabs:
+                reasons.append(
+                    "required tabs were not visible: " + ", ".join(missing_required_tabs)
+                )
+            if missing_inspected_tabs:
+                reasons.append("required tabs were not inspected: " + ", ".join(missing_inspected_tabs))
             result["details"]["message"] = "Live profile-highlight enumeration is incomplete: " + "; ".join(reasons)
         else:
             result["status"] = "complete"
-            result["details"]["message"] = "All visible profile-highlight chooser tabs were enumerated."
+            result["details"]["message"] = (
+                "Portfolio, certifications, and Upwork-jobs tabs were all enumerated."
+            )
     except Exception as error:
         result["status"] = "incomplete" if chooser_opened else "unavailable"
         result["details"]["message"] = f"Profile-highlight enumeration failed: {type(error).__name__}."
@@ -1161,36 +1627,32 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
         form_status = "identity_mismatch"
         identity = None
 
-    question_texts = await _screening_question_texts(page)
-    job_type = identity["job_type"] if identity else None
+    job_type = (
+        cast(Literal["hourly", "fixed"], identity["job_type"])
+        if identity
+        else None
+    )
     fixed_payment_structures = (
         await _inspect_fixed_payment_structures(page)
         if form_status == "ready" and job_type == "fixed"
         else []
     )
 
-    fee_net_lines = _dedupe_text(
-        [
-            line
-            for line in text.splitlines()
-            if any(
-                marker in line.lower()
-                for marker in ("service fee", "upwork fee", "you'll receive", "you’ll receive", "net")
-            )
-        ]
-    )
-    boost_lines = _dedupe_text(
-        [
-            line
-            for line in text.splitlines()
-            if "boost" in line.lower()
-            or ("connect" in line.lower() and any(word in line.lower() for word in ("bid", "auction")))
-        ]
-    )
+    fee_net_inspection = await _inspect_fee_net_state(page, text)
+    boost_auction_inspection = await _inspect_boost_auction_state(page, text)
     if form_status == "ready":
+        question_inspection = await _inspect_screening_questions(page)
         highlight_inspection = await _inspect_available_profile_highlights(page)
-        duration_options = await _inspect_duration_options(page, text)
+        duration_inspection = await _inspect_duration_options(page)
+        rate_increase_inspection = await _inspect_rate_increase_control(page, job_type)
     else:
+        question_inspection = {
+            "questions": [],
+            "status": "unavailable",
+            "details": {
+                "message": "The proposal form is not ready, so screening questions were not inspected."
+            },
+        }
         highlight_inspection = {
             "titles": [],
             "status": "unavailable",
@@ -1199,12 +1661,43 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
                 "chooser_dismissed": True,
                 "tabs_found": [],
                 "tabs_inspected": [],
+                "required_tabs": sorted(_REQUIRED_PROFILE_HIGHLIGHT_TABS),
+                "missing_required_tabs": sorted(_REQUIRED_PROFILE_HIGHLIGHT_TABS),
+                "missing_inspected_tabs": sorted(_REQUIRED_PROFILE_HIGHLIGHT_TABS),
                 "selectable_options_seen": 0,
                 "titles_extracted": 0,
                 "message": "The proposal form is not ready, so profile highlights were not inspected.",
             },
         }
-        duration_options = []
+        duration_inspection = {
+            "options": [],
+            "status": "unavailable",
+            "details": {
+                "message": "The proposal form is not ready, so duration options were not inspected."
+            },
+        }
+        rate_increase_inspection = {
+            "status": "unavailable",
+            "details": {
+                "message": "The proposal form is not ready, so rate-increase applicability was not inspected."
+            },
+        }
+        fee_net_inspection = {
+            "text": fee_net_inspection["text"],
+            "status": "unavailable",
+            "details": {
+                **fee_net_inspection["details"],
+                "message": "The proposal form is not ready, so fee/net context is unavailable.",
+            },
+        }
+        boost_auction_inspection = {
+            "text": boost_auction_inspection["text"],
+            "status": "unavailable",
+            "details": {
+                **boost_auction_inspection["details"],
+                "message": "The proposal form is not ready, so boost-auction context is unavailable.",
+            },
+        }
 
     return {
         "job_url": canonical_job_url,
@@ -1214,16 +1707,26 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
         "form_status": form_status,
         "existing_proposal": existing_evidence is not None,
         "existing_proposal_evidence": existing_evidence,
-        "screening_questions": question_texts,
+        "screening_questions": question_inspection["questions"],
+        "screening_questions_status": question_inspection["status"],
+        "screening_questions_details": question_inspection["details"],
         "job_type": job_type,
         "fixed_payment_structures": fixed_payment_structures,
         "base_connects": _extract_base_connects(text),
-        "fee_net_text": fee_net_lines,
-        "duration_options": duration_options,
-        "boost_auction_text": boost_lines,
+        "fee_net_text": fee_net_inspection["text"],
+        "fee_net_status": fee_net_inspection["status"],
+        "fee_net_details": fee_net_inspection["details"],
+        "duration_options": duration_inspection["options"],
+        "duration_options_status": duration_inspection["status"],
+        "duration_options_details": duration_inspection["details"],
+        "boost_auction_text": boost_auction_inspection["text"],
+        "boost_auction_status": boost_auction_inspection["status"],
+        "boost_auction_details": boost_auction_inspection["details"],
         "available_profile_highlights": highlight_inspection["titles"],
         "available_profile_highlights_status": highlight_inspection["status"],
         "available_profile_highlights_details": highlight_inspection["details"],
+        "rate_increase_control_status": rate_increase_inspection["status"],
+        "rate_increase_control_details": rate_increase_inspection["details"],
         "external_action_taken": False,
     }
 

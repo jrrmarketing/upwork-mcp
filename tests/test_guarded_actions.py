@@ -185,8 +185,16 @@ async def test_approved_proposal_still_requires_live_preflight_before_browser(mo
         job_type="hourly",
         action_id="uwa_missing_action",
         cover_letter="Exact approved copy",
+        fee_net_text=["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        fee_net_status="complete",
+        boost_auction_text=[],
+        boost_auction_status="unavailable",
         rate=63,
+        screening_questions_status="complete",
         duration="1 to 3 months",
+        duration_options_status="complete",
+        available_profile_highlights_status="complete",
+        rate_increase_control_status="complete",
     )
     result = await proposals.submit_proposal(params)
     assert result["status"] == "approval_required"
@@ -205,8 +213,16 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
         job_type="hourly",
         action_id="uwa_placeholder",
         cover_letter="Exact approved copy",
+        fee_net_text=["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        fee_net_status="complete",
+        boost_auction_text=[],
+        boost_auction_status="unavailable",
         rate=63,
+        screening_questions_status="complete",
         duration="1 to 3 months",
+        duration_options_status="complete",
+        available_profile_highlights_status="complete",
+        rate_increase_control_status="complete",
     )
     payload = proposals.proposal_submission_payload(original)
     prepared = prepare_action("proposal", payload)
@@ -591,13 +607,20 @@ class _InspectPage:
         unresolved_highlight: bool = False,
         dismiss_highlight: bool = True,
         escape_dismisses_highlight: bool = False,
+        missing_highlight_tab: str | None = None,
+        screening_answer_count: int = 1,
+        duration_options: list[str] | None = None,
+        duration_control: bool = True,
     ) -> None:
         self.url = "https://www.upwork.com/jobs/~123"
         self.form_open = False
         self.highlight_open = False
+        self.duration_open = False
         self.highlight_tab = "portfolio"
         self.dismiss_highlight = dismiss_highlight
         self.escape_dismisses_highlight = escape_dismisses_highlight
+        self.duration_control = duration_control
+        self.duration_options = duration_options or list(proposals._DURATION_OPTIONS)
         self.keyboard = _Keyboard(self._escape)
         self.body = "Google Ads audit job"
         self.highlight_options: dict[str, list[str | None]] = {
@@ -605,9 +628,14 @@ class _InspectPage:
             "certifications": ["Google Ads Search Certification"],
             "upwork_jobs": [None if unresolved_highlight else "Google Ads Account Audit"],
         }
+        if missing_highlight_tab:
+            self.highlight_options.pop(missing_highlight_tab)
         self.payment_terms = _PaymentTerms()
+        self.cover_control = _TextElement()
+        self.answer_controls = [_TextElement() for _ in range(screening_answer_count)]
 
     def _escape(self) -> None:
+        self.duration_open = False
         if self.escape_dismisses_highlight:
             self.highlight_open = False
 
@@ -661,8 +689,20 @@ Boost your proposal auction: top bid 8 Connects
     async def query_selector_all(self, selector: str) -> list[Any]:
         if self.form_open and "payment-terms" in selector:
             return [self.payment_terms]
-        if "screening-question" in selector:
+        if self.form_open and selector == proposals._SCREENING_QUESTION_PROMPTS:
             return [_TextElement("What similar work have you done?")]
+        if self.form_open and selector == proposals._SCREENING_ANSWER_CONTROLS:
+            return self.answer_controls
+        if self.form_open and selector == proposals._COVER_LETTER_CONTROL:
+            return [self.cover_control]
+        if self.form_open and selector == "textarea":
+            return [self.cover_control, *self.answer_controls]
+        if self.form_open and selector == proposals._DURATION_TOGGLE:
+            return [] if not self.duration_control else [
+                _Button(lambda: setattr(self, "duration_open", True), "Select a duration")
+            ]
+        if self.duration_open and selector == proposals._DURATION_MENU_OPTIONS:
+            return [_TextElement(option) for option in self.duration_options]
         if self.highlight_open and 'role="tab"' in selector:
             return [
                 _HighlightTab(tab_id, lambda tab_id=tab_id: setattr(self, "highlight_tab", tab_id))
@@ -687,14 +727,18 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
     assert result["fixed_payment_structures"] == ["by_project", "by_milestone"]
     assert result["base_connects"] == 12
     assert result["screening_questions"] == ["What similar work have you done?"]
+    assert result["screening_questions_status"] == "complete"
     assert result["duration_options"] == [
         "Less than 1 month",
         "1 to 3 months",
         "3 to 6 months",
         "More than 6 months",
     ]
+    assert result["duration_options_status"] == "complete"
     assert result["fee_net_text"]
+    assert result["fee_net_status"] == "complete"
     assert result["boost_auction_text"]
+    assert result["boost_auction_status"] == "complete"
     assert result["available_profile_highlights"] == [
         "Family Law Growth",
         "Home Services Lead Generation",
@@ -702,6 +746,7 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
         "Google Ads Account Audit",
     ]
     assert result["available_profile_highlights_status"] == "complete"
+    assert result["rate_increase_control_status"] == "not_applicable"
     assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
     assert result["available_profile_highlights_details"]["tabs_inspected"] == [
         "portfolio",
@@ -751,3 +796,131 @@ async def test_inspect_proposal_form_uses_escape_when_close_does_not_dismiss(mon
     assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
     assert page.highlight_open is False
     assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_fails_closed_when_known_highlight_tab_is_missing(
+    monkeypatch,
+) -> None:
+    page = _InspectPage(missing_highlight_tab="upwork_jobs")
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "incomplete"
+    assert result["available_profile_highlights_details"]["missing_required_tabs"] == [
+        "upwork_jobs"
+    ]
+    assert result["available_profile_highlights_details"]["missing_inspected_tabs"] == [
+        "upwork_jobs"
+    ]
+    assert page.highlight_open is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_reports_incomplete_screening_control_enumeration(
+    monkeypatch,
+) -> None:
+    page = _InspectPage(screening_answer_count=0)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["screening_questions"] == ["What similar work have you done?"]
+    assert result["screening_questions_status"] == "incomplete"
+    assert result["screening_questions_details"]["answer_controls_seen"] == 0
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_reports_duration_discovery_statuses(monkeypatch) -> None:
+    missing_option = _InspectPage(duration_options=proposals._DURATION_OPTIONS[:-1])
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(missing_option))
+    incomplete = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+    assert incomplete["duration_options_status"] == "incomplete"
+    assert incomplete["duration_options_details"]["missing_options"] == ["More than 6 months"]
+
+    no_control = _InspectPage(duration_control=False)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(no_control))
+    unavailable = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+    assert unavailable["duration_options_status"] == "unavailable"
+
+
+class _RateSelect(_TextElement):
+    def __init__(self, options: list[str]) -> None:
+        super().__init__()
+        self.options = options
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        return [_ClosedNativeOption(option) for option in self.options] if selector == "option" else []
+
+
+class _ClosedNativeOption(_TextElement):
+    async def is_visible(self) -> bool:
+        return False
+
+
+class _RateInspectionPage:
+    def __init__(self, options: list[str] | None) -> None:
+        self.select = _RateSelect(options) if options is not None else None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == proposals._RATE_INCREASE_SELECT:
+            return [self.select] if self.select else []
+        return []
+
+
+@pytest.mark.asyncio
+async def test_rate_increase_control_status_is_explicit_and_fail_closed() -> None:
+    complete = await proposals._inspect_rate_increase_control(
+        _RateInspectionPage(["Never", "Every 3 months"]),
+        "hourly",
+    )
+    assert complete["status"] == "complete"
+
+    incomplete = await proposals._inspect_rate_increase_control(
+        _RateInspectionPage(["Every 3 months"]),
+        "hourly",
+    )
+    assert incomplete["status"] == "incomplete"
+
+    not_applicable = await proposals._inspect_rate_increase_control(
+        _RateInspectionPage(None),
+        "hourly",
+    )
+    assert not_applicable["status"] == "not_applicable"
+
+
+@pytest.mark.asyncio
+async def test_live_fee_and_boost_context_helpers_normalize_and_classify_exact_state() -> None:
+    fee = await proposals._inspect_fee_net_state(
+        None,
+        "  Upwork service fee   $6.30  \nYou'll receive $56.70 net\nUpwork service fee $6.30",
+    )
+    assert fee == {
+        "text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "status": "complete",
+        "details": {
+            "fee_lines_seen": 1,
+            "net_lines_seen": 1,
+            "message": "Both the live Upwork fee and freelancer net preview were read.",
+        },
+    }
+
+    generic_bid = await proposals._inspect_boost_auction_state(
+        None,
+        "Boost your proposal\nPlace a bid",
+    )
+    assert generic_bid["status"] == "incomplete"
+    live_auction = await proposals._inspect_boost_auction_state(
+        None,
+        "Boost your proposal auction: top bid 8 Connects",
+    )
+    assert live_auction["status"] == "complete"
+    no_bids = await proposals._inspect_boost_auction_state(
+        None,
+        "Boost your proposal\nNo bids yet",
+    )
+    assert no_bids["status"] == "complete"

@@ -89,6 +89,21 @@ whose job identity, normalized cover letter, price, and active/submitted status 
 target. `success=false`, an index, a mismatched/unreadable record, or any other unknown result must
 not be retried automatically.
 
+Preparation now treats live form discovery as evidence, not a best-effort scrape. Screening
+questions and duration choices each return `complete`, `incomplete`, or `unavailable` plus
+diagnostic details. A zero-question form is `complete` only when one cover-letter control, zero
+question controls, and the exact textarea count agree. Duration is `complete` only after the
+single live menu is opened, all four exact Upwork choices are read, and the menu is dismissed.
+Any other state blocks preparation.
+
+The normalized `fee_net_text`/`fee_net_status` and
+`boost_auction_text`/`boost_auction_status` are part of the exact approval payload and digest.
+Fee/net discovery must be complete. A nonzero boost additionally requires a complete auction
+state; generic “Place a bid” copy is insufficient without numeric/top/no-bids/rank/slot evidence.
+The live rate-increase control is also bound as `complete` or explicitly `not_applicable` (fixed
+price, or an hourly form with no such control). `incomplete` and `unavailable` states cannot be
+prepared for approval.
+
 ## Profile highlights (the "Add profile highlights" modal)
 
 Opened by clicking the card titled **"Add a portfolio project"** (also "Add an Upwork job"
@@ -96,7 +111,8 @@ Opened by clicking the card titled **"Add a portfolio project"** (also "Add an U
 
 Read the current titles from this live modal before preparation. Do not rely on the old
 case-study digest: several historical card titles conflict with the audited public evidence.
-The read-only form inspection opens the chooser, visits every visible tab, reads each card
+The read-only form inspection opens the chooser, proves the known `portfolio`, `certifications`,
+and Upwork-jobs tabs are all present, visits every visible tab, reads each card
 beside a `Select highlight` button without clicking it, and dismisses the chooser. It returns
 `available_profile_highlights` with `available_profile_highlights_status`. Preparation is
 blocked unless that status is `complete`, and a supplied title must exactly match the live list.

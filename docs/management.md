@@ -111,6 +111,12 @@ Proposal preparation requires a `complete` live chooser enumeration and rejects 
 highlight title that is not in `available_profile_highlights`. An unavailable or incomplete
 chooser inspection blocks preparation rather than claiming the title was validated.
 
+The same fail-closed rule applies to screening questions, duration options, fee/net pricing
+context, and rate-increase applicability. The exact approval payload binds their live discovery
+statuses, the normalized fee/net lines, and the normalized boost-auction lines. Empty screening
+questions are valid only when the form-control count proves there are genuinely none; an empty or
+partial duration menu is never treated as complete.
+
 ## Boosts
 
 Default to no boost. Consider a boost only when all of these are true:
@@ -125,6 +131,8 @@ Default to no boost. Consider a boost only when all of these are true:
 The policy caps an initial recommendation at 12 extra Connects and still requires exact owner
 approval. It never spends from a recommendation alone. Capture the submitted boost and later
 outcome so the report can compare boosted and unboosted performance after enough observations.
+The auction status must be `complete` before any nonzero boost can enter an approval record;
+generic boost prompts without current numeric/top/no-bids/rank/slot state fail closed.
 
 ## Maintenance
 

@@ -1,7 +1,7 @@
 """Offline integration tests for proposal preparation."""
 import pytest
 
-from upwork_mcp.tools import management
+from upwork_mcp.tools import management, proposals
 
 
 def _job():
@@ -36,16 +36,26 @@ def _form():
         "form_status": "ready",
         "existing_proposal": False,
         "screening_questions": [],
-        "duration_options": ["1 to 3 months"],
+        "screening_questions_status": "complete",
+        "duration_options": [
+            "Less than 1 month",
+            "1 to 3 months",
+            "3 to 6 months",
+            "More than 6 months",
+        ],
+        "duration_options_status": "complete",
         "base_connects": 8,
-        "fee_net_text": ["Upwork fee and net preview shown"],
+        "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "fee_net_status": "complete",
         "boost_auction_text": ["Top bid 8 Connects"],
+        "boost_auction_status": "complete",
         "available_profile_highlights": ["Google Ads Search Certification"],
         "available_profile_highlights_status": "complete",
         "available_profile_highlights_details": {
             "chooser_opened": True,
             "chooser_dismissed": True,
         },
+        "rate_increase_control_status": "complete",
         "external_action_taken": False,
     }
 
@@ -89,6 +99,20 @@ async def test_prepare_proposal_binds_live_cost_questions_terms_and_copy(
     assert result["exact_submission"]["job_title"] == "Google Ads audit for family law firm"
     assert result["exact_submission"]["job_type"] == "hourly"
     assert result["exact_submission"]["screening_questions"] == []
+    assert result["exact_submission"]["screening_questions_status"] == "complete"
+    assert result["exact_submission"]["duration_options_status"] == "complete"
+    assert result["exact_submission"]["fee_net_text"] == [
+        "Upwork service fee $6.30",
+        "You'll receive $56.70 net",
+    ]
+    assert result["exact_submission"]["fee_net_status"] == "complete"
+    assert result["exact_submission"]["boost_auction_status"] == "complete"
+    assert result["exact_submission"]["rate_increase_control_status"] == "complete"
+    committed_schema = proposals.SubmitProposalParams(
+        action_id="uwa_schema_round_trip",
+        **result["exact_submission"],
+    )
+    assert proposals.proposal_submission_payload(committed_schema) == result["exact_submission"]
     assert result["exact_submission"]["rate_increase_frequency"] == "Never"
     assert result["prepared_action"]["approved"] is False
     assert result["external_action_taken"] is False
@@ -186,3 +210,77 @@ async def test_prepare_proposal_fails_closed_when_highlight_enumeration_is_unava
     assert result["ready_for_owner_approval"] is False
     assert result["prepared_action"] is None
     assert any("enumeration is not complete" in error for error in result["errors"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("form_update", "error_fragment"),
+    [
+        ({"screening_questions_status": "incomplete"}, "screening-question enumeration"),
+        ({"duration_options_status": "unavailable"}, "duration-option enumeration"),
+        ({"fee_net_status": "incomplete"}, "fee/net preview"),
+        ({"rate_increase_control_status": "unavailable"}, "rate-increase control"),
+    ],
+)
+async def test_prepare_proposal_refuses_incomplete_live_discovery(
+    monkeypatch,
+    tmp_path,
+    form_update,
+    error_fragment,
+) -> None:
+    async def fake_job(_params):
+        return _job()
+
+    async def fake_form(_params):
+        return {**_form(), **form_update}
+
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(management, "get_job_details", fake_job)
+    monkeypatch.setattr(management, "inspect_proposal_form", fake_form)
+    result = await management.prepare_proposal(
+        management.PrepareProposalParams(
+            job_url="https://www.upwork.com/jobs/~law123",
+            cover_letter="Hey, more than happy to look properly.\n\nI can review the account.",
+            rate=63,
+            duration="1 to 3 months",
+            profile_highlights=["Google Ads Search Certification"],
+        )
+    )
+
+    assert result["ready_for_owner_approval"] is False
+    assert result["prepared_action"] is None
+    assert any(error_fragment in error for error in result["errors"])
+
+
+@pytest.mark.asyncio
+async def test_prepare_proposal_requires_complete_live_auction_for_nonzero_boost(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    async def fake_job(_params):
+        return _job()
+
+    async def fake_form(_params):
+        return {
+            **_form(),
+            "boost_auction_text": ["Boost your proposal"],
+            "boost_auction_status": "incomplete",
+        }
+
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(management, "get_job_details", fake_job)
+    monkeypatch.setattr(management, "inspect_proposal_form", fake_form)
+    result = await management.prepare_proposal(
+        management.PrepareProposalParams(
+            job_url="https://www.upwork.com/jobs/~law123",
+            cover_letter="Hey, more than happy to look properly.\n\nI can review the account.",
+            rate=63,
+            duration="1 to 3 months",
+            profile_highlights=["Google Ads Search Certification"],
+            boost_connects=5,
+        )
+    )
+
+    assert result["ready_for_owner_approval"] is False
+    assert result["prepared_action"] is None
+    assert any("complete live boost-auction" in error for error in result["errors"])

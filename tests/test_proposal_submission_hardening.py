@@ -71,12 +71,22 @@ def _proposal_params(**updates: Any) -> proposals.SubmitProposalParams:
         "job_title": "Google Ads audit",
         "job_type": "hourly",
         "cover_letter": "Exact approved copy",
+        "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "fee_net_status": "complete",
+        "boost_auction_text": [],
+        "boost_auction_status": "unavailable",
         "rate": 63,
+        "screening_questions_status": "complete",
         "duration": "1 to 3 months",
+        "duration_options_status": "complete",
+        "available_profile_highlights_status": "complete",
         "base_connects": 12,
+        "rate_increase_control_status": "complete",
         "action_id": "uwa_test_action",
     }
     values.update(updates)
+    if values["job_type"] == "fixed" and "rate_increase_control_status" not in updates:
+        values["rate_increase_control_status"] = "not_applicable"
     return proposals.SubmitProposalParams(**values)
 
 
@@ -110,12 +120,25 @@ def test_identity_and_payment_structure_are_approval_bound() -> None:
     ) != proposals.approval_payload_digest(
         proposals.proposal_submission_payload(changed_title)
     )
+    for changed in (
+        _proposal_params(
+            fee_net_text=["Upwork service fee $7.00", "You'll receive $56.00 net"]
+        ),
+        _proposal_params(boost_auction_text=["Boost your proposal"], boost_auction_status="incomplete"),
+        _proposal_params(rate_increase_control_status="not_applicable"),
+    ):
+        assert proposals.approval_payload_digest(
+            proposals.proposal_submission_payload(original)
+        ) != proposals.approval_payload_digest(
+            proposals.proposal_submission_payload(changed)
+        )
 
     fixed = _proposal_params(
         job_type="fixed",
         rate=None,
         bid=500,
         payment_structure="by_project",
+        rate_increase_control_status="not_applicable",
     )
     payload = proposals.proposal_submission_payload(fixed)
     assert payload["job_id"] == "~abc123"
@@ -124,6 +147,27 @@ def test_identity_and_payment_structure_are_approval_bound() -> None:
     assert payload["job_type"] == "fixed"
     assert payload["payment_structure"] == "by_project"
     assert payload["milestones"] == []
+    assert payload["fee_net_status"] == "complete"
+    assert payload["boost_auction_status"] == "unavailable"
+    assert payload["screening_questions_status"] == "complete"
+    assert payload["duration_options_status"] == "complete"
+    assert payload["available_profile_highlights_status"] == "complete"
+    assert payload["rate_increase_control_status"] == "not_applicable"
+
+
+def test_submission_schema_requires_complete_discovery_and_auction_for_boost() -> None:
+    with pytest.raises(ValidationError, match="screening-question"):
+        _proposal_params(screening_questions_status="incomplete")
+    with pytest.raises(ValidationError, match="fee/net"):
+        _proposal_params(fee_net_status="unavailable", fee_net_text=[])
+    with pytest.raises(ValidationError, match="nonzero boost"):
+        _proposal_params(boost_connects=5)
+    boosted = _proposal_params(
+        boost_connects=5,
+        boost_auction_text=["Boost auction top bid 8 Connects"],
+        boost_auction_status="complete",
+    )
+    assert boosted.boost_connects == 5
 
 
 def test_job_type_detection_prefers_form_structure_and_fails_closed_on_ambiguous_text() -> None:
@@ -164,12 +208,22 @@ def _form(**updates: Any) -> dict[str, Any]:
         "form_status": "ready",
         "existing_proposal": False,
         "screening_questions": [],
-        "duration_options": ["1 to 3 months"],
+        "screening_questions_status": "complete",
+        "duration_options": [
+            "Less than 1 month",
+            "1 to 3 months",
+            "3 to 6 months",
+            "More than 6 months",
+        ],
+        "duration_options_status": "complete",
         "base_connects": 8,
-        "fee_net_text": ["Live fee preview"],
+        "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "fee_net_status": "complete",
         "boost_auction_text": [],
+        "boost_auction_status": "unavailable",
         "available_profile_highlights": ["Google Ads Search Certification"],
         "available_profile_highlights_status": "complete",
+        "rate_increase_control_status": "complete",
     }
     values.update(updates)
     return values
@@ -231,6 +285,7 @@ async def test_preparation_binds_explicit_live_by_project_structure(
         return _form(
             job_type="fixed",
             fixed_payment_structures=["by_project", "by_milestone"],
+            rate_increase_control_status="not_applicable",
         )
 
     monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))

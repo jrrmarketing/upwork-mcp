@@ -23,6 +23,7 @@ from .proposals import (
     ProposalsParams,
     get_proposals,
     inspect_proposal_form,
+    normalize_live_context_lines,
     parse_job_url,
     validate_payment_terms,
 )
@@ -73,16 +74,26 @@ def _proposal_payload(
         "job_title": form.get("job_title"),
         "job_type": form.get("job_type"),
         "cover_letter": params.cover_letter,
+        "fee_net_text": normalize_live_context_lines(form.get("fee_net_text") or []),
+        "fee_net_status": form.get("fee_net_status"),
+        "boost_auction_text": normalize_live_context_lines(form.get("boost_auction_text") or []),
+        "boost_auction_status": form.get("boost_auction_status"),
         "rate": params.rate,
         "bid": params.bid,
         "payment_structure": params.payment_structure,
         "milestones": [item.model_dump(mode="json") for item in params.milestones],
         "answers": params.answers,
-        "screening_questions": [],
+        "screening_questions": form.get("screening_questions") or [],
+        "screening_questions_status": form.get("screening_questions_status"),
         "duration": params.duration,
+        "duration_options_status": form.get("duration_options_status"),
         "profile_highlights": params.profile_highlights,
+        "available_profile_highlights_status": form.get(
+            "available_profile_highlights_status"
+        ),
         "boost_connects": params.boost_connects,
         "rate_increase_frequency": params.rate_increase_frequency,
+        "rate_increase_control_status": form.get("rate_increase_control_status"),
     }
     if base_connects is not None:
         payload["base_connects"] = base_connects
@@ -147,6 +158,34 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
     form_ready = form.get("form_status") == "ready"
     if not form_ready:
         errors.append(f"The live proposal form is not ready: {form.get('form_status')}")
+    screening_questions_status = form.get("screening_questions_status")
+    if form_ready and screening_questions_status != "complete":
+        errors.append(
+            "Live screening-question enumeration is not complete, so answers cannot be bound for approval"
+        )
+    duration_options_status = form.get("duration_options_status")
+    if form_ready and duration_options_status != "complete":
+        errors.append(
+            "Live duration-option enumeration is not complete, so the selected duration cannot be approved"
+        )
+    fee_net_status = form.get("fee_net_status")
+    if form_ready and fee_net_status != "complete":
+        errors.append(
+            "The live fee/net preview is not complete, so the exact proposal price context cannot be approved"
+        )
+    rate_increase_control_status = form.get("rate_increase_control_status")
+    if form_ready and rate_increase_control_status not in {"complete", "not_applicable"}:
+        errors.append(
+            "Live rate-increase control applicability is incomplete, so the required Never setting cannot be approved"
+        )
+    if (
+        form_ready
+        and form.get("job_type") == "fixed"
+        and rate_increase_control_status != "not_applicable"
+    ):
+        errors.append(
+            "The fixed-price form did not explicitly bind rate-increase controls as not_applicable"
+        )
     available_highlights_status = form.get("available_profile_highlights_status")
     available_highlights = set(form.get("available_profile_highlights") or [])
     if form_ready and available_highlights_status != "complete":
@@ -164,17 +203,17 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
     if form.get("existing_proposal"):
         errors.append("An existing proposal was found for this job")
     screening_questions = form.get("screening_questions") or []
-    if len(screening_questions) != len(params.answers):
+    if screening_questions_status == "complete" and len(screening_questions) != len(params.answers):
         errors.append(
             f"The live form has {len(screening_questions)} screening questions but {len(params.answers)} answers were supplied"
         )
     duration_options = form.get("duration_options") or []
-    if duration_options and params.duration not in duration_options:
+    if duration_options_status == "complete" and params.duration not in duration_options:
         errors.append("The selected duration is not available in the live form")
     if form.get("base_connects") is None:
         errors.append("The live base Connect cost could not be verified")
-    if not form.get("fee_net_text"):
-        warnings.append("Upwork did not expose a live fee/net preview during read-only inspection")
+    if fee_net_status == "complete" and not form.get("fee_net_text"):
+        errors.append("The complete live fee/net inspection did not contain any normalized context")
 
     recommended = set(analysis["profile_highlights"])
     if form_ready and available_highlights_status == "complete":
@@ -193,9 +232,13 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         errors.append("This job does not meet the selective-boost policy")
     if params.boost_connects > analysis["boost"]["max_extra_connects"]:
         errors.append("Boost exceeds the policy cap for this job")
+    boost_auction_status = form.get("boost_auction_status")
+    if params.boost_connects and boost_auction_status != "complete":
+        errors.append("A nonzero boost requires a complete live boost-auction inspection")
+    if boost_auction_status == "complete" and not form.get("boost_auction_text"):
+        errors.append("The complete live boost-auction inspection did not contain any normalized context")
 
     payload = _proposal_payload(params, base_connects=form.get("base_connects"), form=form)
-    payload["screening_questions"] = form.get("screening_questions") or []
     prepared_action = prepare_action("proposal", payload) if not errors else None
     return {
         "ready_for_owner_approval": not errors,
