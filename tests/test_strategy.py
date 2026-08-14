@@ -256,6 +256,11 @@ def test_internal_software_use_does_not_hide_a_separate_licensed_product_model()
         "A platform for divorce attorneys.",
         "Software used by family law firms.",
         "We provide case management software to lawyers.",
+        "Our software helps family law firms.",
+        "Software for family law firms.",
+        "Our app helps criminal defense lawyers.",
+        "We sell an AI tool to criminal defense attorneys.",
+        "Our CRM helps family law firms.",
     ],
 )
 def test_marketed_software_models_never_borrow_law_firm_proof(description: str):
@@ -289,6 +294,39 @@ def test_legal_practice_software_used_internally_does_not_erase_law_firm_proof()
     )
 
     assert result.case_studies[0]["key"] == "drd-criminal-law"
+    assert result.case_studies[0]["match_strength"] == "exact"
+    assert result.boost["recommendation"] == "inspect_live_auction"
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Our software platform is used by our staff internally.",
+        "We license legal software for internal use.",
+        "We implemented legal practice management software in-house.",
+        "Our ServiceTitan platform is used by our technicians internally.",
+    ],
+)
+def test_explicit_internal_product_language_preserves_real_service_proof(description: str):
+    plumbing = "servicetitan" in description.casefold()
+    result = analyze_job(
+        {
+            "title": (
+                "Google Ads for a plumbing company"
+                if plumbing
+                else "Google Ads for a criminal defense law firm"
+            ),
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    expected_key = "priority-one-plumbing" if plumbing else "drd-criminal-law"
+    assert result.case_studies[0]["key"] == expected_key
     assert result.case_studies[0]["match_strength"] == "exact"
     assert result.boost["recommendation"] == "inspect_live_auction"
 
@@ -472,6 +510,15 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "You can use GTM, but WhatConverts is acceptable instead.",
         "We can work without GTM.",
         "This is 20 hours, not full-time.",
+        "Either GTM or WhatConverts is acceptable.",
+        "GTM would be ideal, but WhatConverts is fine.",
+        "GTM can be left out.",
+        "GTM does not form part of this engagement.",
+        "This is fractional, not full-time.",
+        "No one needs GTM to apply.",
+        "GTM doesn't need to be used.",
+        "GTM is preferred, but we're open to WhatConverts.",
+        "Applicants need not know GTM.",
         "This ecommerce account does not need purchase tracking; Google Ads management only.",
     ):
         result = analyze_job(
@@ -522,6 +569,12 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "GTM is optional for reporting but required for conversion tracking.",
         "No GTM currently; setup is needed.",
         "We do not use GTM yet; implementation will be required.",
+        "We do not have GTM, so please install it.",
+        "We do not use GTM; please implement it.",
+        "We don't currently have GTM. Please install it.",
+        "GTM is not out of scope.",
+        "GTM is non-optional.",
+        "We don't want candidates who can't use GTM.",
     ],
 )
 def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):

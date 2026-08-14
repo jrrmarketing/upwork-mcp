@@ -142,17 +142,20 @@ NON_CLIENT_DESCRIPTION_MODEL_PATTERN = re.compile(
 )
 COMMERCIAL_MODEL_SALES_PATTERN = re.compile(
     r"(?:"
-    r"\b(?:sell|sells|selling|sold|license|licenses|licensing|offer|offers|offering|"
+    r"\b(?:sell|sells|selling|sold|offer|offers|offering|"
     r"provide|provides|providing|build|builds|built|develop|develops|developed|"
     r"operate|operates|operating)\b"
     r"[^.;!?]{0,90}\b(?:licenses?|subscriptions?|saas|software|platform|marketplace|"
-    r"mobile[- ]app|digital\s+product)\b|"
-    r"\b(?:our|the|this)\s+(?:saas|software|platform|marketplace|app|product)\b"
-    r"[^.;!?]{0,80}\b(?:serves?|sold|licensed|marketed|used\s+by)\b|"
-    r"\b(?:saas|software|platform|marketplace|app|product)\b[^.;!?]{0,80}"
+    r"mobile[- ]app|digital\s+product|(?:ai\s+)?tool|crm)\b|"
+    r"\b(?:license|licenses|licensing)\b[^.;!?]{0,75}\b(?:saas|software|platform|"
+    r"marketplace|app|product|tool|crm)\b[^.;!?]{0,45}\bto\b|"
+    r"\b(?:our|the|this)\s+(?:saas|software|platform|marketplace|app|product|tool|crm)\b"
+    r"[^.;!?]{0,80}\b(?:sold|licensed|marketed)\b|"
+    r"\b(?:saas|software|platform|marketplace|app|product|tool|crm)\b[^.;!?]{0,80}"
     r"\b(?:(?:sold|licensed|marketed)\s+(?:to|for)|used\s+by)\b|"
-    r"\b(?:a|an|our|the|this)\s+(?:saas|software|platform|marketplace|app|product)\b"
-    r"[^.;!?]{0,55}\b(?:for|serves?|used\s+by)\b[^.;!?]{0,55}"
+    r"\b(?:(?:a|an|our|the|this)\s+)?(?:saas|software|platform|marketplace|app|"
+    r"product|(?:ai\s+)?tool|crm)\b"
+    r"[^.;!?]{0,55}\b(?:for|helps?|serves?|used\s+by)\b[^.;!?]{0,55}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|"
     r"plumbers?|plumbing\s+companies|clinics?|dentists?)\b|"
     r"\b(?:case|practice)[- ]management\s+(?:saas|software|platform|system|tool)\b"
@@ -163,14 +166,28 @@ COMMERCIAL_MODEL_SALES_PATTERN = re.compile(
 )
 INTERNAL_TOOL_USE_PATTERN = re.compile(
     r"\b(?:use|uses|using|rely|relies|relying|connect|connects|connected|connecting|"
-    r"integrate|integrates|integrated|integrating)\b[^.;!?]{0,90}\b"
+    r"integrate|integrates|integrated|integrating|implement|implements|implemented|"
+    r"implementing|license|licenses|licensing|build|builds|built|provide|provides)\b"
+    r"[^.;!?]{0,90}\b"
     r"(?:saas|software|platform|marketplace|app|"
     r"practice[- ]management\s+(?:system|tool))\b[^.;!?]{0,45}"
     r"\b(?:internally|in[- ]house|for\s+(?:(?:our|their)\s+)?(?:internal\s+)?"
-    r"(?:operations|team|firm|company|case\s+work))\b|"
+    r"(?:use|operations|team|firm|company|case\s+work))\b|"
     r"\b(?:use|uses|using|rely|relies|relying|connect|connects|connected|connecting|"
     r"integrate|integrates|integrated|integrating)\b[^.;!?]{0,30}\b"
-    r"(?:clio|servicetitan|proprietary)\b[^.;!?]{0,45}\b(?:software|system|platform)?\b",
+    r"(?:clio|servicetitan|proprietary)\b[^.;!?]{0,45}\b(?:software|system|platform)?\b|"
+    r"\b(?:saas|software|platform|marketplace|app|product|tool|crm|servicetitan)\b"
+    r"[^.;!?]{0,70}\b(?:is\s+)?(?:used|implemented|licensed)\b[^.;!?]{0,55}"
+    r"\b(?:(?:by\s+)?(?:our\s+)?(?:staff|team|technicians?|firm)|internally|in[- ]house)\b",
+    re.I,
+)
+EXPLICIT_COMMERCIAL_SALE_PATTERN = re.compile(
+    r"\b(?:sell|sells|selling|sold|market|markets|marketed)\b"
+    r"[^.;!?]{0,90}\b(?:licenses?|subscriptions?|saas|software|platform|marketplace|"
+    r"app|product|tool|crm)\b|"
+    r"\b(?:license|licenses|licensing)\b[^.;!?]{0,70}\b(?:saas|software|platform|"
+    r"marketplace|app|product|tool|crm)\b[^.;!?]{0,40}\bto\b|"
+    r"\b(?:sell|sells|selling|sold)\b[^.;!?]{0,65}\blicenses?\b",
     re.I,
 )
 
@@ -331,6 +348,11 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         " ",
         f"{sentence_prefix} <scope> {sentence_suffix}",
     ).strip().casefold()
+    context = re.sub(
+        r"\s+",
+        " ",
+        f"{normalized[max(0, start - 180) : start]} <scope> {normalized[end : end + 320]}",
+    ).strip().casefold()
     for contraction, expanded in (
         ("isn't", "is not"),
         ("aren't", "are not"),
@@ -344,8 +366,10 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         ("doesn't", "does not"),
         ("didn't", "did not"),
         ("can't", "cannot"),
+        ("we're", "we are"),
     ):
         sentence = sentence.replace(contraction, expanded)
+        context = context.replace(contraction, expanded)
 
     # Strong requirement evidence wins over a current-state negative ("not
     # configured") or an earlier excluded use ("not needed for reports, but
@@ -353,14 +377,13 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
     required_patterns = (
         r"<scope>\s+(?:(?:is|remains)\s+)?(?:required|mandatory|essential)\b",
         r"<scope>.{0,55}\bnot\s+(?:optional|unnecessary|expendable)\b",
-        r"<scope>.{0,70}\b(?:must|has\s+to|needs?\s+to|will\s+need\s+to)\s+"
+        r"<scope>.{0,55}\b(?:not\s+(?:out\s+of|outside)|non[- ]optional)\b",
+        r"<scope>.{0,70}\b(?:must|has\s+to|will\s+need\s+to)\s+"
         r"(?:be\s+)?(?:used|installed|implemented|configured|set\s+up|fixed|repaired|included)\b",
         r"<scope>.{0,70}\b(?:must\s+(?:not|never)|cannot|can't)\s+be\s+"
         r"(?:omitted|skipped|avoided|excluded)\b",
         r"\b(?:do\s+not|don't|cannot|can't|never)\s+"
         r"(?:omit|skip|avoid|exclude|leave\s+out)\b.{0,65}<scope>",
-        r"\b(?<!not\s)(?<!n't\s)(?<!no\s)(?:need|needs|require|requires|implement|install|configure|"
-        r"repair|fix|set\s+up)\b.{0,65}<scope>",
         r"<scope>.{0,100}\b(?:and|but|although|though|yet)\b.{0,80}"
         r"\b(?:it|this|that)\b.{0,45}\b(?:required|mandatory|essential|must\s+be|"
         r"needs?\s+to\s+be|need\s+you\s+to)\b",
@@ -381,8 +404,16 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         r"\b(?:will\s+not|won't)\s+hire\b.{0,100}\bwithout\b.{0,45}<scope>",
         r"\b(?:cannot|can't)\s+apply\b.{0,80}\bwithout\b.{0,45}<scope>",
         r"\bwithout\b.{0,45}<scope>.{0,80}\b(?:cannot|can't)\s+apply\b",
+        r"\b(?:do\s+not|don't)\s+want\b.{0,55}\b(?:applicants?|candidates?)\b"
+        r".{0,70}\b(?:without|lacking|cannot|can't)\b.{0,45}<scope>",
     )
-    if any(re.search(pattern, sentence) for pattern in required_patterns):
+    cross_sentence_requirement = re.search(
+        r"<scope>[^.!?]{0,120}(?:\bso\b|[;:.!?])[^.!?]{0,90}"
+        r"\b(?:please\s+)?(?:install|implement|configure|repair|fix|set\s+up)\b"
+        r"(?:.{0,35}\b(?:it|this|that)\b)?",
+        context,
+    )
+    if cross_sentence_requirement or any(re.search(pattern, sentence) for pattern in required_patterns):
         return False
 
     optional_patterns = (
@@ -391,21 +422,30 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         r"optional|excluded|explicitly\s+excluded|specifically\s+excluded|out\s+of\s+scope|"
         r"outside\s+(?:the\s+)?scope)\b",
         r"<scope>.{0,70}\b(?:(?:should|must|will|would)\s+not|cannot|can't)\s+be\s+used\b",
+        r"<scope>.{0,70}\b(?:does\s+not\s+(?:need|have)\s+to|need\s+not)\s+be\s+"
+        r"(?:used|installed|implemented|configured|set\s+up)\b",
+        r"<scope>.{0,70}\b(?:can|may|could)\s+be\s+(?:left\s+out|omitted|skipped|excluded)\b",
+        r"<scope>.{0,70}\b(?:does|do)\s+not\s+(?:form|make\s+up)\s+part\b"
+        r".{0,45}\b(?:engagement|scope|role|work)\b",
         r"<scope>.{0,55}\b(?:won't|will\s+not)\s+be\s+necessary\b",
-        r"\b(?:no\s+(?:need|requirement|plan|plans|intention|commitment)|"
-        r"do\s+not|don't|does\s+not|doesn't|will\s+not|won't|are\s+not|aren't|"
-        r"is\s+not|isn't)\b.{0,75}<scope>",
+        r"\bno\s+(?:need|requirement|plan|plans|intention|commitment)\b[^,;:!?]{0,75}<scope>",
+        r"\b(?:do\s+not|don't|does\s+not|doesn't|will\s+not|won't|are\s+not|aren't|"
+        r"is\s+not|isn't)\b[^,;:!?]{0,35}\b(?:need|want|plan|intend|use|using|hire|hiring|"
+        r"look(?:ing)?\s+for|expect(?:ing)?)\b[^,;:!?]{0,55}<scope>",
         r"\bno\b.{0,30}<scope>.{0,50}\b(?:commitment|hours?|role|position)\b"
         r".{0,25}\b(?:required|expected)\b",
         r"\bno\b.{0,30}<scope>.{0,50}\b(?:experience\s+)?"
         r"(?:is\s+)?(?:required|needed|necessary|expected|mandatory)\b",
+        r"\b(?:is|are|will\s+be|will)\s+not\s+(?:be\s+)?(?:a\s+)?<scope>",
         r"\b(?:avoid|skip|omit|exclude)\b.{0,55}<scope>",
         r"\b(?:rather\s+than|instead\s+of)\b.{0,50}<scope>|"
         r"<scope>.{0,50}\b(?:rather\s+than|instead\s+of)\b",
         r"\b(?:can|may|could)\s+(?:work|operate|run|proceed)\b.{0,45}\bwithout\b"
         r".{0,35}<scope>",
         r"\b(?:part[- ]time|\d+(?:\.\d+)?\s*hours?)\b.{0,45}\bnot\s+<scope>",
-        r"\beither\b.{0,55}<scope>.{0,70}\bor\b.{0,90}\b(?:can|may|could)\s+be\s+used\b",
+        r"\b(?:fractional|part[- ]time)\b.{0,55}\bnot\s+<scope>",
+        r"\beither\b.{0,55}<scope>.{0,70}\bor\b.{0,90}"
+        r"\b(?:(?:can|may|could)\s+be\s+used|(?:is|would\s+be)\s+(?:acceptable|fine|allowed))\b",
         r"<scope>.{0,60}\bor\b.{0,80}\b(?:can|may|could)\s+be\s+used\b",
         r"<scope>.{0,70}\bpreferred\b.{0,60}\b(?:not\s+required|optional|acceptable|accepted)\b",
         r"<scope>.{0,70}\bpreferred\b.{0,70}\b(?:part[- ]time|alternative)\b"
@@ -413,6 +453,12 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         r"<scope>.{0,100}\b(?:but|although|though|yet)\b.{0,80}"
         r"\b(?:whatconverts|an?\s+alternative|another\s+tool)\b.{0,45}"
         r"\b(?:acceptable|accepted|allowed|available)\b.{0,25}\binstead\b",
+        r"<scope>.{0,80}\b(?:ideal|preferred)\b.{0,80}\b(?:but|although|though|yet)\b"
+        r".{0,70}\b(?:whatconverts|an?\s+alternative|another\s+tool)\b.{0,35}"
+        r"\b(?:acceptable|fine|allowed|works?)\b",
+        r"<scope>.{0,80}\b(?:ideal|preferred)\b.{0,80}\b(?:but|although|though|yet)\b"
+        r".{0,45}\b(?:we\s+are\s+)?open\s+to\b.{0,45}"
+        r"\b(?:whatconverts|an?\s+alternative|another\s+tool)\b",
         r"\b(?:applicants?|candidates?|anyone)\b.{0,100}"
         r"\b(?:without|lacking|cannot|can't|unable)\b.{0,55}<scope>.{0,100}"
         r"(?:\b(?:may|can)\s+(?:still\s+)?apply\b|\b(?:are|remain)\s+(?:still\s+)?eligible\b|"
@@ -421,6 +467,10 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         r".{0,45}<scope>",
         r"\b(?:will|would)\s+(?:accept|consider)\b.{0,100}"
         r"\b(?:without|lacking|cannot|can't)\b.{0,45}<scope>",
+        r"\bno\s+one\b.{0,45}\b(?:needs?|requires?)\b.{0,45}<scope>"
+        r".{0,45}\bto\s+apply\b",
+        r"\b(?:applicants?|candidates?)\b.{0,55}\bneed\s+not\b.{0,55}"
+        r"\b(?:know|use|understand|have\s+experience\s+with)\b.{0,40}<scope>",
     )
     return any(re.search(pattern, sentence) for pattern in optional_patterns)
 
@@ -488,10 +538,12 @@ def _has_non_client_service_business_model(job: Mapping[str, Any]) -> bool:
         return True
     description = str(job.get("description") or "")
     for sentence in re.split(r"[.;!?\n]+", description):
+        internal_use = INTERNAL_TOOL_USE_PATTERN.search(sentence)
+        explicit_sale = EXPLICIT_COMMERCIAL_SALE_PATTERN.search(sentence)
+        if internal_use and not explicit_sale:
+            continue
         if COMMERCIAL_MODEL_SALES_PATTERN.search(sentence):
             return True
-        if INTERNAL_TOOL_USE_PATTERN.search(sentence):
-            continue
         if NON_CLIENT_DESCRIPTION_MODEL_PATTERN.search(sentence):
             return True
     return False
