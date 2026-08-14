@@ -359,6 +359,13 @@ def _match_is_required_despite_negation(text: str, start: int, end: int) -> bool
         re.I,
     ):
         return True
+    if re.search(
+        r"\b(?:cannot|can't|not\s+eligible\s+to|ineligible\s+to)\b.{0,60}\b"
+        r"(?:apply|qualify|be\s+(?:considered|accepted|eligible))\b.{0,60}\bwithout\s*$",
+        prefix,
+        re.I,
+    ):
+        return True
     if re.search(r"\bwithout\s*$", prefix, re.I) and re.match(
         r"^(?:experience|skills?|knowledge)?\b.{0,60}\b"
         r"(?:cannot|can't|will\s+not|won't)\b.{0,40}\b"

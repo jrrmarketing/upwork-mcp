@@ -361,6 +361,7 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "Candidates without GTM experience will not be considered.",
         "We won't hire anyone without Google Tag Manager experience.",
         "Without GTM experience, you cannot apply.",
+        "You cannot apply without GTM experience.",
     ],
 )
 def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):
