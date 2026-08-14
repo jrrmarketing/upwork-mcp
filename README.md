@@ -48,7 +48,8 @@ Examples:
 
 Read-only tools may inspect live Upwork. Proposals, messages, withdrawals, and invitation
 declines follow prepare -> exact owner approval -> one-time commit -> owner-system readback.
-No tool may infer approval or Connect spend from a recommendation.
+No tool may infer approval or Connect spend from a recommendation. Positive boosts remain
+recommendation-only until Upwork's first Submit transition can be proven non-consequential.
 
 ## Docs
 

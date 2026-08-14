@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from upwork_mcp.tools import proposals
 
@@ -16,6 +17,9 @@ class _Text:
     async def text_content(self) -> str:
         return self.text
 
+    async def is_visible(self) -> bool:
+        return True
+
 
 class _Field:
     def __init__(self, *, wrong_readback: str | None = None) -> None:
@@ -23,6 +27,9 @@ class _Field:
         self.wrong_readback = wrong_readback
 
     async def is_enabled(self) -> bool:
+        return True
+
+    async def is_visible(self) -> bool:
         return True
 
     async def fill(self, value: str) -> None:
@@ -86,7 +93,7 @@ class _CommitPage:
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
-        if "submit-proposal" in selector:
+        if selector.startswith('button[data-test="submit-proposal"]'):
             self.submit_queries += 1
             return [
                 _Button(
@@ -106,6 +113,8 @@ class _CommitPage:
             return [self.duration]
         if 'select[name*="increase"]' in selector:
             return [self.increase] if self.increase else []
+        if selector == proposals._BASE_CONNECTS_CONTROL_SELECTOR:
+            return [_Text("12 Connects required to submit")]
         return []
 
 
@@ -122,6 +131,8 @@ def _params(**updates: Any) -> proposals.SubmitProposalParams:
             "You'll receive $56.70 net",
         ],
         "fee_net_status": "complete",
+        "fee_net_price_amount": "63.00",
+        "fee_net_source": "scoped_reversible_price_preflight",
         "boost_auction_text": ["Boost your proposal 8 Connects"],
         "boost_auction_status": "complete",
         "rate": 63,
@@ -132,6 +143,7 @@ def _params(**updates: Any) -> proposals.SubmitProposalParams:
         "duration_options_status": "complete",
         "available_profile_highlights_status": "complete",
         "base_connects": 12,
+        "base_connects_status": "complete",
         "rate_increase_control_status": "complete",
         "action_id": "uwa_test_action",
     }
@@ -194,6 +206,42 @@ async def test_profile_highlight_mismatch_never_queries_submit(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_silent_cover_reset_after_other_interactions_never_queries_submit(monkeypatch) -> None:
+    page = _CommitPage()
+    _commercial_inspectors(monkeypatch)
+
+    async def reset_cover(_page, _highlights):
+        page.cover.wrong_readback = ""
+        return True, None
+
+    monkeypatch.setattr(proposals, "_select_profile_highlights", reset_cover)
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "live_form_mismatch"
+    assert "cover letter silently changed" in result["message"]
+    assert result["external_action_taken"] is False
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_positive_boost_is_blocked_before_form_or_submit_interaction() -> None:
+    with pytest.raises(ValidationError, match="positive boost"):
+        _params(boost_connects=8)
+
+    values = _params().model_dump()
+    values["boost_connects"] = 8
+    unsafe = proposals.SubmitProposalParams.model_construct(**values)
+    page = _CommitPage()
+    result = await proposals._submit_proposal_on_page(unsafe, page)
+
+    assert result["status"] == "unsupported"
+    assert result["external_action_taken"] is False
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
 async def test_missing_required_highlight_tab_never_queries_submit(monkeypatch) -> None:
     page = _CommitPage()
     _commercial_inspectors(monkeypatch)
@@ -250,12 +298,13 @@ class _BoostDialog(_Text):
         *,
         boost_readback: str | None = None,
         choice: _Choice | None = None,
+        send_label: str = "Send for 12 Connects",
     ) -> None:
         super().__init__("Boost your proposal with Connects")
         self.boost = _Field(wrong_readback=boost_readback)
         self.choice = choice
         self.send_queries = 0
-        self.send = _Button("Send proposal")
+        self.send = _Button(send_label)
 
     async def is_visible(self) -> bool:
         return True
@@ -292,28 +341,33 @@ async def test_boost_mismatch_never_queries_final_send(
     boost: int,
     dialog: _BoostDialog,
 ) -> None:
-    send, error = await proposals._configure_boost_step(_BoostPage(dialog), boost)
+    send, error = await proposals._configure_boost_step(_BoostPage(dialog), boost, 12)
     assert send is None
     assert error
     assert dialog.send_queries == 0
 
 
 @pytest.mark.asyncio
-async def test_boost_and_explicit_no_boost_are_read_back_before_scoped_send() -> None:
-    boosted = _BoostDialog()
-    send, error = await proposals._configure_boost_step(_BoostPage(boosted), 8)
-    assert (send, error) == (boosted.send, None)
-    assert boosted.boost.value == "8"
-
+async def test_explicit_no_boost_is_read_back_before_exact_cost_scoped_send() -> None:
     unboosted = _BoostDialog(choice=_Choice())
-    send, error = await proposals._configure_boost_step(_BoostPage(unboosted), 0)
+    send, error = await proposals._configure_boost_step(_BoostPage(unboosted), 0, 12)
     assert (send, error) == (unboosted.send, None)
     assert unboosted.choice and unboosted.choice.selected is True
 
+    wrong_cost = _BoostDialog(choice=_Choice(), send_label="Send for 999 Connects")
+    send, error = await proposals._configure_boost_step(_BoostPage(wrong_cost), 0, 12)
+    assert send is None
+    assert "matching approved base Connects" in str(error)
+
+    positive = _BoostDialog()
+    send, error = await proposals._configure_boost_step(_BoostPage(positive), 8, 12)
+    assert send is None
+    assert "positive boost" in str(error)
+    assert positive.send_queries == 0
+
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boost", [0, 8])
-async def test_direct_submission_never_infers_boost_spend(monkeypatch, boost: int) -> None:
+async def test_direct_submission_never_infers_connect_spend(monkeypatch) -> None:
     page = _CommitPage()
     _commercial_inspectors(monkeypatch)
 
@@ -322,17 +376,37 @@ async def test_direct_submission_never_infers_boost_spend(monkeypatch, boost: in
 
     monkeypatch.setattr(proposals, "_proposal_confirmation", confirmed)
     result = await proposals._submit_proposal_on_page(
-        _params(boost_connects=boost),
+        _params(),
         page,
     )
     assert page.submit_clicks == 1
     assert result["boost_spend_verified"] is False
-    if boost:
-        assert result["status"] == "unknown"
-        assert "connects_used" not in result
-    else:
-        assert result["status"] == "submitted"
-        assert result["connects_used"] == 12
+    assert result["status"] == "submitted"
+    assert result["approved_base_connects"] == 12
+    assert result["connects_spend_verified"] is False
+    assert "connects_used" not in result
+
+    verified = proposals._confirmed_submission_result(
+        params=_params(),
+        readback={
+            "confirmed": True,
+            "connects_spend_verified": True,
+            "connects_used": 12,
+        },
+    )
+    assert verified["connects_spend_verified"] is True
+    assert verified["connects_used"] == 12
+
+    invalid = proposals._confirmed_submission_result(
+        params=_params(),
+        readback={
+            "confirmed": True,
+            "connects_spend_verified": True,
+            "connects_used": True,
+        },
+    )
+    assert invalid["connects_spend_verified"] is False
+    assert "connects_used" not in invalid
 
 
 class _HighlightButton(_Button):

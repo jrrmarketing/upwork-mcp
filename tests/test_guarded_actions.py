@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -219,6 +220,8 @@ async def test_approved_proposal_still_requires_live_preflight_before_browser(mo
         cover_letter="Exact approved copy",
         fee_net_text=["Upwork service fee $6.30", "You'll receive $56.70 net"],
         fee_net_status="complete",
+        fee_net_price_amount="63.00",
+        fee_net_source="scoped_reversible_price_preflight",
         boost_auction_text=[],
         boost_auction_status="unavailable",
         rate=63,
@@ -226,6 +229,8 @@ async def test_approved_proposal_still_requires_live_preflight_before_browser(mo
         duration="1 to 3 months",
         duration_options_status="complete",
         available_profile_highlights_status="complete",
+        base_connects=12,
+        base_connects_status="complete",
         rate_increase_control_status="complete",
     )
     result = await proposals.submit_proposal(params)
@@ -247,6 +252,8 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
         cover_letter="Exact approved copy",
         fee_net_text=["Upwork service fee $6.30", "You'll receive $56.70 net"],
         fee_net_status="complete",
+        fee_net_price_amount="63.00",
+        fee_net_source="scoped_reversible_price_preflight",
         boost_auction_text=[],
         boost_auction_status="unavailable",
         rate=63,
@@ -254,6 +261,8 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
         duration="1 to 3 months",
         duration_options_status="complete",
         available_profile_highlights_status="complete",
+        base_connects=12,
+        base_connects_status="complete",
         rate_increase_control_status="complete",
     )
     payload = proposals.proposal_submission_payload(original)
@@ -1030,6 +1039,17 @@ Boost your proposal auction: top bid 8 Connects
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
+        if self.form_open and selector == proposals._BASE_CONNECTS_CONTROL_SELECTOR:
+            return [_TextElement("12 Connects required to submit")]
+        if self.form_open and selector == proposals._BOOST_AUCTION_CONTROL_SELECTOR:
+            return [_TextElement("Boost your proposal auction: top bid 8 Connects")]
+        if self.form_open and selector == proposals._PROFILE_HIGHLIGHT_OPENER:
+            return [
+                _Button(
+                    lambda: setattr(self, "highlight_open", True),
+                    "Add a portfolio project",
+                )
+            ]
         if self.form_open and "payment-terms" in selector:
             return [self.payment_terms]
         if self.form_open and selector == proposals._SCREENING_QUESTION_PROMPTS:
@@ -1069,6 +1089,7 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
     assert result["job_type"] == "fixed"
     assert result["fixed_payment_structures"] == ["by_project", "by_milestone"]
     assert result["base_connects"] == 12
+    assert result["base_connects_status"] == "complete"
     assert result["screening_questions"] == ["What similar work have you done?"]
     assert result["screening_questions_status"] == "complete"
     assert result["duration_options"] == [
@@ -1078,8 +1099,9 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
         "More than 6 months",
     ]
     assert result["duration_options_status"] == "complete"
-    assert result["fee_net_text"]
-    assert result["fee_net_status"] == "complete"
+    assert result["fee_net_text"] == []
+    assert result["fee_net_status"] == "unavailable"
+    assert result["fee_net_price_amount"] is None
     assert result["boost_auction_text"]
     assert result["boost_auction_status"] == "complete"
     assert result["available_profile_highlights"] == [
@@ -1229,17 +1251,16 @@ async def test_rate_increase_control_status_is_explicit_and_fail_closed() -> Non
     )
     assert incomplete["status"] == "incomplete"
 
-    not_applicable = await proposals._inspect_rate_increase_control(
+    unavailable = await proposals._inspect_rate_increase_control(
         _RateInspectionPage(None),
         "hourly",
     )
-    assert not_applicable["status"] == "not_applicable"
+    assert unavailable["status"] == "unavailable"
 
 
 @pytest.mark.asyncio
 async def test_live_fee_and_boost_context_helpers_normalize_and_classify_exact_state() -> None:
-    fee = await proposals._inspect_fee_net_state(
-        None,
+    fee = proposals._inspect_fee_net_context(
         "  Upwork service fee   $6.30  \nYou'll receive $56.70 net\nUpwork service fee $6.30",
     )
     assert fee == {
@@ -1252,28 +1273,295 @@ async def test_live_fee_and_boost_context_helpers_normalize_and_classify_exact_s
         },
     }
 
-    unrelated_net_copy = await proposals._inspect_fee_net_state(
-        None,
+    unrelated_net_copy = proposals._inspect_fee_net_context(
         "Upwork service fee $6.30\nWe need net new leads",
     )
     assert unrelated_net_copy["text"] == ["Upwork service fee $6.30"]
     assert unrelated_net_copy["status"] == "incomplete"
 
-    generic_bid = await proposals._inspect_boost_auction_state(
-        None,
+    generic_bid = proposals._inspect_boost_auction_context(
         "Boost your proposal\nPlace a bid",
     )
     assert generic_bid["status"] == "incomplete"
-    live_auction = await proposals._inspect_boost_auction_state(
-        None,
+    generic_connect_amount = proposals._inspect_boost_auction_context(
+        "Boost your proposal with 8 Connects",
+    )
+    assert generic_connect_amount["status"] == "incomplete"
+    generic_top_bid = proposals._inspect_boost_auction_context(
+        "Boost your proposal\nTop bid unavailable",
+    )
+    assert generic_top_bid["status"] == "incomplete"
+    live_auction = proposals._inspect_boost_auction_context(
         "Boost your proposal auction: top bid 8 Connects",
     )
     assert live_auction["status"] == "complete"
-    no_bids = await proposals._inspect_boost_auction_state(
-        None,
+    no_bids = proposals._inspect_boost_auction_context(
         "Boost your proposal\nNo bids yet",
     )
     assert no_bids["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_commercial_and_connect_evidence_ignores_spoofed_body_copy() -> None:
+    class _ScopedPage:
+        def __init__(self, controls: dict[str, list[_TextElement]] | None = None) -> None:
+            self.controls = controls or {}
+
+        async def query_selector(self, selector: str):
+            if selector == "body":
+                return _TextElement(
+                    "Upwork service fee $6.30\nYou'll receive $56.70\n"
+                    "Boost auction: top bid 8 Connects\n12 Connects required to submit"
+                )
+            return None
+
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            return self.controls.get(selector, [])
+
+    spoofed = _ScopedPage()
+    fee = await proposals._inspect_fee_net_state(spoofed)
+    boost = await proposals._inspect_boost_auction_state(spoofed)
+    base = await proposals._inspect_base_connects_state(spoofed)
+    assert fee["status"] == "unavailable"
+    assert boost["status"] == "unavailable"
+    assert base["status"] == "unavailable"
+    assert base["value"] is None
+
+    scoped = _ScopedPage(
+        {
+            proposals._FEE_CONTROL_SELECTOR: [_TextElement("$6.30")],
+            proposals._NET_CONTROL_SELECTOR: [_TextElement("$56.70")],
+            proposals._BOOST_AUCTION_CONTROL_SELECTOR: [
+                _TextElement("Boost auction: top bid 8 Connects")
+            ],
+            proposals._BASE_CONNECTS_CONTROL_SELECTOR: [
+                _TextElement("12 Connects required to submit")
+            ],
+        }
+    )
+    assert (await proposals._inspect_fee_net_state(scoped))["status"] == "complete"
+    assert (await proposals._inspect_boost_auction_state(scoped))["status"] == "complete"
+    assert (await proposals._inspect_base_connects_state(scoped))["value"] == 12
+
+    duplicated = _ScopedPage(
+        {
+            proposals._FEE_CONTROL_SELECTOR: [_TextElement("$6.30"), _TextElement("$6.30")],
+            proposals._NET_CONTROL_SELECTOR: [_TextElement("$56.70")],
+        }
+    )
+    assert (await proposals._inspect_fee_net_state(duplicated))["status"] == "incomplete"
+
+    amount_missing = _ScopedPage(
+        {
+            proposals._FEE_CONTROL_SELECTOR: [_TextElement("Upwork service fee")],
+            proposals._NET_CONTROL_SELECTOR: [_TextElement("You'll receive")],
+        }
+    )
+    assert (await proposals._inspect_fee_net_state(amount_missing))["status"] == "incomplete"
+
+
+class _DynamicText(_TextElement):
+    def __init__(self, reader: Callable[[], str]) -> None:
+        super().__init__()
+        self.reader = reader
+
+    async def text_content(self) -> str:
+        return self.reader()
+
+
+class _CommercialPrice(_Input):
+    def __init__(self, page: _CommercialPreflightPage) -> None:
+        super().__init__()
+        self.page = page
+        self.value = "50"
+
+    async def fill(self, value: str) -> None:
+        self.value = value
+        self.page.price = Decimal(value)
+
+    async def press(self, _key: str) -> None:
+        return None
+
+
+class _CommercialPreflightPage:
+    def __init__(self) -> None:
+        self.url = "https://www.upwork.com/nx/proposals/job/~123/apply"
+        self.price = Decimal("50")
+        self.price_control = _CommercialPrice(self)
+        self.submit_queries = 0
+
+    async def goto(self, url: str, **_kwargs: Any) -> None:
+        self.url = url
+
+    async def wait_for_timeout(self, _milliseconds: int) -> None:
+        return None
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return _TextElement("Hourly contract")
+        if '[data-test="job-title"]' in selector:
+            return _TextElement("Google Ads audit")
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == proposals._HOURLY_RATE_INPUT_SELECTOR:
+            return [self.price_control]
+        if selector == proposals._FEE_CONTROL_SELECTOR:
+            return [_DynamicText(lambda: f"${self.price * Decimal('0.10'):.2f}")]
+        if selector == proposals._NET_CONTROL_SELECTOR:
+            return [_DynamicText(lambda: f"${self.price * Decimal('0.90'):.2f}")]
+        if selector.startswith('button[data-test="submit-proposal"]'):
+            self.submit_queries += 1
+        return []
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_binds_entered_price_and_restores_original() -> None:
+    page = _CommercialPreflightPage()
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "complete"
+    assert result["fee_net_price_amount"] == "63.00"
+    assert result["fee_net_source"] == "scoped_reversible_price_preflight"
+    assert result["price_restored"] is True
+    assert result["external_action_taken"] is False
+    assert page.price_control.value == "50"
+    assert page.submit_queries == 0
+
+    class _FixedRadio:
+        def __init__(self, checked: bool) -> None:
+            self.checked = checked
+
+        async def is_checked(self) -> bool:
+            return self.checked
+
+        async def get_attribute(self, _name: str) -> None:
+            return None
+
+    class _FixedSection(_TextElement):
+        def __init__(self, fixed_page: _CommercialPreflightPage) -> None:
+            super().__init__("By project By milestone")
+            self.project = _FixedRadio(True)
+            self.milestone = _FixedRadio(False)
+            self.amount = _CommercialPrice(fixed_page)
+            self.amount.value = "400"
+            fixed_page.price = Decimal("400")
+
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._BY_PROJECT_AMOUNT_INPUT_SELECTOR:
+                return [self.amount]
+            if "By project" in selector or 'value="project"' in selector:
+                return [self.project]
+            if "By milestone" in selector or 'value="milestone"' in selector:
+                return [self.milestone]
+            return []
+
+    class _FixedPreflightPage(_CommercialPreflightPage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.section = _FixedSection(self)
+
+        async def query_selector(self, selector: str):
+            if selector == "body":
+                return _TextElement("Fixed-price project\nBy project\nBy milestone")
+            return await super().query_selector(selector)
+
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if "fieldset:has" in selector and "By project" in selector:
+                return [self.section]
+            return await super().query_selector_all(selector)
+
+    fixed_page = _FixedPreflightPage()
+    fixed = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            bid=500,
+            payment_structure="by_project",
+        ),
+        fixed_page,
+    )
+    assert fixed["job_type"] == "fixed"
+    assert fixed["fee_net_status"] == "complete"
+    assert fixed["fee_net_price_amount"] == "500.00"
+    assert fixed["price_restored"] is True
+    assert fixed_page.section.amount.value == "400"
+
+    failing_restore_page = _CommercialPreflightPage()
+    original_fill = failing_restore_page.price_control.fill
+    fill_count = 0
+
+    async def fail_second_fill(value: str) -> None:
+        nonlocal fill_count
+        fill_count += 1
+        if fill_count > 1:
+            raise RuntimeError("restore failed")
+        await original_fill(value)
+
+    failing_restore_page.price_control.fill = fail_second_fill  # type: ignore[method-assign]
+    discarded = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        failing_restore_page,
+    )
+    assert discarded["fee_net_status"] == "incomplete"
+    assert discarded["fee_net_source"] is None
+    assert discarded["fee_net_price_amount"] is None
+    assert discarded["price_restored"] is False
+    assert discarded["external_action_taken"] is True
+
+    with pytest.raises(ValidationError, match="by-project"):
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/jobs/~123",
+            bid=500,
+        )
+    with pytest.raises(ValidationError, match="greater than or equal to 50"):
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/jobs/~123",
+            rate=49,
+        )
+
+
+@pytest.mark.asyncio
+async def test_proposal_inspection_never_clicks_accept_interview(monkeypatch) -> None:
+    class _InvitePage:
+        def __init__(self) -> None:
+            self.url = "https://www.upwork.com/jobs/~123"
+            self.accept_clicks = 0
+
+        async def goto(self, url: str, **_kwargs: Any) -> None:
+            self.url = url
+
+        async def query_selector(self, selector: str):
+            if selector == "body":
+                return _TextElement("Invitation to apply\nHourly contract")
+            if "Accept Interview" in selector or (
+                'data-test="apply-button"' in selector
+                and ':text-is("Apply Now")' not in selector
+            ):
+                return _Button(
+                    lambda: setattr(self, "accept_clicks", self.accept_clicks + 1),
+                    "Accept Interview",
+                )
+            return None
+
+        async def query_selector_all(self, _selector: str) -> list[Any]:
+            return []
+
+    page = _InvitePage()
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["form_status"] == "unavailable"
+    assert result["external_action_taken"] is False
+    assert page.accept_clicks == 0
 
 
 @pytest.mark.asyncio

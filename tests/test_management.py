@@ -46,8 +46,11 @@ def _form():
         ],
         "duration_options_status": "complete",
         "base_connects": 8,
+        "base_connects_status": "complete",
         "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
         "fee_net_status": "complete",
+        "fee_net_price_amount": "63.00",
+        "fee_net_source": "scoped_reversible_price_preflight",
         "boost_auction_text": ["Top bid 8 Connects"],
         "boost_auction_status": "complete",
         "available_profile_highlights": ["Google Ads Search Certification"],
@@ -177,6 +180,11 @@ async def test_prepare_proposal_binds_live_cost_questions_terms_and_copy(
         "You'll receive $56.70 net",
     ]
     assert result["exact_submission"]["fee_net_status"] == "complete"
+    assert result["exact_submission"]["fee_net_price_amount"] == "63.00"
+    assert result["exact_submission"]["fee_net_source"] == (
+        "scoped_reversible_price_preflight"
+    )
+    assert result["exact_submission"]["base_connects_status"] == "complete"
     assert result["exact_submission"]["boost_auction_status"] == "complete"
     assert result["exact_submission"]["rate_increase_control_status"] == "complete"
     committed_schema = proposals.SubmitProposalParams(

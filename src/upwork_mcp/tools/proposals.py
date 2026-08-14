@@ -204,6 +204,32 @@ class InspectProposalFormParams(StrictToolModel):
     _validate_job_url = field_validator("job_url")(validate_job_or_application_url)
 
 
+class InspectProposalCommercialPreflightParams(StrictToolModel):
+    """Exact price used for a reversible, non-submitting fee/net preflight."""
+
+    job_url: str = Field(description="Full individual Upwork job or application-form URL")
+    rate: float | None = Field(default=None, ge=50)
+    bid: float | None = Field(default=None, gt=0)
+    payment_structure: Literal["by_project"] | None = None
+
+    _validate_job_url = field_validator("job_url")(validate_job_or_application_url)
+
+    @model_validator(mode="after")
+    def _validate_reversible_terms(self) -> InspectProposalCommercialPreflightParams:
+        if (self.rate is None) == (self.bid is None):
+            raise ValueError("Provide exactly one of rate or bid for commercial preflight")
+        amount = Decimal(str(self.rate if self.rate is not None else self.bid))
+        if not amount.is_finite() or amount != amount.quantize(Decimal("0.01")):
+            raise ValueError("Commercial preflight prices cannot use fractions of a cent")
+        if self.rate is not None and self.payment_structure is not None:
+            raise ValueError("Hourly commercial preflight cannot include a payment structure")
+        if self.bid is not None and self.payment_structure != "by_project":
+            raise ValueError(
+                "Only reversible by-project fixed-price commercial preflight is supported"
+            )
+        return self
+
+
 class FixedPriceMilestone(StrictToolModel):
     """One exact owner-approved fixed-price milestone."""
 
@@ -284,13 +310,24 @@ class SubmitProposalParams(StrictToolModel):
     fee_net_status: DiscoveryStatus = Field(
         description="Completeness of the live fee/net inspection bound during preparation",
     )
+    fee_net_price_amount: str = Field(
+        pattern=r"^[0-9]+\.[0-9]{2}$",
+        description="Exact approved rate/bid used to produce the scoped fee/net preview",
+    )
+    fee_net_source: Literal["scoped_reversible_price_preflight"] = Field(
+        description="Provenance of the approval-bound fee/net preview",
+    )
     boost_auction_text: list[str] = Field(
         description="Normalized live boost-auction context shown during preparation",
     )
     boost_auction_status: DiscoveryStatus = Field(
         description="Completeness of the live boost-auction inspection bound during preparation",
     )
-    rate: float | None = Field(default=None, gt=0, description="Proposed hourly rate")
+    rate: float | None = Field(
+        default=None,
+        ge=50,
+        description="Proposed hourly rate; $50 is the owner-approved absolute floor",
+    )
     bid: float | None = Field(default=None, gt=0, description="Fixed-price bid")
     payment_structure: Literal["by_project", "by_milestone"] | None = Field(
         default=None,
@@ -323,6 +360,9 @@ class SubmitProposalParams(StrictToolModel):
         default=None,
         ge=0,
         description="Base Connects observed in the live form before approval",
+    )
+    base_connects_status: DiscoveryStatus = Field(
+        description="Completeness of exact scoped base-Connect control inspection",
     )
     boost_connects: int = Field(default=0, ge=0)
     rate_increase_frequency: Literal["Never"] = "Never"
@@ -385,8 +425,14 @@ class SubmitProposalParams(StrictToolModel):
             payment_structure=self.payment_structure,
             milestones=self.milestones,
         )
+        approved_price = Decimal(str(self.rate if self.rate is not None else self.bid)).quantize(
+            Decimal("0.01")
+        )
+        if Decimal(self.fee_net_price_amount) != approved_price:
+            raise ValueError("fee_net_price_amount must exactly match the approved rate or bid")
         required_complete = {
             "fee/net": self.fee_net_status,
+            "base Connects": self.base_connects_status,
             "screening-question": self.screening_questions_status,
             "duration-option": self.duration_options_status,
             "profile-highlight": self.available_profile_highlights_status,
@@ -399,20 +445,27 @@ class SubmitProposalParams(StrictToolModel):
             )
         if not self.fee_net_text:
             raise ValueError("Complete fee/net inspection requires normalized live fee/net text")
+        if self.base_connects is None:
+            raise ValueError("Complete base-Connect inspection requires an exact live cost")
         if len(self.screening_questions) != len(self.answers or []):
             raise ValueError("Screening questions and exact approved answers must have equal counts")
         if self.boost_auction_status == "complete" and not self.boost_auction_text:
             raise ValueError("Complete boost-auction inspection requires normalized live auction text")
         if self.boost_auction_status == "unavailable" and self.boost_auction_text:
             raise ValueError("Unavailable boost-auction inspection cannot include live auction text")
-        if self.boost_connects and self.boost_auction_status != "complete":
-            raise ValueError("A nonzero boost requires a complete live boost-auction inspection")
+        if self.boost_connects:
+            raise ValueError(
+                "Automatic positive boost submission is disabled until the live Upwork flow "
+                "can prove the first Submit click is non-consequential"
+            )
         if self.rate_increase_control_status not in {"complete", "not_applicable"}:
             raise ValueError(
                 "Rate-increase control inspection must be complete or explicitly not_applicable"
             )
         if self.job_type == "fixed" and self.rate_increase_control_status != "not_applicable":
             raise ValueError("Fixed-price proposals require rate_increase_control_status=not_applicable")
+        if self.job_type == "hourly" and self.rate_increase_control_status != "complete":
+            raise ValueError("Hourly proposals require a complete live rate-increase control")
         return self
 
 
@@ -457,6 +510,8 @@ def proposal_submission_payload(params: SubmitProposalParams) -> dict[str, Any]:
         "cover_letter": params.cover_letter,
         "fee_net_text": params.fee_net_text,
         "fee_net_status": params.fee_net_status,
+        "fee_net_price_amount": params.fee_net_price_amount,
+        "fee_net_source": params.fee_net_source,
         "boost_auction_text": params.boost_auction_text,
         "boost_auction_status": params.boost_auction_status,
         "rate": params.rate,
@@ -470,14 +525,12 @@ def proposal_submission_payload(params: SubmitProposalParams) -> dict[str, Any]:
         "duration_options_status": params.duration_options_status,
         "profile_highlights": params.profile_highlights,
         "available_profile_highlights_status": params.available_profile_highlights_status,
+        "base_connects": params.base_connects,
+        "base_connects_status": params.base_connects_status,
         "boost_connects": params.boost_connects,
         "rate_increase_frequency": params.rate_increase_frequency,
         "rate_increase_control_status": params.rate_increase_control_status,
     }
-    # Keep compatibility with proposal artifacts prepared before live-form
-    # inspection was added. New preparation flows should always include it.
-    if params.base_connects is not None:
-        payload["base_connects"] = params.base_connects
     return payload
 
 
@@ -773,10 +826,13 @@ def normalize_live_context_lines(values: list[str]) -> list[str]:
 def _inspect_fee_net_context(text: str) -> dict[str, Any]:
     """Classify the live fee/net preview without guessing from unrelated page copy."""
 
+    amount_pattern = r"(?:[$£€]\s*\d[\d,.]*|\d[\d,]*\.\d{2}\b|\d[\d,.]*\s*(?:USD|GBP|EUR)\b)"
     net_preview_pattern = (
-        r"you(?:'|’)?ll receive|you will receive|"
-        r"(?:freelancer\s+)?(?:net\s+)?(?:earnings|payment|payout|amount)\s*(?:after fees)?\s*[:\-]?\s*[$£€]?\s*\d|"
-        r"\bnet\s+(?:earnings|payment|payout|amount)\b|"
+        rf"you(?:'|’)?ll receive\s*[:\-]?\s*{amount_pattern}|"
+        rf"you will receive\s*[:\-]?\s*{amount_pattern}|"
+        rf"(?:freelancer\s+)?(?:net\s+)?(?:earnings|payment|payout|amount)"
+        rf"\s*(?:after fees)?\s*[:\-]?\s*{amount_pattern}|"
+        rf"\bnet\s+(?:earnings|payment|payout|amount)\s*[:\-]?\s*{amount_pattern}|"
         r"[$£€]\s*\d[\d,.]*\s+net\b"
     )
     lines = normalize_live_context_lines(
@@ -847,8 +903,12 @@ def _inspect_boost_auction_context(text: str) -> dict[str, Any]:
     has_boost_context = any(re.search(r"\bboost(?:ed|ing)?\b|\bauction\b", line, re.I) for line in lines)
     has_auction_state = any(
         re.search(
-            r"\d+\s+connects?\b|\btop\s+bid\b|\bno\s+bids?\b|\bbe\s+the\s+first\b|"
-            r"\brank(?:ed|ing)?\b|\bslot\b|\b(?:1st|2nd|3rd|4th)\s+place\b",
+            r"\b(?:top|highest|lowest|current|average)\s+bid\b.{0,50}\d+\s+connects?\b|"
+            r"\d+\s+connects?\b.{0,50}\b(?:top|highest|lowest|current|average)\s+bid\b|"
+            r"\bno\s+bids?\b|\bbe\s+the\s+first\b|"
+            r"\brank(?:ed|ing)?\s*#?\s*\d+\b|"
+            r"\b(?:1st|2nd|3rd|4th)\s+(?:place|slot)\b|"
+            r"\b\d+\s+(?:competing\s+|other\s+)?(?:bids?|bidders?)\b",
             line,
             re.I,
         )
@@ -874,16 +934,193 @@ def _inspect_boost_auction_context(text: str) -> dict[str, Any]:
     }
 
 
-async def _inspect_fee_net_state(page, text: str | None = None) -> dict[str, Any]:
-    """Return the normalized live fee/net state used by prepare and commit checks."""
+_FEE_CONTROL_SELECTOR = (
+    '[data-test="service-fee"], [data-test="service-fee-amount"], '
+    '[data-test="upwork-service-fee"], input[data-test="service-fee"], '
+    'input[name="serviceFee"]'
+)
+_NET_CONTROL_SELECTOR = (
+    '[data-test="you-will-receive"], [data-test="you-will-receive-amount"], '
+    '[data-test="freelancer-net-earnings"], [data-test="freelancer-earnings"], '
+    'input[data-test="you-will-receive"], input[name="youWillReceive"]'
+)
+_BOOST_AUCTION_CONTROL_SELECTOR = (
+    '[data-test="boost-auction"], [data-test="boost-proposal-auction"], '
+    '[data-test="boost-proposal-section"], [data-test="boost-bid-context"], '
+    '[data-test^="boost-auction-"]'
+)
+_BASE_CONNECTS_CONTROL_SELECTOR = (
+    '[data-test="proposal-connects-cost"], [data-test="submit-proposal-connects"], '
+    '[data-test="connects-required"], [data-test="apply-connects-cost"]'
+)
 
-    return _inspect_fee_net_context(text if text is not None else await _page_text(page))
+
+async def _scoped_control_lines(
+    page,
+    selector: str,
+    *,
+    semantic_label: str | None = None,
+) -> tuple[list[str], int]:
+    """Read only exact Upwork-owned controls selected by stable semantic attributes."""
+
+    try:
+        controls = await page.query_selector_all(selector)
+    except Exception:
+        return [], 0
+    lines: list[str] = []
+    visible_count = 0
+    for control in controls:
+        if not await _element_is_visible(control):
+            continue
+        visible_count += 1
+        try:
+            text = _normalise_identity_text(await control.text_content())
+        except Exception:
+            text = ""
+        if not text:
+            try:
+                text = _normalise_identity_text(await control.input_value())
+            except Exception:
+                text = ""
+        if not text:
+            continue
+        if semantic_label and semantic_label.casefold() not in text.casefold():
+            text = f"{semantic_label}: {text}"
+        lines.append(text)
+    return _dedupe_text(lines), visible_count
 
 
-async def _inspect_boost_auction_state(page, text: str | None = None) -> dict[str, Any]:
-    """Return the normalized live boost-auction state used by prepare and commit checks."""
+async def _inspect_fee_net_state(page) -> dict[str, Any]:
+    """Read fee/net evidence only from exact scoped Upwork commercial controls."""
 
-    return _inspect_boost_auction_context(text if text is not None else await _page_text(page))
+    fee_lines, fee_controls = await _scoped_control_lines(
+        page,
+        _FEE_CONTROL_SELECTOR,
+        semantic_label="Upwork service fee",
+    )
+    net_lines, net_controls = await _scoped_control_lines(
+        page,
+        _NET_CONTROL_SELECTOR,
+        semantic_label="You'll receive",
+    )
+    parsed = _inspect_fee_net_context("\n".join([*fee_lines, *net_lines]))
+    exact_amount = re.compile(
+        r"(?:[$£€]\s*\d[\d,.]*|\d[\d,]*\.\d{2}\b|\d[\d,.]*\s*(?:USD|GBP|EUR)\b)",
+        re.I,
+    )
+    if (
+        fee_controls == 1
+        and net_controls == 1
+        and len(fee_lines) == 1
+        and len(net_lines) == 1
+        and exact_amount.search(fee_lines[0])
+        and exact_amount.search(net_lines[0])
+    ):
+        parsed["status"] = "complete"
+        parsed["details"]["message"] = (
+            "Both exact scoped Upwork fee and freelancer net controls were read."
+        )
+    elif fee_controls or net_controls:
+        parsed["status"] = "incomplete"
+        parsed["details"]["message"] = (
+            "Scoped Upwork fee/net controls were present but could not be read unambiguously."
+        )
+    else:
+        parsed = {
+            "text": [],
+            "status": "unavailable",
+            "details": {
+                "fee_lines_seen": 0,
+                "net_lines_seen": 0,
+                "message": "Exact scoped Upwork fee/net controls were unavailable.",
+            },
+        }
+    parsed["details"].update(
+        {
+            "fee_controls_seen": fee_controls,
+            "net_controls_seen": net_controls,
+            "evidence_scope": "exact_upwork_controls",
+        }
+    )
+    return parsed
+
+
+async def _inspect_boost_auction_state(page) -> dict[str, Any]:
+    """Read auction evidence only from exact scoped Upwork boost controls."""
+
+    lines, controls_seen = await _scoped_control_lines(
+        page,
+        _BOOST_AUCTION_CONTROL_SELECTOR,
+        semantic_label="Boost auction",
+    )
+    if not controls_seen:
+        return {
+            "text": [],
+            "status": "unavailable",
+            "details": {
+                "boost_context_seen": False,
+                "auction_state_seen": False,
+                "controls_seen": 0,
+                "evidence_scope": "exact_upwork_controls",
+                "message": "Exact scoped Upwork boost-auction controls were unavailable.",
+            },
+        }
+    parsed = _inspect_boost_auction_context("\n".join(lines))
+    parsed["details"].update(
+        {
+            "controls_seen": controls_seen,
+            "evidence_scope": "exact_upwork_controls",
+        }
+    )
+    if not lines:
+        parsed["status"] = "incomplete"
+        parsed["details"]["message"] = (
+            "Scoped Upwork boost-auction controls were present but unreadable."
+        )
+    elif controls_seen != 1:
+        parsed["status"] = "incomplete"
+        parsed["details"]["message"] = (
+            "Multiple scoped Upwork boost-auction controls made live evidence ambiguous."
+        )
+    return parsed
+
+
+async def _inspect_base_connects_state(page) -> dict[str, Any]:
+    """Read base proposal cost only from exact scoped Upwork cost controls."""
+
+    lines, controls_seen = await _scoped_control_lines(
+        page,
+        _BASE_CONNECTS_CONTROL_SELECTOR,
+        semantic_label="Proposal cost",
+    )
+    values = {
+        value
+        for line in lines
+        if (value := _extract_base_connects(line)) is not None
+    }
+    if controls_seen == 1 and len(values) == 1:
+        status: DiscoveryStatus = "complete"
+        value = next(iter(values))
+        message = "One exact base-Connect cost was read from scoped Upwork controls."
+    elif controls_seen:
+        status = "incomplete"
+        value = None
+        message = "Scoped Upwork base-Connect controls were present but ambiguous or unreadable."
+    else:
+        status = "unavailable"
+        value = None
+        message = "Exact scoped Upwork base-Connect controls were unavailable."
+    return {
+        "value": value,
+        "status": status,
+        "text": lines,
+        "details": {
+            "controls_seen": controls_seen,
+            "values_seen": sorted(values),
+            "evidence_scope": "exact_upwork_controls",
+            "message": message,
+        },
+    }
 
 
 def _extract_base_connects(text: str) -> int | None:
@@ -896,12 +1133,17 @@ def _extract_base_connects(text: str) -> int | None:
         re.sub(r"\s+", " ", line).strip()
         for line in text.splitlines()
         if "connect" in line.lower()
-        and any(term in line.lower() for term in ("required", "submit", "cost", "send for"))
+        and (
+            any(term in line.lower() for term in ("required", "submit", "cost", "send for"))
+            or re.fullmatch(r"\s*\d+\s+connects?\s*", line, re.I)
+        )
     ]
     patterns = (
         r"send\s+for\s+(\d+)\s+connects?",
+        r"proposal\s+cost\D{0,30}(\d+)\s+connects?",
         r"(?:requires?|required|costs?)\D{0,30}(\d+)\s+connects?",
         r"(\d+)\s+connects?\D{0,30}(?:required|to submit|proposal cost)",
+        r"^(\d+)\s+connects?$",
     )
     for line in relevant_lines:
         for pattern in patterns:
@@ -999,8 +1241,8 @@ async def _open_proposal_form(page, job_url: str) -> tuple[str, str | None]:
         return "identity_mismatch", None
 
     apply_btn = await page.query_selector(
-        '[data-test="apply-button"], button:has-text("Apply Now"), '
-        'button:has-text("Accept Interview"), a:has-text("Apply Now")'
+        '[data-test="apply-button"]:text-is("Apply Now"), '
+        'button:text-is("Apply Now"), a:text-is("Apply Now")'
     )
     if not apply_btn:
         return "unavailable", None
@@ -1257,8 +1499,8 @@ async def _inspect_rate_increase_control(
     details["select_controls_seen"] = len(selects)
     details["toggle_controls_seen"] = len(toggles)
     if not selects and not toggles:
-        details["message"] = "The exact hourly form exposes no rate-increase control."
-        return {"status": "not_applicable", "details": details}
+        details["message"] = "The exact hourly form exposes no readable rate-increase control."
+        return {"status": "unavailable", "details": details}
     if len(selects) + len(toggles) != 1:
         details["message"] = "Multiple visible rate-increase controls made inspection ambiguous."
         return {"status": "incomplete", "details": details}
@@ -1535,10 +1777,18 @@ async def _inspect_available_profile_highlights(page) -> dict[str, Any]:
             "message": "The live profile-highlight chooser was not inspected.",
         },
     }
-    open_button = await page.query_selector(_PROFILE_HIGHLIGHT_OPENER)
-    if not open_button:
-        result["details"]["message"] = "The live profile-highlight chooser control was not found."
+    open_buttons = [
+        opener
+        for opener in await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
+        if await _element_is_visible(opener)
+    ]
+    result["details"]["opener_controls_seen"] = len(open_buttons)
+    if len(open_buttons) != 1:
+        result["details"]["message"] = (
+            "One exact visible profile-highlight chooser control was not found."
+        )
         return result
+    open_button = open_buttons[0]
 
     chooser_opened = False
     opener_clicked = False
@@ -1649,7 +1899,6 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
     _, expected_job_id, _ = parse_job_or_application_url(params.job_url)
     canonical_job_url, _ = parse_job_url(f"https://www.upwork.com/jobs/{expected_job_id}")
     form_status, existing_evidence = await _open_proposal_form(page, params.job_url)
-    text = await _page_text(page)
     identity = await _application_identity_from_current_page(page) if form_status == "ready" else None
     if form_status == "ready" and (
         identity is None or identity["job_id"] != expected_job_id
@@ -1668,8 +1917,19 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
         else []
     )
 
-    fee_net_inspection = await _inspect_fee_net_state(page, text)
-    boost_auction_inspection = await _inspect_boost_auction_state(page, text)
+    base_connects_inspection = await _inspect_base_connects_state(page)
+    boost_auction_inspection = await _inspect_boost_auction_state(page)
+    fee_net_inspection: dict[str, Any] = {
+        "text": [],
+        "status": "unavailable",
+        "details": {
+            "evidence_scope": "exact_upwork_controls",
+            "message": (
+                "Fee/net evidence requires the reversible commercial preflight after the exact "
+                "rate or by-project bid is entered."
+            ),
+        },
+    }
     if form_status == "ready":
         question_inspection = await _inspect_screening_questions(page)
         highlight_inspection = await _inspect_available_profile_highlights(page)
@@ -1713,7 +1973,7 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
             },
         }
         fee_net_inspection = {
-            "text": fee_net_inspection["text"],
+            "text": [],
             "status": "unavailable",
             "details": {
                 **fee_net_inspection["details"],
@@ -1726,6 +1986,15 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
             "details": {
                 **boost_auction_inspection["details"],
                 "message": "The proposal form is not ready, so boost-auction context is unavailable.",
+            },
+        }
+        base_connects_inspection = {
+            "value": None,
+            "status": "unavailable",
+            "text": base_connects_inspection["text"],
+            "details": {
+                **base_connects_inspection["details"],
+                "message": "The proposal form is not ready, so base-Connect cost is unavailable.",
             },
         }
 
@@ -1742,10 +2011,15 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
         "screening_questions_details": question_inspection["details"],
         "job_type": job_type,
         "fixed_payment_structures": fixed_payment_structures,
-        "base_connects": _extract_base_connects(text),
+        "base_connects": base_connects_inspection["value"],
+        "base_connects_status": base_connects_inspection["status"],
+        "base_connects_text": base_connects_inspection["text"],
+        "base_connects_details": base_connects_inspection["details"],
         "fee_net_text": fee_net_inspection["text"],
         "fee_net_status": fee_net_inspection["status"],
         "fee_net_details": fee_net_inspection["details"],
+        "fee_net_price_amount": None,
+        "fee_net_source": None,
         "duration_options": duration_inspection["options"],
         "duration_options_status": duration_inspection["status"],
         "duration_options_details": duration_inspection["details"],
@@ -2049,6 +2323,203 @@ async def _fill_one_exact_input(page, selectors: str, value: str) -> bool:
         return False
 
 
+_HOURLY_RATE_INPUT_SELECTOR = (
+    '[data-test="hourly-rate-input"], input[name="rate"], input[name="hourlyRate"]'
+)
+_BY_PROJECT_AMOUNT_INPUT_SELECTOR = (
+    '[data-test="bid-input"], input[name="bid"], input[name="amount"], '
+    'input[data-test="project-amount"], input[placeholder="$0.00"]'
+)
+
+
+async def _commercial_preflight_price_control(
+    page,
+    params: InspectProposalCommercialPreflightParams,
+) -> tuple[Any | None, str | None]:
+    """Resolve one reversible price input without changing payment structure."""
+
+    if params.rate is not None:
+        control = await _one_enabled(page, _HOURLY_RATE_INPUT_SELECTOR)
+        return (
+            (control, None)
+            if control is not None
+            else (None, "One exact hourly rate control was not available for preflight")
+        )
+
+    section = await _fixed_payment_section(page)
+    if section is None:
+        return None, "One exact fixed-price payment section was not available for preflight"
+    project = await _exact_payment_radio(section, "By project")
+    milestone = await _exact_payment_radio(section, "By milestone")
+    if (
+        project is None
+        or milestone is None
+        or await _checked_state(project) is not True
+        or await _checked_state(milestone) is not False
+    ):
+        return (
+            None,
+            "By-project must already be selected; commercial preflight will not mutate payment structure",
+        )
+    control = await _one_enabled(section, _BY_PROJECT_AMOUNT_INPUT_SELECTOR)
+    return (
+        (control, None)
+        if control is not None
+        else (None, "One exact by-project amount control was not available for preflight")
+    )
+
+
+async def inspect_proposal_commercial_preflight(
+    params: InspectProposalCommercialPreflightParams,
+) -> dict[str, Any]:
+    """Temporarily enter an exact price, read scoped fee/net controls, then restore it."""
+
+    browser = get_browser()
+    await browser.ensure_logged_in()
+    async with browser.operation() as page:
+        return await _inspect_proposal_commercial_preflight_on_page(params, page)
+
+
+async def _inspect_proposal_commercial_preflight_on_page(
+    params: InspectProposalCommercialPreflightParams,
+    page,
+) -> dict[str, Any]:
+    """Run a fail-closed reversible commercial preflight under one browser lease."""
+
+    _, expected_job_id, _ = parse_job_or_application_url(params.job_url)
+    canonical_job_url, _ = parse_job_url(f"https://www.upwork.com/jobs/{expected_job_id}")
+    form_status, existing_evidence = await _open_proposal_form(page, params.job_url)
+    identity = await _application_identity_from_current_page(page) if form_status == "ready" else None
+    expected_type = "hourly" if params.rate is not None else "fixed"
+    base_result: dict[str, Any] = {
+        "job_url": canonical_job_url,
+        "job_id": expected_job_id,
+        "form_url": identity.get("form_url") if identity else None,
+        "job_title": identity.get("job_title") if identity else None,
+        "job_type": identity.get("job_type") if identity else None,
+        "form_status": form_status,
+        "existing_proposal": existing_evidence is not None,
+        "fee_net_text": [],
+        "fee_net_status": "unavailable",
+        "fee_net_price_amount": None,
+        "fee_net_source": None,
+        "price_restored": False,
+        "reversible_form_interaction": False,
+        "external_action_taken": False,
+    }
+    if (
+        identity is None
+        or identity.get("job_id") != expected_job_id
+        or identity.get("job_type") != expected_type
+    ):
+        base_result["fee_net_details"] = {
+            "message": "The exact application identity and proposed price type could not be bound."
+        }
+        return base_result
+
+    control, control_error = await _commercial_preflight_price_control(page, params)
+    if control is None:
+        base_result["fee_net_details"] = {"message": control_error}
+        return base_result
+
+    approved_amount = Decimal(str(params.rate if params.rate is not None else params.bid)).quantize(
+        Decimal("0.01")
+    )
+    try:
+        original_value = str(await control.input_value())
+    except Exception:
+        base_result["fee_net_details"] = {
+            "message": "The original commercial price could not be read before reversible preflight."
+        }
+        return base_result
+    try:
+        original_fee_net = await _inspect_fee_net_state(page)
+    except Exception:
+        original_fee_net = {"text": [], "status": "unavailable"}
+
+    inspection: dict[str, Any] = {
+        "text": [],
+        "status": "unavailable",
+        "details": {"message": "Commercial preflight did not complete."},
+    }
+    exact_price_entered = False
+    restored = False
+    try:
+        base_result["reversible_form_interaction"] = True
+        await control.fill(format(approved_amount, "f"))
+        live_value = str(await control.input_value()).replace(",", "").replace("$", "").strip()
+        exact_price_entered = Decimal(live_value) == approved_amount
+        if not exact_price_entered:
+            inspection["details"]["message"] = (
+                "The approved commercial price could not be read back exactly."
+            )
+        else:
+            try:
+                await control.press("Tab")
+            except Exception:
+                pass
+            try:
+                await page.wait_for_timeout(300)
+            except Exception:
+                pass
+            inspection = await _inspect_fee_net_state(page)
+    except Exception as error:
+        inspection["details"]["message"] = (
+            f"Commercial preflight failed before fee/net readback: {type(error).__name__}."
+        )
+    finally:
+        try:
+            await control.fill(original_value)
+            try:
+                await control.press("Tab")
+            except Exception:
+                pass
+            try:
+                await page.wait_for_timeout(300)
+            except Exception:
+                pass
+            restored_fee_net = await _inspect_fee_net_state(page)
+            restored = bool(
+                str(await control.input_value()) == original_value
+                and restored_fee_net.get("status") == original_fee_net.get("status")
+                and _dedupe_text(restored_fee_net.get("text") or [])
+                == _dedupe_text(original_fee_net.get("text") or [])
+            )
+        except Exception:
+            restored = False
+
+    status = inspection.get("status")
+    if not restored:
+        status = "incomplete"
+        inspection.setdefault("details", {})["message"] = (
+            "Fee/net evidence was discarded because the original price could not be restored exactly."
+        )
+    elif not exact_price_entered:
+        status = "incomplete"
+    base_result.update(
+        {
+            "fee_net_text": inspection.get("text") or [],
+            "fee_net_status": status,
+            "fee_net_details": {
+                **(inspection.get("details") or {}),
+                "approved_price_entered": exact_price_entered,
+                "price_restored": restored,
+            },
+            "fee_net_price_amount": format(approved_amount, ".2f")
+            if status == "complete" and restored and exact_price_entered
+            else None,
+            "fee_net_source": "scoped_reversible_price_preflight"
+            if status == "complete" and restored and exact_price_entered
+            else None,
+            "price_restored": restored,
+            "external_action_taken": bool(
+                base_result["reversible_form_interaction"] and not restored
+            ),
+        }
+    )
+    return base_result
+
+
 async def _configure_fixed_payment_terms(page, params: SubmitProposalParams) -> tuple[bool, str | None]:
     """Apply only the exact owner-approved fixed-price structure and terms."""
 
@@ -2061,8 +2532,7 @@ async def _configure_fixed_payment_terms(page, params: SubmitProposalParams) -> 
     if params.payment_structure == "by_project":
         ok = await _fill_one_exact_input(
             section,
-            '[data-test="bid-input"], input[name="bid"], input[name="amount"], '
-            'input[data-test="project-amount"], input[placeholder="$0.00"]',
+            _BY_PROJECT_AMOUNT_INPUT_SELECTOR,
             str(params.bid),
         )
         return (True, None) if ok else (False, "One exact by-project total input could not be filled and verified")
@@ -2361,6 +2831,159 @@ async def _select_profile_highlights(page, highlights: list[str]) -> tuple[bool,
     return True, None
 
 
+async def _readback_profile_highlights(
+    page,
+    highlights: list[str],
+) -> tuple[bool, str | None]:
+    """Re-read the exact selected set without selecting or saving anything."""
+
+    approved = {_normalized_highlight_identity(value) for value in highlights}
+    chooser = await _open_profile_highlight_chooser(page)
+    if chooser is None:
+        no_openers = not await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
+        return (
+            (True, None)
+            if not approved and no_openers
+            else (False, "The approved profile highlights could not be reopened for final readback")
+        )
+    records, error = await _enumerate_profile_highlight_records(page)
+    selected = {str(record["identity"]) for record in records if record["selected"]}
+    dismissed = await _dismiss_profile_highlight_chooser(page)
+    if error:
+        return False, error
+    if not dismissed:
+        return False, "The profile-highlight chooser could not be dismissed after final readback"
+    if selected != approved:
+        return False, "The selected profile highlights silently changed after their earlier readback"
+    return True, None
+
+
+async def _readback_decimal_input(scope, selector: str, expected: Decimal) -> bool:
+    control = await _one_enabled(scope, selector)
+    if control is None:
+        return False
+    try:
+        value = str(await control.input_value()).replace(",", "").replace("$", "").strip()
+        return Decimal(value) == expected
+    except Exception:
+        return False
+
+
+async def _readback_text_input(scope, selector: str, expected: str) -> bool:
+    control = await _one_enabled(scope, selector)
+    if control is None:
+        return False
+    try:
+        return str(await control.input_value()) == expected
+    except Exception:
+        return False
+
+
+async def _readback_duration(page, expected: str) -> bool:
+    selects = await _enabled_elements(
+        page,
+        'select[name*="duration"], [data-test*="duration"] select',
+    )
+    toggles = await _enabled_elements(
+        page,
+        'button:has-text("Select a duration"), '
+        '.air3-dropdown-toggle:has-text("duration"), '
+        '[data-test*="duration"] .air3-dropdown-toggle',
+    )
+    if len(selects) == 1 and not toggles:
+        return await _selected_option_label(selects[0]) == expected
+    if len(toggles) == 1 and not selects:
+        try:
+            return _normalise_identity_text(await toggles[0].text_content()) == expected
+        except Exception:
+            return False
+    return False
+
+
+async def _readback_rate_increase(
+    page,
+    *,
+    job_type: Literal["hourly", "fixed"],
+    approved_status: RateIncreaseControlStatus,
+) -> bool:
+    selects = await _enabled_elements(page, _RATE_INCREASE_SELECT)
+    toggles = await _enabled_elements(page, _RATE_INCREASE_TOGGLE)
+    if job_type == "fixed":
+        return approved_status == "not_applicable" and not selects and not toggles
+    if approved_status != "complete":
+        return False
+    if len(selects) == 1 and not toggles:
+        return await _selected_option_label(selects[0]) == "Never"
+    if len(toggles) == 1 and not selects:
+        try:
+            return _normalise_identity_text(await toggles[0].text_content()) == "Never"
+        except Exception:
+            return False
+    return False
+
+
+async def _readback_fixed_payment_terms(page, params: SubmitProposalParams) -> bool:
+    if params.job_type != "fixed" or params.bid is None or params.payment_structure is None:
+        return params.job_type != "fixed"
+    section = await _fixed_payment_section(page)
+    if section is None:
+        return False
+    selected_label = "By project" if params.payment_structure == "by_project" else "By milestone"
+    opposite_label = "By milestone" if params.payment_structure == "by_project" else "By project"
+    selected = await _exact_payment_radio(section, selected_label)
+    opposite = await _exact_payment_radio(section, opposite_label)
+    if (
+        selected is None
+        or opposite is None
+        or await _checked_state(selected) is not True
+        or await _checked_state(opposite) is not False
+    ):
+        return False
+    if params.payment_structure == "by_project":
+        return await _readback_decimal_input(
+            section,
+            _BY_PROJECT_AMOUNT_INPUT_SELECTOR,
+            Decimal(str(params.bid)),
+        )
+
+    try:
+        rows = await section.query_selector_all(
+            '[data-test="milestone-row"], [data-test*="milestone-item"], .milestone-row'
+        )
+    except Exception:
+        return False
+    if len(rows) != len(params.milestones):
+        return False
+    for row, milestone in zip(rows, params.milestones, strict=True):
+        try:
+            description = await row.query_selector(
+                'input[name*="description"], textarea[name*="description"], '
+                '[data-test*="description"] input'
+            )
+            due_date = await row.query_selector(
+                'input[name*="due"], input[name*="date"], [data-test*="due-date"] input'
+            )
+            amount = await row.query_selector(
+                'input[name*="amount"], input[data-test*="amount"]'
+            )
+            if not description or not due_date or not amount:
+                return False
+            live_description = _normalise_identity_text(await description.input_value())
+            live_due_date = str(await due_date.input_value()).strip()
+            live_amount = Decimal(
+                str(await amount.input_value()).replace(",", "").replace("$", "").strip()
+            )
+        except Exception:
+            return False
+        if (
+            live_description != milestone.description
+            or live_due_date != milestone.due_date
+            or live_amount != Decimal(str(milestone.amount))
+        ):
+            return False
+    return True
+
+
 async def _reinspect_approved_commercial_state(
     page,
     params: SubmitProposalParams,
@@ -2397,6 +3020,76 @@ async def _reinspect_approved_commercial_state(
             or live_status != expected_status
         ):
             return False, f"Live {prefix} state changed after approval"
+    return True, None
+
+
+async def _reinspect_every_approved_live_state(
+    page,
+    params: SubmitProposalParams,
+    approved_identity: Mapping[str, Any],
+) -> tuple[bool, str | None]:
+    """Final non-submit query pass after every form interaction and before Submit lookup."""
+
+    highlights_ok, highlights_error = await _readback_profile_highlights(
+        page,
+        params.profile_highlights,
+    )
+    if not highlights_ok:
+        return False, highlights_error
+
+    commercial_ok, commercial_error = await _reinspect_approved_commercial_state(page, params)
+    if not commercial_ok:
+        return False, commercial_error
+
+    if await _application_identity_from_current_page(page) != dict(approved_identity):
+        return False, "The exact application identity silently changed before submission"
+
+    base = await _inspect_base_connects_state(page)
+    if base.get("status") != "complete" or base.get("value") != params.base_connects:
+        return False, "The exact scoped base-Connect cost silently changed before submission"
+
+    if await _screening_question_texts(page) != params.screening_questions:
+        return False, "The screening questions silently changed before submission"
+
+    if params.rate is not None and not await _readback_decimal_input(
+        page,
+        _HOURLY_RATE_INPUT_SELECTOR,
+        Decimal(str(params.rate)),
+    ):
+        return False, "The approved hourly rate silently changed before submission"
+    if not await _readback_fixed_payment_terms(page, params):
+        return False, "The approved fixed-price terms silently changed before submission"
+
+    if not await _readback_text_input(
+        page,
+        'textarea[data-test="cover-letter-input"], '
+        '[data-test="cover-letter-input"] textarea, textarea[name="coverLetter"]',
+        params.cover_letter,
+    ):
+        return False, "The approved cover letter silently changed before submission"
+
+    answers = params.answers or []
+    try:
+        answer_controls = await page.query_selector_all(_SCREENING_ANSWER_CONTROLS)
+    except Exception:
+        return False, "The screening answer controls could not be re-read before submission"
+    if len(answer_controls) != len(answers):
+        return False, "The screening answer controls silently changed before submission"
+    for control, answer in zip(answer_controls, answers, strict=True):
+        try:
+            if str(await control.input_value()) != answer:
+                return False, "An approved screening answer silently changed before submission"
+        except Exception:
+            return False, "An approved screening answer could not be re-read before submission"
+
+    if params.duration is None or not await _readback_duration(page, params.duration):
+        return False, "The approved duration silently changed before submission"
+    if not await _readback_rate_increase(
+        page,
+        job_type=params.job_type,
+        approved_status=params.rate_increase_control_status,
+    ):
+        return False, "The approved rate-increase state silently changed before submission"
     return True, None
 
 
@@ -2449,8 +3142,8 @@ async def _explicit_selection_state(element) -> bool | None:
     return None
 
 
-async def _exact_final_send_control(dialog) -> Any | None:
-    """Resolve only an exact Send control inside the verified boost dialog."""
+async def _exact_final_send_control(dialog, approved_base_connects: int) -> Any | None:
+    """Resolve only a Send label whose cost exactly matches approved base Connects."""
 
     candidates = await _enabled_elements(dialog, "button")
     matches: list[Any] = []
@@ -2459,11 +3152,8 @@ async def _exact_final_send_control(dialog) -> Any | None:
             label = _normalise_identity_text(await button.text_content())
         except Exception:
             continue
-        if label == "Send proposal" or re.fullmatch(
-            r"Send for [0-9]+ Connects?",
-            label,
-            re.I,
-        ):
+        match = re.fullmatch(r"Send for ([0-9]+) Connects?", label, re.I)
+        if match and int(match.group(1)) == approved_base_connects:
             matches.append(button)
     return matches[0] if len(matches) == 1 else None
 
@@ -2471,53 +3161,46 @@ async def _exact_final_send_control(dialog) -> Any | None:
 async def _configure_boost_step(
     page,
     boost_connects: int,
+    approved_base_connects: int,
 ) -> tuple[Any | None, str | None]:
     """Read back boost/no-boost inside one exact dialog before finding Send."""
+
+    if boost_connects > 0:
+        return (
+            None,
+            "Automatic positive boost submission is disabled before any boost-dialog interaction",
+        )
 
     dialog = await _exact_boost_dialog(page)
     if dialog is None:
         return None, "One exact boost proposal dialog was not found"
-    if boost_connects > 0:
-        boost_input = await _one_enabled(
-            dialog,
-            'input[name*="boost"], input[data-test*="boost"], '
-            '[data-test*="boost"] input[type="number"]',
-        )
-        if boost_input is None:
-            return None, "One exact approved boost input was not found"
+    choices = await _enabled_elements(
+        dialog,
+        'label:text-is("Don\'t boost") input[type="radio"], '
+        'input[type="radio"][aria-label="Don\'t boost"], '
+        'label:text-is("No, thanks") input[type="radio"], '
+        'input[type="radio"][aria-label="No, thanks"], '
+        'button:text-is("Don\'t boost"), button:text-is("No, thanks")',
+    )
+    if len(choices) != 1:
+        return None, "One exact no-boost control was not found"
+    selected = await _explicit_selection_state(choices[0])
+    if selected is None:
+        return None, "The no-boost control selected state could not be read"
+    if not selected:
         try:
-            await boost_input.fill(str(boost_connects))
-            live_value = str(await boost_input.input_value()).replace(",", "").strip()
-            exact = Decimal(live_value) == Decimal(boost_connects)
+            await _click(page, choices[0])
         except Exception:
-            exact = False
-        if not exact:
-            return None, "The approved boost value could not be read back exactly"
-    else:
-        choices = await _enabled_elements(
-            dialog,
-            'label:text-is("Don\'t boost") input[type="radio"], '
-            'input[type="radio"][aria-label="Don\'t boost"], '
-            'label:text-is("No, thanks") input[type="radio"], '
-            'input[type="radio"][aria-label="No, thanks"], '
-            'button:text-is("Don\'t boost"), button:text-is("No, thanks")',
-        )
-        if len(choices) != 1:
-            return None, "One exact no-boost control was not found"
-        selected = await _explicit_selection_state(choices[0])
-        if selected is None:
-            return None, "The no-boost control selected state could not be read"
-        if not selected:
-            try:
-                await _click(page, choices[0])
-            except Exception:
-                return None, "The no-boost control could not be selected"
-        if await _explicit_selection_state(choices[0]) is not True:
-            return None, "The no-boost selection could not be read back"
+            return None, "The no-boost control could not be selected"
+    if await _explicit_selection_state(choices[0]) is not True:
+        return None, "The no-boost selection could not be read back"
 
-    send = await _exact_final_send_control(dialog)
+    send = await _exact_final_send_control(dialog, approved_base_connects)
     if send is None:
-        return None, "One exact final Send control was not found in the boost dialog"
+        return (
+            None,
+            "One exact final Send control matching approved base Connects was not found",
+        )
     return send, None
 
 
@@ -2526,18 +3209,32 @@ def _confirmed_submission_result(
     params: SubmitProposalParams,
     readback: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Report only base Connects as spent; a boost bid is not spend proof."""
+    """Never report actual Connect spend unless the stored owner readback proves it."""
 
-    return {
+    result: dict[str, Any] = {
         "status": "submitted",
-        "connects_used": params.base_connects,
-        "connects_used_scope": "base proposal cost only; boost spend was not owner-system verified",
-        "boost_connects_bid": params.boost_connects,
+        "approved_base_connects": params.base_connects,
+        "approved_boost_connects": params.boost_connects,
+        "connects_spend_verified": False,
         "boost_spend_verified": False,
-        "message": "Proposal submitted and read back from Upwork",
+        "message": (
+            "Proposal submission was read back from Upwork; actual Connect spend was not "
+            "available in the stored proposal readback."
+        ),
         "owner_system_readback": dict(readback),
         "external_action_taken": True,
     }
+    if readback.get("connects_spend_verified") is True:
+        connects_used = readback.get("connects_used")
+        if (
+            isinstance(connects_used, int)
+            and not isinstance(connects_used, bool)
+            and connects_used >= 0
+        ):
+            result["connects_used"] = connects_used
+            result["connects_spend_verified"] = True
+            result["message"] = "Proposal submission and actual Connect spend were read back from Upwork."
+    return result
 
 
 def _success_query_is_true(url: str) -> bool:
@@ -2646,8 +3343,17 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     IMPORTANT: This is a sensitive action that will spend Connects.
     Make sure the cover letter and rate/bid are correct before submitting.
 
-    Returns submission status and connects used.
+    Returns submission status, the approved cost, and actual Connect spend only when verified.
     """
+    if params.boost_connects > 0:
+        return {
+            "status": "unsupported",
+            "message": (
+                "Automatic positive boost submission is disabled until the live Upwork flow "
+                "can prove the first Submit click is non-consequential."
+            ),
+            "external_action_taken": False,
+        }
     payload = proposal_submission_payload(params)
     blocked = approval_gate(
         "submit_proposal",
@@ -2680,6 +3386,17 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
 async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[str, Any]:
     """Fill and commit a proposal while the browser operation lock is held."""
     assert params.duration is not None
+    assert params.base_connects is not None
+
+    if params.boost_connects > 0:
+        return {
+            "status": "unsupported",
+            "message": (
+                "Automatic positive boost submission is disabled before any application-form "
+                "or Submit interaction."
+            ),
+            "external_action_taken": False,
+        }
 
     form_status, existing_evidence = await _open_proposal_form(page, params.form_url)
     if form_status == "already_applied":
@@ -2733,12 +3450,12 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
         ),
     }
 
-    live_text = await _page_text(page)
-    live_base_connects = _extract_base_connects(live_text)
-    invited = bool(re.search(r"invitation to apply|you have been invited", live_text, re.I))
-    if live_base_connects is None and invited and params.base_connects == 0:
-        live_base_connects = 0
-    if live_base_connects is None or live_base_connects != params.base_connects:
+    live_base_connects_state = await _inspect_base_connects_state(page)
+    live_base_connects = live_base_connects_state.get("value")
+    if (
+        live_base_connects_state.get("status") != "complete"
+        or live_base_connects != params.base_connects
+    ):
         return {
             "status": "live_form_mismatch",
             "message": "Live base Connects could not be confirmed or changed after approval.",
@@ -2760,8 +3477,7 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
     if params.rate is not None:
         rate_ok = await _fill_one_exact_input(
             page,
-            '[data-test="hourly-rate-input"], input[name="rate"], '
-            'input[name="hourlyRate"]',
+            _HOURLY_RATE_INPUT_SELECTOR,
             str(params.rate),
         )
         if not rate_ok:
@@ -2845,11 +3561,15 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
             "external_action_taken": False,
         }
 
-    commercial_ok, commercial_error = await _reinspect_approved_commercial_state(page, params)
-    if not commercial_ok:
+    final_ok, final_error = await _reinspect_every_approved_live_state(
+        page,
+        params,
+        approved_identity,
+    )
+    if not final_ok:
         return {
             "status": "live_form_mismatch",
-            "message": commercial_error,
+            "message": final_error,
             "external_action_taken": False,
         }
 
@@ -2880,7 +3600,11 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
             }
         return _confirmed_submission_result(params=params, readback=immediate_confirmation)
 
-    send_btn, boost_error = await _configure_boost_step(page, params.boost_connects)
+    send_btn, boost_error = await _configure_boost_step(
+        page,
+        params.boost_connects,
+        params.base_connects,
+    )
     if send_btn is None:
         return {
             "status": "unknown",

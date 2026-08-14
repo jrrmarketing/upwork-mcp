@@ -103,6 +103,8 @@ def _proposal_payload(
         "cover_letter": params.cover_letter,
         "fee_net_text": normalize_live_context_lines(form.get("fee_net_text") or []),
         "fee_net_status": form.get("fee_net_status"),
+        "fee_net_price_amount": form.get("fee_net_price_amount"),
+        "fee_net_source": form.get("fee_net_source"),
         "boost_auction_text": normalize_live_context_lines(form.get("boost_auction_text") or []),
         "boost_auction_status": form.get("boost_auction_status"),
         "rate": params.rate,
@@ -118,6 +120,7 @@ def _proposal_payload(
         "available_profile_highlights_status": form.get(
             "available_profile_highlights_status"
         ),
+        "base_connects_status": form.get("base_connects_status"),
         "boost_connects": params.boost_connects,
         "rate_increase_frequency": params.rate_increase_frequency,
         "rate_increase_control_status": form.get("rate_increase_control_status"),

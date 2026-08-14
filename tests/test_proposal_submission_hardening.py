@@ -73,6 +73,8 @@ def _proposal_params(**updates: Any) -> proposals.SubmitProposalParams:
         "cover_letter": "Exact approved copy",
         "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
         "fee_net_status": "complete",
+        "fee_net_price_amount": "63.00",
+        "fee_net_source": "scoped_reversible_price_preflight",
         "boost_auction_text": [],
         "boost_auction_status": "unavailable",
         "rate": 63,
@@ -81,10 +83,14 @@ def _proposal_params(**updates: Any) -> proposals.SubmitProposalParams:
         "duration_options_status": "complete",
         "available_profile_highlights_status": "complete",
         "base_connects": 12,
+        "base_connects_status": "complete",
         "rate_increase_control_status": "complete",
         "action_id": "uwa_test_action",
     }
     values.update(updates)
+    if "fee_net_price_amount" not in updates:
+        price = values["rate"] if values["rate"] is not None else values["bid"]
+        values["fee_net_price_amount"] = f"{price:.2f}"
     if values["job_type"] == "fixed" and "rate_increase_control_status" not in updates:
         values["rate_increase_control_status"] = "not_applicable"
     return proposals.SubmitProposalParams(**values)
@@ -111,6 +117,9 @@ def test_submission_schema_binds_route_identity_and_fixed_payment_terms() -> Non
             ],
         )
 
+    with pytest.raises(ValidationError, match="greater than or equal to 50"):
+        _proposal_params(rate=49)
+
 
 def test_identity_and_payment_structure_are_approval_bound() -> None:
     original = _proposal_params()
@@ -125,13 +134,15 @@ def test_identity_and_payment_structure_are_approval_bound() -> None:
             fee_net_text=["Upwork service fee $7.00", "You'll receive $56.00 net"]
         ),
         _proposal_params(boost_auction_text=["Boost your proposal"], boost_auction_status="incomplete"),
-        _proposal_params(rate_increase_control_status="not_applicable"),
     ):
         assert proposals.approval_payload_digest(
             proposals.proposal_submission_payload(original)
         ) != proposals.approval_payload_digest(
             proposals.proposal_submission_payload(changed)
         )
+
+    with pytest.raises(ValidationError, match="Hourly proposals require"):
+        _proposal_params(rate_increase_control_status="not_applicable")
 
     fixed = _proposal_params(
         job_type="fixed",
@@ -160,14 +171,18 @@ def test_submission_schema_requires_complete_discovery_and_auction_for_boost() -
         _proposal_params(screening_questions_status="incomplete")
     with pytest.raises(ValidationError, match="fee/net"):
         _proposal_params(fee_net_status="unavailable", fee_net_text=[])
-    with pytest.raises(ValidationError, match="nonzero boost"):
+    with pytest.raises(ValidationError, match="base Connects"):
+        _proposal_params(base_connects_status="unavailable", base_connects=None)
+    with pytest.raises(ValidationError, match="fee_net_price_amount"):
+        _proposal_params(fee_net_price_amount="64.00")
+    with pytest.raises(ValidationError, match="positive boost"):
         _proposal_params(boost_connects=5)
-    boosted = _proposal_params(
-        boost_connects=5,
-        boost_auction_text=["Boost auction top bid 8 Connects"],
-        boost_auction_status="complete",
-    )
-    assert boosted.boost_connects == 5
+    with pytest.raises(ValidationError, match="positive boost"):
+        _proposal_params(
+            boost_connects=5,
+            boost_auction_text=["Boost auction top bid 8 Connects"],
+            boost_auction_status="complete",
+        )
 
 
 def test_submission_schema_rejects_blank_duplicate_or_multirow_prepare_drift() -> None:
@@ -242,8 +257,11 @@ def _form(**updates: Any) -> dict[str, Any]:
         ],
         "duration_options_status": "complete",
         "base_connects": 8,
+        "base_connects_status": "complete",
         "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
         "fee_net_status": "complete",
+        "fee_net_price_amount": "63.00",
+        "fee_net_source": "scoped_reversible_price_preflight",
         "boost_auction_text": [],
         "boost_auction_status": "unavailable",
         "available_profile_highlights": ["Google Ads Search Certification"],
