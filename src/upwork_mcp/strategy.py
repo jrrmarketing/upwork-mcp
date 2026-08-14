@@ -62,7 +62,7 @@ SERVICE_TERMS: Mapping[str, tuple[str, ...]] = {
 }
 
 TAG_TERMS: Mapping[str, tuple[str, ...]] = {
-    "legal": ("law", "legal", "attorney", "lawyer"),
+    "legal": ("legal services", "legal practice", "attorney", "lawyer"),
     "law_firm": ("law firm", "attorney", "lawyer"),
     "family_law": ("family law", "divorce", "custody"),
     "criminal_defense": ("criminal defense", "criminal defence", "dui", "dwi"),
@@ -89,6 +89,36 @@ TAG_TERMS: Mapping[str, tuple[str, ...]] = {
     "local_business": ("local business", "local service"),
     "cabinet_maker": ("cabinet", "cabinetry", "joinery"),
 }
+
+# These tags describe a broad market or business-model adjacency, not the
+# study's exact vertical. They can support a consultative analogy, but never the
+# "exact proof" threshold used to recommend a Connects boost.
+ADJACENT_PROOF_TAGS = frozenset(
+    {
+        "legal",
+        "ecommerce",
+        "home_services",
+        "trades",
+        "home_improvement",
+        "beauty",
+        "wellness",
+        "med_spa_adjacent",
+        "healthcare",
+        "b2b",
+        "high_ticket",
+        "local_business",
+    }
+)
+
+# A vertical word in a title for software, education, recruitment, or law
+# enforcement does not describe the same business model as a client-services
+# case study. Such jobs may still be good opportunities, but unrelated proof is
+# not exposed or used to justify a boost.
+NON_CLIENT_SERVICE_MODEL_TITLE_PATTERN = re.compile(
+    r"\b(?:saas|software|platform|marketplace|app|school|university|college|"
+    r"recruit(?:er|ing|ment)?|staffing|law enforcement|police)\b",
+    re.I,
+)
 
 
 HARD_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -237,11 +267,16 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
     clause_boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
     prefix = re.split(clause_boundary, text[max(0, start - 120) : start], flags=re.I)[-1]
     suffix = re.split(clause_boundary, text[end : end + 120], flags=re.I)[0]
+    excluded_actions = r"(?:using|requiring|needing|including|implementing|managing|running|supporting)"
     negated_prefix = re.search(
         r"(?:"
-        r"\b(?:no\s+need\s+for|not\s+looking\s+for|without)"
+        r"\b(?:no\s+need\s+for|not\s+looking\s+for|without|rather\s+than)"
         r"|\b(?:no|not)(?:\s+(?:a|an|the))?"
         r"|\b(?:is|are|was|were)\s+not(?:\s+(?:a|an|the))?"
+        rf"|\b(?:am|is|are|was|were)\s+not\s+{excluded_actions}(?:\s+(?:a|an|the))?"
+        rf"|\b(?:will|would|should)\s+not\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
+        rf"|\b(?:won't|wouldn't|shouldn't)\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
+        rf"|\bnot\s+{excluded_actions}(?:\s+(?:a|an|the))?"
         r"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't|"
         r"will\s+not|won't|would\s+not|wouldn't|should\s+not|shouldn't|"
         r"cannot|can't)\s+(?:want|need|require|use|include|implement|manage|run|support)"
@@ -254,7 +289,7 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         return True
     return bool(
         re.match(
-            r"^\s*(?:(?:is|are|was|were)\s+not|isn't|aren't|wasn't|weren't|"
+            r"^\s*(?:not|(?:is|are|was|were)\s+not|isn't|aren't|wasn't|weren't|"
             r"will\s+not\s+be|won't\s+be|would\s+not\s+be|wouldn't\s+be)\s+"
             r"(?:required|needed|included|used|managed|implemented|part of|in scope)\b",
             suffix,
@@ -321,40 +356,64 @@ def proposal_safe_proof_lines(study: Mapping[str, Any]) -> list[dict[str, str]]:
 def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:
     """Return the closest verified proof, with the match strength made explicit."""
     text = _text(job)
-    ranked: list[tuple[int, ProofRecord, list[str], list[str]]] = []
+    title = str(job.get("title") or "").casefold()
+    if NON_CLIENT_SERVICE_MODEL_TITLE_PATTERN.search(title):
+        return []
+
+    ranked: list[
+        tuple[int, int, ProofRecord, list[str], list[str], list[str]]
+    ] = []
     for study in PROOF_MANIFEST:
         routing_tags = [tag for tag in study.allowed_job_tags if tag in TAG_TERMS]
-        allowed_terms = _proof_terms(routing_tags, TAG_TERMS)
         service_terms = _proof_terms(study.services, SERVICE_TERMS)
         blocked_terms = _proof_terms(study.blocked_job_tags, TAG_TERMS)
-        vertical_hits = [term for term in allowed_terms if _contains_bounded_term(text, term)]
+        tag_hits = {
+            tag: [term for term in TAG_TERMS[tag] if _contains_bounded_term(text, term)]
+            for tag in routing_tags
+        }
+        tag_hits = {tag: terms for tag, terms in tag_hits.items() if terms}
+        exact_tag_hits = [tag for tag in tag_hits if tag not in ADJACENT_PROOF_TAGS]
+        adjacent_tag_hits = [tag for tag in tag_hits if tag in ADJACENT_PROOF_TAGS]
+        vertical_hits = [term for terms in tag_hits.values() for term in terms]
         service_hits = [term for term in service_terms if _contains_bounded_term(text, term)]
         blocked_hits = [term for term in blocked_terms if _contains_bounded_term(text, term)]
         # Service overlap alone is not case-study relevance. Require an audited
         # vertical/business-model tag before exposing any permitted claim.
-        if not vertical_hits:
+        if not tag_hits:
             continue
-        score = min(36, len(vertical_hits) * 12) + min(16, len(service_hits) * 4)
-        if vertical_hits:
-            score += 8
+        score = (
+            min(72, len(exact_tag_hits) * 24)
+            + min(18, len(adjacent_tag_hits) * 6)
+            + min(16, len(service_hits) * 4)
+        )
         if blocked_hits:
             score -= 24
         if study.status is EvidenceStatus.ROUTE_ONLY_WITH_CAVEAT:
             score -= 3
         if score:
-            ranked.append((score, study, vertical_hits + service_hits, blocked_hits))
+            ranked.append(
+                (
+                    score,
+                    len(exact_tag_hits),
+                    study,
+                    vertical_hits + service_hits,
+                    blocked_hits,
+                    exact_tag_hits + adjacent_tag_hits,
+                )
+            )
 
-    ranked.sort(key=lambda item: (-item[0], item[1].name))
+    ranked.sort(key=lambda item: (-item[1], -item[0], item[2].name))
     selected: list[dict[str, Any]] = []
-    for score, study, matched, blocked_hits in ranked:
+    for score, exact_hit_count, study, matched, blocked_hits, matched_tags in ranked:
         if score <= 0 or blocked_hits:
             continue
         selected.append(
             {
                 "key": study.key,
                 "name": study.name,
-                "match_strength": "exact" if score >= 24 else "adjacent",
+                "match_strength": "exact" if exact_hit_count else "adjacent",
                 "matched_on": list(dict.fromkeys(matched)),
+                "matched_tags": matched_tags,
                 "approved_claims": [claim.text for claim in study.permitted_claims],
                 "claim_evidence": [
                     {

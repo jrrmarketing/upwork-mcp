@@ -85,6 +85,51 @@ def test_proof_matcher_uses_phrase_boundaries_for_law_and_spa_terms():
     assert result.case_studies == []
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Google Ads for a law school",
+        "Paid search for legal SaaS software",
+        "Google Ads for law-enforcement recruiting",
+        "Shopping ads for a legal-document ecommerce store",
+    ],
+)
+def test_non_law_firm_business_models_never_receive_exact_law_firm_proof(title: str):
+    result = analyze_job(
+        {
+            "title": title,
+            "description": "Google Ads account management and paid search lead generation",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert not any(
+        study["match_strength"] == "exact" and "law" in study["key"]
+        for study in result.case_studies
+    )
+    assert result.boost["recommendation"] == "no_boost"
+
+
+def test_specific_plumbing_proof_outranks_generic_home_services_proof():
+    result = analyze_job(
+        {
+            "title": "Google Ads for a plumbing company",
+            "description": "Paid search lead generation for local plumbing calls",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "client": _client(),
+        }
+    )
+
+    assert result.case_studies[0]["key"] == "priority-one-plumbing"
+    assert result.case_studies[0]["match_strength"] == "exact"
+
+
 def test_whatconverts_offline_conversion_scope_is_allowed_with_boundary():
     result = analyze_job(
         {
@@ -194,7 +239,12 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "GTM isn't required; use WhatConverts instead.",
         "We won't use Google Tag Manager for this account.",
         "There is no need for GTM in this engagement.",
+        "GTM not required; use WhatConverts instead.",
+        "We are not using GTM for this account.",
+        "We will not be using Google Tag Manager.",
         "This is not a full-time role; the consultant will work five hours a week.",
+        "This will not be a full-time position.",
+        "Part-time rather than full-time support.",
         "We don't need a full-time person; this is five hours a week.",
         "We are not looking for full-time support.",
         "This ecommerce account does not need purchase tracking; Google Ads management only.",
