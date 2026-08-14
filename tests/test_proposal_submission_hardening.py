@@ -649,6 +649,32 @@ async def test_fixed_payment_fails_closed_if_selection_or_amount_is_ambiguous() 
     assert (await proposals._configure_fixed_payment_terms(conflicting, params))[0] is False
 
 
+@pytest.mark.asyncio
+async def test_by_project_draft_snapshot_restores_original_raw_amount() -> None:
+    params = _proposal_params(
+        job_type="fixed",
+        rate=None,
+        bid=500,
+        payment_structure="by_project",
+    )
+    page = _PaymentPage()
+    page.section.project_radio.checked = True
+    page.amounts[0].value = "275.50"
+    snapshot, error = await proposals._capture_fixed_draft_state(page, params)
+    assert error is None
+    assert snapshot == {
+        "structure": "by_project",
+        "project_amount": "275.50",
+        "milestones": [],
+    }
+
+    assert await proposals._configure_fixed_payment_terms(page, params) == (True, None)
+    assert page.amounts[0].value == "500.0"
+    assert snapshot is not None
+    assert await proposals._restore_fixed_draft_state(page, snapshot) is True
+    assert page.amounts[0].value == "275.50"
+
+
 class _MilestoneRow:
     def __init__(self) -> None:
         self.description = _AmountInput()
@@ -697,6 +723,34 @@ async def test_one_exact_milestone_is_selected_filled_and_read_back() -> None:
 
     missing_row = _MilestonePage(row_count=0)
     assert (await proposals._configure_fixed_payment_terms(missing_row, params))[0] is False
+
+
+@pytest.mark.asyncio
+async def test_milestone_draft_snapshot_restores_every_original_field() -> None:
+    params = _proposal_params(
+        job_type="fixed",
+        rate=None,
+        bid=500,
+        payment_structure="by_milestone",
+        milestones=[
+            {"description": "Initial audit", "due_date": "2026-09-01", "amount": 500},
+        ],
+    )
+    page = _MilestonePage(row_count=1)
+    page.section.milestone_radio.checked = True
+    page.rows[0].description.value = "Original milestone"
+    page.rows[0].due_date.value = "2026-08-20"
+    page.rows[0].amount.value = "325"
+    snapshot, error = await proposals._capture_fixed_draft_state(page, params)
+    assert error is None
+    assert snapshot is not None
+
+    assert await proposals._configure_fixed_payment_terms(page, params) == (True, None)
+    assert page.rows[0].description.value == "Initial audit"
+    assert await proposals._restore_fixed_draft_state(page, snapshot) is True
+    assert page.rows[0].description.value == "Original milestone"
+    assert page.rows[0].due_date.value == "2026-08-20"
+    assert page.rows[0].amount.value == "325"
 
 
 class _WarningCheckbox:

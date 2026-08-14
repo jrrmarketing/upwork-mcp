@@ -427,6 +427,13 @@ async def upwork_send_prepared_message(
     room_id: str,
     contact_name: str,
     message: str,
+    history_snapshot_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+    history_record_count: Annotated[int, Field(ge=0)],
+    history_completeness_proof: Literal["exact_owner_complete_boundary"],
+    last_message_identity_sha256: Annotated[
+        str | None,
+        Field(pattern=r"^[0-9a-f]{64}$"),
+    ] = None,
 ) -> dict:
     """Send one unexpired approved exact-copy message and consume its action after readback."""
     result = await send_message(
@@ -436,6 +443,10 @@ async def upwork_send_prepared_message(
             room_id=room_id,
             contact_name=contact_name,
             message=message,
+            history_snapshot_sha256=history_snapshot_sha256,
+            history_record_count=history_record_count,
+            last_message_identity_sha256=last_message_identity_sha256,
+            history_completeness_proof=history_completeness_proof,
         )
     )
     if result.get("status") == "sent" and result.get("owner_system_readback", {}).get("confirmed"):

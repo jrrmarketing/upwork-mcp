@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
+import secrets
 from typing import Any
 from urllib.parse import urlparse
 
@@ -26,7 +29,31 @@ _ROOM_CONTACT_SELECTOR = (
     '.room-header h2, '
     'header [data-test="contact-name"]'
 )
+_MESSAGE_HISTORY_CONTAINER_SELECTOR = (
+    '[data-test="message-history"], '
+    '[data-test="message-list"], '
+    '[role="log"][aria-label*="message" i], '
+    '.message-list'
+)
+_ROOM_SCOPE_IDENTITY_ATTRIBUTES = (
+    "data-room-id",
+    "data-conversation-id",
+    "data-room-uid",
+)
 _MESSAGE_RECORD_SELECTOR = '[data-test="message"], .message-item, .chat-message'
+_HISTORY_COMPLETE_BOUNDARY_SELECTOR = (
+    '[data-test="message-history-complete"], '
+    '[data-test="message-history-start"][data-history-complete="true"], '
+    '[data-test="conversation-start"][data-history-complete="true"]'
+)
+_HISTORY_INCOMPLETE_SELECTOR = (
+    '[data-test="load-older-messages"], '
+    '[data-test="load-earlier-messages"], '
+    'button:text-is("Load older messages"), '
+    'button:text-is("Load earlier messages"), '
+    '[data-virtualized="true"], '
+    '[data-test*="virtualized-message-list"]'
+)
 _MESSAGE_CONTENT_SELECTORS = (
     '[data-test="content"]',
     '.message-text',
@@ -34,6 +61,16 @@ _MESSAGE_CONTENT_SELECTORS = (
     'p',
 )
 _OWN_MESSAGE_SELECTOR = '.my-message, [data-test="my-message"], .sent'
+_OTHER_MESSAGE_SELECTOR = (
+    '.their-message, [data-test="other-message"], [data-test="received-message"], '
+    '.received, .incoming'
+)
+_MESSAGE_IDENTITY_ATTRIBUTES = (
+    "data-message-id",
+    "data-message-uid",
+    "data-test-key",
+    "id",
+)
 _COMPOSER_SELECTOR = (
     'form[data-test="message-composer"], '
     'form[data-test="composer"], '
@@ -54,6 +91,341 @@ _SCOPED_SEND_CANDIDATE_SELECTOR = (
     'button[aria-label="Send"], '
     'button[aria-label="Send message"]'
 )
+
+_MESSAGE_COMMIT_GUARD_SCRIPT = r"""
+(args) => {
+  const visible = (element) => {
+    if (!(element instanceof Element) || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" &&
+      rect.width > 0 && rect.height > 0;
+  };
+  const normalized = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const visibleAll = (scope, selector) =>
+    Array.from(scope.querySelectorAll(selector)).filter(visible);
+  const exactRoomScope = (scope) => {
+    const values = ["data-room-id", "data-conversation-id", "data-room-uid"]
+      .map((name) => normalized(scope.getAttribute(name)))
+      .filter(Boolean);
+    return new Set(values).size === 1 && values[0] === args.roomId;
+  };
+  const historySelector = '[data-test="message-history"], [data-test="message-list"], ' +
+    '[role="log"][aria-label*="message" i], .message-list';
+  const composerSelector = 'form[data-test="message-composer"], form[data-test="composer"], ' +
+    'form:has([data-test="message-input"]), form:has(textarea[name*="message"]), ' +
+    '[data-test="message-composer"], .message-composer';
+  const inputSelector = 'textarea[data-test="message-input"], textarea[name*="message"], ' +
+    '[contenteditable="true"][data-test="message-input"]';
+  const histories = visibleAll(document, historySelector);
+  const composers = visibleAll(document, composerSelector);
+  if (histories.length !== 1 || !exactRoomScope(histories[0])) {
+    return {status: "rejected", message: "The atomic guard could not bind one exact room history"};
+  }
+  if (composers.length !== 1 || !exactRoomScope(composers[0])) {
+    return {status: "rejected", message: "The atomic guard could not bind one exact room composer"};
+  }
+  if (visibleAll(composers[0], inputSelector).length !== 1) {
+    return {status: "rejected", message: "The atomic guard could not bind one exact composer input"};
+  }
+  const sendSelector = '[data-test="send-button"], [data-test="send-message-button"], ' +
+    'button[type="submit"], button[aria-label="Send"], button[aria-label="Send message"]';
+  const sendCandidates = visibleAll(composers[0], sendSelector).filter((candidate) => {
+    if (!(candidate instanceof HTMLButtonElement) || candidate.disabled ||
+        normalized(candidate.getAttribute("aria-disabled")).toLowerCase() === "true") return false;
+    const dataTest = normalized(candidate.getAttribute("data-test")).toLowerCase();
+    const aria = normalized(candidate.getAttribute("aria-label")).toLowerCase();
+    const type = normalized(candidate.getAttribute("type")).toLowerCase();
+    const text = normalized(candidate.textContent).toLowerCase();
+    const semanticSend = ["send", "send message"].includes(aria) ||
+      ["send", "send message"].includes(text);
+    const knownSend = ["send-button", "send-message-button"].includes(dataTest) ||
+      ["send", "send message"].includes(aria) || type === "submit";
+    return semanticSend && knownSend;
+  });
+  if (sendCandidates.length !== 1) {
+    return {status: "rejected", message: "The atomic guard could not bind one exact Send action"};
+  }
+  const priorHistory = histories[0].__upworkMcpMessageCommitGuard;
+  const priorComposer = composers[0].__upworkMcpMessageCommitGuard;
+  for (const prior of [priorHistory, priorComposer]) {
+    if (prior && prior.observer instanceof MutationObserver) prior.observer.disconnect();
+  }
+  const actionForm = sendCandidates[0].closest("form");
+  const state = {
+    token: args.token,
+    generation: 0,
+    eventGeneration: 0,
+    handlerGeneration: 0,
+    observer: null,
+    inputListener: null,
+    changeListener: null,
+    actionTarget: sendCandidates[0],
+    actionOnClick: sendCandidates[0].onclick,
+    formOnSubmit: actionForm ? actionForm.onsubmit : null,
+    documentOnClick: document.onclick,
+    documentOnSubmit: document.onsubmit,
+    originalAddEventListener: EventTarget.prototype.addEventListener,
+    originalRemoveEventListener: EventTarget.prototype.removeEventListener,
+    addEventListenerWrapper: null,
+    removeEventListenerWrapper: null
+  };
+  const actionEventTarget = (target, type) => {
+    if (type !== "click" && type !== "submit") return false;
+    return target === window || target === sendCandidates[0] ||
+      (target instanceof Node && target.contains(sendCandidates[0]));
+  };
+  state.addEventListenerWrapper = function(type, listener, options) {
+    if (actionEventTarget(this, String(type).toLowerCase())) state.handlerGeneration += 1;
+    return state.originalAddEventListener.call(this, type, listener, options);
+  };
+  state.removeEventListenerWrapper = function(type, listener, options) {
+    if (actionEventTarget(this, String(type).toLowerCase())) state.handlerGeneration += 1;
+    return state.originalRemoveEventListener.call(this, type, listener, options);
+  };
+  EventTarget.prototype.addEventListener = state.addEventListenerWrapper;
+  EventTarget.prototype.removeEventListener = state.removeEventListenerWrapper;
+  if (EventTarget.prototype.addEventListener !== state.addEventListenerWrapper ||
+      EventTarget.prototype.removeEventListener !== state.removeEventListenerWrapper) {
+    return {status: "rejected", message: "Action-listener mutation tracking could not be installed"};
+  }
+  state.observer = new MutationObserver((records) => {
+    state.generation += records.length;
+  });
+  state.observer.observe(histories[0], {
+    subtree: true, childList: true, characterData: true, attributes: true
+  });
+  state.observer.observe(composers[0], {
+    subtree: true, childList: true, characterData: true, attributes: true
+  });
+  state.inputListener = () => { state.eventGeneration += 1; };
+  state.changeListener = () => { state.eventGeneration += 1; };
+  composers[0].addEventListener("input", state.inputListener, true);
+  composers[0].addEventListener("change", state.changeListener, true);
+  Object.defineProperty(histories[0], "__upworkMcpMessageCommitGuard", {
+    value: state, configurable: true
+  });
+  Object.defineProperty(composers[0], "__upworkMcpMessageCommitGuard", {
+    value: state, configurable: true
+  });
+  return {
+    status: "ready",
+    generation: state.generation,
+    eventGeneration: state.eventGeneration,
+    handlerGeneration: state.handlerGeneration
+  };
+}
+"""
+
+_ATOMIC_MESSAGE_COMMIT_SCRIPT = r"""
+(args) => {
+  const reject = (message) => ({status: "rejected", dispatchStarted: false, message});
+  const visible = (element) => {
+    if (!(element instanceof Element) || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" &&
+      rect.width > 0 && rect.height > 0;
+  };
+  const normalized = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const visibleAll = (scope, selector) =>
+    Array.from(scope.querySelectorAll(selector)).filter(visible);
+  const exactRoomScope = (scope) => {
+    const values = ["data-room-id", "data-conversation-id", "data-room-uid"]
+      .map((name) => normalized(scope.getAttribute(name)))
+      .filter(Boolean);
+    return new Set(values).size === 1 && values[0] === args.roomId;
+  };
+  const expectedUrl = new URL(args.roomUrl);
+  if (location.origin !== expectedUrl.origin || location.pathname.replace(/\/$/, "") !==
+      expectedUrl.pathname.replace(/\/$/, "") || location.search || location.hash) {
+    return reject("The exact room route changed at the atomic commit boundary");
+  }
+  const contactSelector = '[data-test="room-header"] [data-test="contact-name"], ' +
+    '[data-test="room-header"] h2, .room-header .contact-name, .room-header h2, ' +
+    'header [data-test="contact-name"]';
+  const contacts = visibleAll(document, contactSelector);
+  if (contacts.length !== 1 || normalized(contacts[0].textContent) !== args.contactName) {
+    return reject("The exact recipient changed at the atomic commit boundary");
+  }
+  const historySelector = '[data-test="message-history"], [data-test="message-list"], ' +
+    '[role="log"][aria-label*="message" i], .message-list';
+  const composerSelector = 'form[data-test="message-composer"], form[data-test="composer"], ' +
+    'form:has([data-test="message-input"]), form:has(textarea[name*="message"]), ' +
+    '[data-test="message-composer"], .message-composer';
+  const histories = visibleAll(document, historySelector);
+  const composers = visibleAll(document, composerSelector);
+  if (histories.length !== 1 || !exactRoomScope(histories[0])) {
+    return reject("One exact room-bound history was not present at commit");
+  }
+  if (composers.length !== 1 || !exactRoomScope(composers[0])) {
+    return reject("One exact room-bound composer was not present at commit");
+  }
+  const historyState = histories[0].__upworkMcpMessageCommitGuard;
+  const composerState = composers[0].__upworkMcpMessageCommitGuard;
+  if (!historyState || historyState !== composerState || historyState.token !== args.token ||
+      !(historyState.observer instanceof MutationObserver)) {
+    return reject("The atomic room/history guard was replaced or unavailable");
+  }
+  const cleanup = () => {
+    historyState.observer.disconnect();
+    if (historyState.inputListener) composers[0].removeEventListener("input", historyState.inputListener, true);
+    if (historyState.changeListener) composers[0].removeEventListener("change", historyState.changeListener, true);
+    if (EventTarget.prototype.addEventListener === historyState.addEventListenerWrapper) {
+      EventTarget.prototype.addEventListener = historyState.originalAddEventListener;
+    }
+    if (EventTarget.prototype.removeEventListener === historyState.removeEventListenerWrapper) {
+      EventTarget.prototype.removeEventListener = historyState.originalRemoveEventListener;
+    }
+  };
+  historyState.generation += historyState.observer.takeRecords().length;
+  if (historyState.generation !== args.generation ||
+      historyState.eventGeneration !== args.eventGeneration ||
+      historyState.handlerGeneration !== args.handlerGeneration ||
+      EventTarget.prototype.addEventListener !== historyState.addEventListenerWrapper ||
+      EventTarget.prototype.removeEventListener !== historyState.removeEventListenerWrapper) {
+    cleanup();
+    return reject("The room history, composer, or input event state changed during final readback");
+  }
+  const history = histories[0];
+  const virtualized = normalized(history.getAttribute("data-virtualized")).toLowerCase() === "true" ||
+    normalized(history.getAttribute("data-windowed")).toLowerCase() === "true" ||
+    normalized(history.getAttribute("data-test")).toLowerCase().includes("virtualized") ||
+    normalized(history.getAttribute("class")).toLowerCase().includes("virtualized");
+  const incompleteSelector = '[data-test="load-older-messages"], ' +
+    '[data-test="load-earlier-messages"], [data-virtualized="true"], ' +
+    '[data-test*="virtualized-message-list"]';
+  const incompleteButtons = visibleAll(history, "button").filter((button) =>
+    ["load older messages", "load earlier messages"].includes(normalized(button.textContent).toLowerCase()));
+  if (virtualized || visibleAll(history, incompleteSelector).length || incompleteButtons.length) {
+    cleanup();
+    return reject("The owner history became partial or virtualized at commit");
+  }
+  const recordSelector = '[data-test="message"], .message-item, .chat-message';
+  const records = visibleAll(history, recordSelector);
+  const boundarySelector = '[data-test="message-history-complete"], ' +
+    '[data-test="message-history-start"][data-history-complete="true"], ' +
+    '[data-test="conversation-start"][data-history-complete="true"]';
+  const boundaries = visibleAll(history, boundarySelector);
+  const boundaryCount = boundaries.length === 1 ?
+    normalized(boundaries[0].getAttribute("data-message-count")) : "";
+  if (boundaries.length !== 1 ||
+      normalized(boundaries[0].getAttribute("data-history-complete")).toLowerCase() !== "true" ||
+      !/^[0-9]+$/.test(boundaryCount) || Number(boundaryCount) !== records.length) {
+    cleanup();
+    return reject("The complete-history boundary did not match at commit");
+  }
+  const bodySelectors = ['[data-test="content"]', '.message-text', '.content', 'p'];
+  const identityAttributes = ["data-message-id", "data-message-uid", "data-test-key", "id"];
+  const canonical = [];
+  const seenIdentities = new Set();
+  for (const record of records) {
+    const bodies = [];
+    for (const selector of bodySelectors) {
+      const matches = visibleAll(record, selector);
+      if (matches.length > 1) {
+        cleanup();
+        return reject("A message body became ambiguous at commit");
+      }
+      if (matches.length === 1) bodies.push(matches[0].textContent);
+    }
+    if (!bodies.length || bodies.some((body) => body !== bodies[0])) {
+      cleanup();
+      return reject("A message body changed or became ambiguous at commit");
+    }
+    let identity = null;
+    for (const attribute of identityAttributes) {
+      const value = normalized(record.getAttribute(attribute));
+      if (value) { identity = `${attribute}:${value}`; break; }
+    }
+    if (!identity) {
+      cleanup();
+      return reject("A message identity disappeared at commit");
+    }
+    if (seenIdentities.has(identity)) {
+      cleanup();
+      return reject("A duplicate owner-system message identity appeared at commit");
+    }
+    seenIdentities.add(identity);
+    const dataTest = normalized(record.getAttribute("data-test")).toLowerCase();
+    const classes = Array.from(record.classList).map((value) => value.toLowerCase());
+    const mine = Boolean(record.querySelector('.my-message, [data-test="my-message"], .sent')) ||
+      dataTest === "my-message" || normalized(record.getAttribute("data-is-mine")).toLowerCase() === "true" ||
+      ["outbound", "sent"].includes(normalized(record.getAttribute("data-direction")).toLowerCase()) ||
+      classes.some((value) => ["my-message", "sent", "outbound"].includes(value));
+    const other = Boolean(record.querySelector('.their-message, [data-test="other-message"], ' +
+      '[data-test="received-message"], .received, .incoming')) ||
+      ["other-message", "received-message"].includes(dataTest) ||
+      normalized(record.getAttribute("data-is-mine")).toLowerCase() === "false" ||
+      ["inbound", "received"].includes(normalized(record.getAttribute("data-direction")).toLowerCase()) ||
+      classes.some((value) => ["their-message", "received", "incoming", "inbound"].includes(value));
+    if (mine === other) {
+      cleanup();
+      return reject("A message owner became ambiguous at commit");
+    }
+    canonical.push({identity, content: bodies[0], is_mine: mine});
+  }
+  if (canonical.length !== args.expectedRecords.length || canonical.some((record, index) => {
+    const expected = args.expectedRecords[index];
+    return !expected || record.identity !== expected.identity ||
+      record.content !== expected.content || record.is_mine !== expected.is_mine;
+  })) {
+    cleanup();
+    return reject("The complete conversation snapshot changed at commit");
+  }
+  const inputSelector = 'textarea[data-test="message-input"], textarea[name*="message"], ' +
+    '[contenteditable="true"][data-test="message-input"]';
+  const inputs = visibleAll(composers[0], inputSelector);
+  if (inputs.length !== 1) {
+    cleanup();
+    return reject("One exact composer input was not present at commit");
+  }
+  const inputValue = inputs[0].isContentEditable ? inputs[0].textContent : inputs[0].value;
+  if (inputValue !== args.message) {
+    cleanup();
+    return reject("The exact approved composer copy changed at commit");
+  }
+  const sendSelector = '[data-test="send-button"], [data-test="send-message-button"], ' +
+    'button[type="submit"], button[aria-label="Send"], button[aria-label="Send message"]';
+  const candidates = visibleAll(composers[0], sendSelector).filter((candidate) => {
+    if (!(candidate instanceof HTMLButtonElement)) return false;
+    const dataTest = normalized(candidate.getAttribute("data-test")).toLowerCase();
+    const aria = normalized(candidate.getAttribute("aria-label")).toLowerCase();
+    const type = normalized(candidate.getAttribute("type")).toLowerCase();
+    const text = normalized(candidate.textContent).toLowerCase();
+    const semanticSend = ["send", "send message"].includes(aria) ||
+      ["send", "send message"].includes(text);
+    const knownSend = ["send-button", "send-message-button"].includes(dataTest) ||
+      ["send", "send message"].includes(aria) || type === "submit";
+    return semanticSend && knownSend && !candidate.disabled &&
+      normalized(candidate.getAttribute("aria-disabled")).toLowerCase() !== "true";
+  });
+  if (candidates.length !== 1) {
+    cleanup();
+    return reject("One exact enabled room-scoped Send control was not present at commit");
+  }
+  const send = candidates[0];
+  const actionForm = send.closest("form");
+  if (send !== historyState.actionTarget || send.onclick !== historyState.actionOnClick ||
+      (actionForm ? actionForm.onsubmit : null) !== historyState.formOnSubmit ||
+      document.onclick !== historyState.documentOnClick ||
+      document.onsubmit !== historyState.documentOnSubmit) {
+    cleanup();
+    return reject("The exact Send action handler changed during final readback");
+  }
+  if (!send.isConnected || !visible(send) || !composers[0].contains(send)) {
+    cleanup();
+    return reject("The exact room-scoped Send control detached before dispatch");
+  }
+  cleanup();
+  try {
+    HTMLElement.prototype.click.call(send);
+  } catch (_error) {
+    return {status: "unknown", dispatchStarted: true, message: "The single atomic Send dispatch raised"};
+  }
+  return {status: "clicked", dispatchStarted: true};
+}
+"""
 
 
 def parse_message_room(value: str) -> tuple[str, str]:
@@ -115,6 +487,23 @@ class SendMessageParams(StrictToolModel):
     room_id: str = Field(description="Exact room/conversation ID")
     contact_name: str = Field(min_length=1, max_length=500, description="Live recipient identity")
     message: str = Field(min_length=1, max_length=10000, description="Exact message content to send")
+    history_snapshot_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Exact complete conversation-history snapshot approved by the owner",
+    )
+    history_record_count: int = Field(
+        ge=0,
+        description="Number of records in the complete approval-bound history",
+    )
+    last_message_identity_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="Identity digest of the approval-bound final message, or null for an empty room",
+    )
+    history_completeness_proof: str = Field(
+        pattern=r"^exact_owner_complete_boundary$",
+        description="Proof mode used to establish that the entire room history was rendered",
+    )
     approved: bool = False
     approval_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
     action_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -147,15 +536,23 @@ class SendMessageParams(StrictToolModel):
     def _room_id_must_match_url(self) -> SendMessageParams:
         if parse_message_room(self.room_url)[1] != self.room_id:
             raise ValueError("room_id does not match the individual messages URL")
+        if self.history_record_count == 0 and self.last_message_identity_sha256 is not None:
+            raise ValueError("An empty approved history cannot include a last-message identity")
+        if self.history_record_count > 0 and self.last_message_identity_sha256 is None:
+            raise ValueError("A non-empty approved history requires a last-message identity")
         return self
 
 
-def message_payload(params: SendMessageParams) -> dict[str, str]:
+def message_payload(params: SendMessageParams) -> dict[str, Any]:
     return {
         "room_url": params.room_url,
         "room_id": params.room_id,
         "contact_name": params.contact_name,
         "message": params.message,
+        "history_snapshot_sha256": params.history_snapshot_sha256,
+        "history_record_count": params.history_record_count,
+        "last_message_identity_sha256": params.last_message_identity_sha256,
+        "history_completeness_proof": params.history_completeness_proof,
     }
 
 
@@ -345,6 +742,7 @@ async def prepare_message_from_live(room: str, message: str) -> dict[str, Any]:
     await browser.ensure_logged_in()
     async with browser.operation() as page:
         conversation = await _get_conversation_on_page(canonical_url, 1, page)
+        history = await _complete_message_history(page, room_id)
     identity = _conversation_identity(conversation)
     validation = validate_upwork_copy(message)
     errors = list(validation["errors"])
@@ -352,15 +750,22 @@ async def prepare_message_from_live(room: str, message: str) -> dict[str, Any]:
         errors.append("The message room and recipient identity could not be read back from Upwork")
     elif identity["room_id"] != room_id:
         errors.append("Upwork returned a different message room than requested")
+    if history["status"] != "complete":
+        errors.append(
+            "The entire conversation history could not be proved complete, so the message "
+            "context cannot be bound for approval"
+        )
 
-    payload: dict[str, str] | None = None
+    payload: dict[str, Any] | None = None
     prepared = None
-    if identity is not None:
+    history_approval = _message_history_approval(history)
+    if identity is not None and history_approval is not None:
         params = SendMessageParams(
             room_url=identity["room_url"],
             room_id=identity["room_id"],
             contact_name=identity["contact_name"],
             message=message,
+            **history_approval,
         )
         payload = message_payload(params)
         if not errors:
@@ -371,6 +776,8 @@ async def prepare_message_from_live(room: str, message: str) -> dict[str, Any]:
         "valid": not errors,
         "errors": list(dict.fromkeys(errors)),
         "current_conversation": identity,
+        "history_readback": history,
+        "history_approval": history_approval,
         "exact_message": payload,
         "prepared_action": prepared,
         "external_action_taken": False,
@@ -463,6 +870,7 @@ async def _current_conversation_identity(page) -> tuple[dict[str, str] | None, s
 async def _strict_message_content(element) -> tuple[str | None, str | None]:
     """Read one complete message body without silently choosing among body nodes."""
 
+    bodies: list[str] = []
     for selector in _MESSAGE_CONTENT_SELECTORS:
         contents = await _visible_elements(element, selector)
         if contents is None:
@@ -476,8 +884,13 @@ async def _strict_message_content(element) -> tuple[str | None, str | None]:
                 return None, "A visible message body could not be read"
             if content is None:
                 return None, "A visible message body returned no readable content"
-            return content, None
-    return None, "A visible message record did not expose a readable body"
+            bodies.append(content)
+    if not bodies:
+        return None, "A visible message record did not expose a readable body"
+    first = bodies[0]
+    if any(not _same_utf8_bytes(first, body) for body in bodies[1:]):
+        return None, "A visible message record exposed competing body representations"
+    return first, None
 
 
 async def _strict_message_record(element) -> tuple[dict[str, Any] | None, str | None]:
@@ -488,16 +901,46 @@ async def _strict_message_record(element) -> tuple[dict[str, Any] | None, str | 
         return None, error
     try:
         mine_indicator = await element.query_selector(_OWN_MESSAGE_SELECTOR)
+        other_indicator = await element.query_selector(_OTHER_MESSAGE_SELECTOR)
         data_test = (await element.get_attribute("data-test") or "").strip().casefold()
         class_names = (await element.get_attribute("class") or "").split()
+        data_is_mine = (await element.get_attribute("data-is-mine") or "").strip().casefold()
+        data_direction = (await element.get_attribute("data-direction") or "").strip().casefold()
+        identities = [
+            (attribute, str(value).strip())
+            for attribute in _MESSAGE_IDENTITY_ATTRIBUTES
+            if (value := await element.get_attribute(attribute)) is not None
+            and str(value).strip()
+        ]
     except Exception:
-        return None, "A visible message record's ownership could not be read"
-    is_mine = (
+        return None, "A visible message record's ownership or identity could not be read"
+    if not identities:
+        return None, "A visible message record exposed no stable owner-system identity"
+    identity_attribute, identity_value = identities[0]
+    explicit_mine = (
         mine_indicator is not None
         or data_test == "my-message"
-        or any(name.casefold() in {"my-message", "sent"} for name in class_names)
+        or data_is_mine == "true"
+        or data_direction in {"outbound", "sent"}
+        or any(name.casefold() in {"my-message", "sent", "outbound"} for name in class_names)
     )
-    return {"content": content, "is_mine": is_mine}, None
+    explicit_other = (
+        other_indicator is not None
+        or data_test in {"other-message", "received-message"}
+        or data_is_mine == "false"
+        or data_direction in {"inbound", "received"}
+        or any(
+            name.casefold() in {"their-message", "received", "incoming", "inbound"}
+            for name in class_names
+        )
+    )
+    if explicit_mine == explicit_other:
+        return None, "A visible message record's sender ownership was ambiguous"
+    return {
+        "identity": f"{identity_attribute}:{identity_value}",
+        "content": content,
+        "is_mine": explicit_mine,
+    }, None
 
 
 async def _visible_message_history(page) -> dict[str, Any]:
@@ -511,6 +954,7 @@ async def _visible_message_history(page) -> dict[str, Any]:
             "message": "The visible message-history records could not be enumerated",
         }
     records: list[dict[str, Any]] = []
+    seen_identities: set[str] = set()
     for index, element in enumerate(elements):
         record, error = await _strict_message_record(element)
         if error or record is None:
@@ -521,12 +965,234 @@ async def _visible_message_history(page) -> dict[str, Any]:
                 "unreadable_record_index": index,
                 "message": error or "A visible message record could not be read",
             }
+        if record["identity"] in seen_identities:
+            return {
+                "status": "incomplete",
+                "messages": records,
+                "rendered_record_count": len(elements),
+                "unreadable_record_index": index,
+                "message": "Visible message records exposed a duplicate owner-system identity",
+            }
+        seen_identities.add(record["identity"])
         records.append(record)
     return {
         "status": "complete",
         "messages": records,
         "rendered_record_count": len(elements),
         "message": "Every currently rendered message record was read",
+    }
+
+
+def _sha256_json(value: Any) -> str:
+    serialized = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _history_records(history: dict[str, Any]) -> list[dict[str, Any]] | None:
+    records = history.get("messages")
+    if not isinstance(records, list):
+        return None
+    if not all(
+        isinstance(record, dict)
+        and isinstance(record.get("identity"), str)
+        and bool(record.get("identity"))
+        and isinstance(record.get("content"), str)
+        and type(record.get("is_mine")) is bool
+        for record in records
+    ):
+        return None
+    return records
+
+
+def _message_history_approval(history: dict[str, Any]) -> dict[str, Any] | None:
+    """Return privacy-minimal deterministic approval fields for one complete history."""
+
+    if history.get("status") != "complete" or history.get("completeness_proof") != (
+        "exact_owner_complete_boundary"
+    ):
+        return None
+    records = _history_records(history)
+    if records is None or history.get("rendered_record_count") != len(records):
+        return None
+    canonical = [
+        {
+            "ordinal": index,
+            "identity": record["identity"],
+            "content": record["content"],
+            "is_mine": record["is_mine"],
+        }
+        for index, record in enumerate(records)
+    ]
+    last_identity = (
+        _sha256_json({"owner_message_identity": canonical[-1]["identity"]})
+        if canonical
+        else None
+    )
+    return {
+        "history_snapshot_sha256": _sha256_json(canonical),
+        "history_record_count": len(canonical),
+        "last_message_identity_sha256": last_identity,
+        "history_completeness_proof": "exact_owner_complete_boundary",
+    }
+
+
+async def _history_has_complete_owner_boundary(page, rendered_count: int) -> tuple[bool, str]:
+    """Require exact owner DOM proof that the rendered history is not virtualized or partial."""
+
+    try:
+        root_virtualized = (await page.get_attribute("data-virtualized") or "").casefold()
+        root_windowed = (await page.get_attribute("data-windowed") or "").casefold()
+        root_test = (await page.get_attribute("data-test") or "").casefold()
+        root_class = (await page.get_attribute("class") or "").casefold()
+    except Exception:
+        return False, "The owner-system history container attributes could not be read"
+    if (
+        root_virtualized == "true"
+        or root_windowed == "true"
+        or "virtualized" in root_test
+        or "virtualized" in root_class
+    ):
+        return False, "The owner-system history container is virtualized"
+
+    incomplete = await _visible_elements(page, _HISTORY_INCOMPLETE_SELECTOR)
+    if incomplete is None:
+        return False, "History pagination and virtualization controls could not be enumerated"
+    if incomplete:
+        return False, "The owner-system history is paginated or virtualized"
+
+    boundaries = await _visible_elements(page, _HISTORY_COMPLETE_BOUNDARY_SELECTOR)
+    if boundaries is None:
+        return False, "The complete-history boundary could not be enumerated"
+    if len(boundaries) != 1:
+        return False, "Exactly one owner-system complete-history boundary was not found"
+    boundary = boundaries[0]
+    try:
+        complete = (await boundary.get_attribute("data-history-complete") or "").casefold()
+        raw_count = await boundary.get_attribute("data-message-count")
+        expected_count = int(str(raw_count))
+    except Exception:
+        return False, "The complete-history boundary attributes could not be read"
+    if complete != "true" or expected_count != rendered_count:
+        return False, "The owner-system history boundary does not match the rendered record count"
+    return True, "Exact non-virtualized owner-system boundary and record count were read"
+
+
+async def _scope_matches_room(scope, expected_room_id: str) -> bool:
+    try:
+        identities = {
+            str(value).strip()
+            for attribute in _ROOM_SCOPE_IDENTITY_ATTRIBUTES
+            if (value := await scope.get_attribute(attribute)) is not None
+            and str(value).strip()
+        }
+    except Exception:
+        return False
+    return identities == {expected_room_id}
+
+
+async def _resolve_exact_history_scope(
+    page,
+    expected_room_id: str,
+) -> tuple[Any | None, str | None]:
+    scopes = await _visible_elements(page, _MESSAGE_HISTORY_CONTAINER_SELECTOR)
+    if scopes is None:
+        return None, "The owner-system message-history containers could not be enumerated"
+    if len(scopes) != 1:
+        return None, "Exactly one visible owner-system message-history container was not found"
+    if not await _scope_matches_room(scopes[0], expected_room_id):
+        return None, "The owner-system message-history container was not bound to the exact room"
+    return scopes[0], None
+
+
+async def _complete_message_history(page, expected_room_id: str) -> dict[str, Any]:
+    """Read a stable complete history, failing closed on virtualization or missing boundaries."""
+
+    first_scope, first_scope_error = await _resolve_exact_history_scope(page, expected_room_id)
+    if first_scope is None:
+        return {
+            "status": "incomplete",
+            "messages": [],
+            "completeness_proof": None,
+            "message": first_scope_error,
+        }
+    first = await _visible_message_history(first_scope)
+    if first.get("status") != "complete":
+        return first
+    first_records = _history_records(first)
+    if first_records is None:
+        return {
+            **first,
+            "status": "incomplete",
+            "message": "The rendered message records could not form a deterministic snapshot",
+        }
+    first_boundary, first_note = await _history_has_complete_owner_boundary(
+        first_scope,
+        len(first_records),
+    )
+    if not first_boundary:
+        return {
+            **first,
+            "status": "incomplete",
+            "completeness_proof": None,
+            "message": first_note,
+        }
+
+    try:
+        await page.wait_for_timeout(100)
+    except Exception:
+        await asyncio.sleep(0)
+    second_scope, second_scope_error = await _resolve_exact_history_scope(page, expected_room_id)
+    if second_scope is None:
+        return {
+            "status": "incomplete",
+            "messages": [],
+            "completeness_proof": None,
+            "message": second_scope_error,
+        }
+    second = await _visible_message_history(second_scope)
+    second_records = _history_records(second)
+    if second.get("status") != "complete" or second_records is None:
+        return {
+            **second,
+            "status": "incomplete",
+            "completeness_proof": None,
+            "message": "The complete history could not be read twice",
+        }
+    second_boundary, second_note = await _history_has_complete_owner_boundary(
+        second_scope,
+        len(second_records),
+    )
+    if not second_boundary:
+        return {
+            **second,
+            "status": "incomplete",
+            "completeness_proof": None,
+            "message": second_note,
+        }
+    first_approval = {
+        "status": "complete",
+        "completeness_proof": "exact_owner_complete_boundary",
+        "messages": first_records,
+        "rendered_record_count": len(first_records),
+    }
+    second_approval = {
+        "status": "complete",
+        "completeness_proof": "exact_owner_complete_boundary",
+        "messages": second_records,
+        "rendered_record_count": len(second_records),
+    }
+    if _message_history_approval(first_approval) != _message_history_approval(second_approval):
+        return {
+            **second,
+            "status": "incomplete",
+            "completeness_proof": None,
+            "message": "The complete history changed between stable owner-system readbacks",
+        }
+    return {
+        **second,
+        "status": "complete",
+        "completeness_proof": "exact_owner_complete_boundary",
+        "message": first_note,
     }
 
 
@@ -570,38 +1236,28 @@ def _same_complete_visible_history(
     baseline: dict[str, Any],
     current: dict[str, Any],
 ) -> bool:
-    """Compare complete rendered histories without normalising message bodies."""
+    """Compare two complete histories through their deterministic approval snapshots."""
 
-    if baseline.get("status") != "complete" or current.get("status") != "complete":
+    left = _message_history_approval(baseline)
+    right = _message_history_approval(current)
+    return left is not None and left == right
+
+
+def _approved_history_matches(params: SendMessageParams, history: dict[str, Any]) -> bool:
+    approval = _message_history_approval(history)
+    if approval is None:
         return False
-    if baseline.get("rendered_record_count") != current.get("rendered_record_count"):
-        return False
-    baseline_messages = baseline.get("messages")
-    current_messages = current.get("messages")
-    if not isinstance(baseline_messages, list) or not isinstance(current_messages, list):
-        return False
-    if len(baseline_messages) != len(current_messages):
-        return False
-    for baseline_record, current_record in zip(baseline_messages, current_messages, strict=True):
-        if not isinstance(baseline_record, dict) or not isinstance(current_record, dict):
-            return False
-        baseline_content = baseline_record.get("content")
-        current_content = current_record.get("content")
-        if not isinstance(baseline_content, str) or not isinstance(current_content, str):
-            return False
-        if not _same_utf8_bytes(baseline_content, current_content):
-            return False
-        baseline_is_mine = baseline_record.get("is_mine")
-        current_is_mine = current_record.get("is_mine")
-        if type(baseline_is_mine) is not bool or type(current_is_mine) is not bool:
-            return False
-        if baseline_is_mine is not current_is_mine:
-            return False
-    return True
+    expected = {
+        "history_snapshot_sha256": params.history_snapshot_sha256,
+        "history_record_count": params.history_record_count,
+        "last_message_identity_sha256": params.last_message_identity_sha256,
+        "history_completeness_proof": params.history_completeness_proof,
+    }
+    return approval == expected
 
 
 async def _restore_composer_value(input_element, original_value: str) -> bool:
-    """Restore and exactly verify a composer after a pre-click failure."""
+    """Restore and exactly verify the currently rendered composer value."""
 
     try:
         await input_element.fill(original_value)
@@ -611,16 +1267,73 @@ async def _restore_composer_value(input_element, original_value: str) -> bool:
     return restored is not None and _same_utf8_bytes(restored, original_value)
 
 
-async def _preclick_failure(
+async def _restore_and_verify_persisted_composer(
+    page,
     input_element,
     *,
+    room_url: str,
+    approved_identity: dict[str, str],
+) -> tuple[bool, dict[str, Any]]:
+    """Clear a possible autosaved draft, reload the room, and prove it stayed clear."""
+
+    details: dict[str, Any] = {
+        "local_composer_cleared": False,
+        "room_reloaded": False,
+        "persisted_composer_cleared": False,
+    }
+    if not await _restore_composer_value(input_element, ""):
+        return False, details
+    details["local_composer_cleared"] = True
+    try:
+        await page.wait_for_timeout(250)
+    except Exception:
+        await asyncio.sleep(0)
+    try:
+        reload_method = getattr(page, "reload", None)
+        if callable(reload_method):
+            await reload_method(wait_until="networkidle")
+        else:
+            await page.goto(room_url, wait_until="networkidle")
+    except Exception:
+        return False, details
+    details["room_reloaded"] = True
+
+    identity, identity_error = await _current_conversation_identity(page)
+    details["identity_read_error"] = identity_error
+    if identity != approved_identity:
+        return False, details
+    _, reloaded_input, composer_error = await _resolve_exact_composer(
+        page,
+        approved_identity["room_id"],
+    )
+    details["composer_read_error"] = composer_error
+    if reloaded_input is None:
+        return False, details
+    persisted_value = await _read_composer_value(reloaded_input)
+    if persisted_value is None or not _same_utf8_bytes(persisted_value, ""):
+        return False, details
+    details["persisted_composer_cleared"] = True
+    return True, details
+
+
+async def _preclick_failure(
+    page,
+    input_element,
+    *,
+    room_url: str,
+    approved_identity: dict[str, str],
     status: str,
     message: str,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Restore the original blank composer or report unknown autosaved draft state."""
+    """Restore and reload-prove a blank composer or report unknown draft state."""
 
-    restored = await _restore_composer_value(input_element, "")
+    restored, restoration = await _restore_and_verify_persisted_composer(
+        page,
+        input_element,
+        room_url=room_url,
+        approved_identity=approved_identity,
+    )
     if not restored:
         return {
             "status": "draft_state_unknown",
@@ -632,6 +1345,7 @@ async def _preclick_failure(
             "preclick_failure_status": status,
             "preclick_failure_message": message,
             **(details or {}),
+            "draft_restoration_readback": restoration,
             "composer_restored": False,
             "external_action_taken": True,
         }
@@ -639,12 +1353,16 @@ async def _preclick_failure(
         "status": status,
         "message": message,
         **(details or {}),
+        "draft_restoration_readback": restoration,
         "composer_restored": True,
         "external_action_taken": False,
     }
 
 
-async def _resolve_exact_composer(page) -> tuple[Any | None, Any | None, str | None]:
+async def _resolve_exact_composer(
+    page,
+    expected_room_id: str,
+) -> tuple[Any | None, Any | None, str | None]:
     """Resolve one visible composer and one writable field scoped inside it."""
 
     composers = await _visible_elements(page, _COMPOSER_SELECTOR)
@@ -652,6 +1370,8 @@ async def _resolve_exact_composer(page) -> tuple[Any | None, Any | None, str | N
         return None, None, "The message composers could not be completely enumerated"
     if len(composers) != 1:
         return None, None, "Exactly one visible message composer was not found"
+    if not await _scope_matches_room(composers[0], expected_room_id):
+        return None, None, "The exact message composer was not bound to the approved room"
     inputs = await _visible_elements(composers[0], _COMPOSER_INPUT_SELECTOR)
     if inputs is None:
         return None, None, "The selected composer's writable fields could not be enumerated"
@@ -666,20 +1386,14 @@ async def _resolve_exact_scoped_send(composer) -> tuple[Any | None, str | None]:
     candidates = await _visible_elements(composer, _SCOPED_SEND_CANDIDATE_SELECTOR)
     if candidates is None:
         return None, "The composer's Send controls could not be completely enumerated"
+    if len(candidates) != 1:
+        return None, "Exactly one visible composer-scoped Send candidate was not found"
     exact = []
     for candidate in candidates:
-        try:
-            data_test = (await candidate.get_attribute("data-test") or "").casefold()
-            aria_label = (await candidate.get_attribute("aria-label") or "").strip().casefold()
-            control_type = (await candidate.get_attribute("type") or "").casefold()
-            text = re.sub(r"\s+", " ", (await candidate.text_content() or "")).strip().casefold()
-        except Exception:
+        identity = await _exact_send_control_identity(candidate)
+        if identity is None:
             return None, "A composer-scoped Send candidate could not be completely read"
-        if (
-            data_test in {"send-button", "send-message-button"}
-            or aria_label in {"send", "send message"}
-            or (control_type == "submit" and text in {"send", "send message"})
-        ):
+        if identity:
             exact.append(candidate)
     if len(exact) != 1:
         return None, "Exactly one exact composer-scoped Send control was not found"
@@ -689,6 +1403,117 @@ async def _resolve_exact_scoped_send(composer) -> tuple[Any | None, str | None]:
     except Exception:
         return None, "The exact composer-scoped Send control state could not be read"
     return exact[0], None
+
+
+async def _exact_send_control_identity(candidate) -> bool | None:
+    """Read whether one live control is still exactly the scoped Send action."""
+
+    try:
+        data_test = (await candidate.get_attribute("data-test") or "").casefold()
+        aria_label = (await candidate.get_attribute("aria-label") or "").strip().casefold()
+        control_type = (await candidate.get_attribute("type") or "").casefold()
+        text = re.sub(r"\s+", " ", (await candidate.text_content() or "")).strip().casefold()
+    except Exception:
+        return None
+    return bool(
+        data_test in {"send-button", "send-message-button"}
+        or aria_label in {"send", "send message"}
+        or (control_type == "submit" and text in {"send", "send message"})
+    )
+
+
+async def _install_message_commit_guard(
+    page,
+    *,
+    room_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Install a browser-main-thread mutation barrier before final history readback."""
+
+    token = secrets.token_hex(24)
+    try:
+        result = await page.evaluate(
+            _MESSAGE_COMMIT_GUARD_SCRIPT,
+            {
+                "operation": "install_message_commit_guard",
+                "roomId": room_id,
+                "token": token,
+            },
+        )
+    except Exception:
+        return None, "The atomic room/history commit guard could not be installed"
+    if not isinstance(result, dict) or result.get("status") != "ready":
+        message = result.get("message") if isinstance(result, dict) else None
+        return None, str(message or "The atomic room/history commit guard was unavailable")
+    generation = result.get("generation")
+    event_generation = result.get("eventGeneration")
+    handler_generation = result.get("handlerGeneration")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
+        return None, "The atomic room/history commit guard returned no valid generation"
+    if (
+        not isinstance(event_generation, int)
+        or isinstance(event_generation, bool)
+        or event_generation < 0
+    ):
+        return None, "The atomic room/history commit guard returned no valid event generation"
+    if (
+        not isinstance(handler_generation, int)
+        or isinstance(handler_generation, bool)
+        or handler_generation < 0
+    ):
+        return None, "The atomic room/history commit guard returned no valid handler generation"
+    return {
+        "token": token,
+        "generation": generation,
+        "event_generation": event_generation,
+        "handler_generation": handler_generation,
+    }, None
+
+
+async def _atomic_message_commit(
+    page,
+    *,
+    params: SendMessageParams,
+    history: dict[str, Any],
+    guard: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Validate room/history/composer/Send and dispatch once in one browser task."""
+
+    records = _history_records(history)
+    if records is None:
+        return "rejected", "The final complete message snapshot was unavailable"
+    try:
+        result = await page.evaluate(
+            _ATOMIC_MESSAGE_COMMIT_SCRIPT,
+            {
+                "operation": "atomic_message_commit",
+                "roomUrl": params.room_url,
+                "roomId": params.room_id,
+                "contactName": params.contact_name,
+                "message": params.message,
+                "expectedRecords": records,
+                "token": guard["token"],
+                "generation": guard["generation"],
+                "eventGeneration": guard["event_generation"],
+                "handlerGeneration": guard["handler_generation"],
+            },
+        )
+    except Exception:
+        # The browser task may have dispatched Send before its execution context
+        # or result channel failed. Treat every evaluation exception as an
+        # irreversible unknown and rely only on owner-system readback.
+        return "unknown", "The atomic room/history/Send commit outcome is unknown"
+    if not isinstance(result, dict):
+        return "unknown", "The atomic room/history/Send commit returned no proof"
+    status = result.get("status")
+    message = result.get("message")
+    dispatch_started = result.get("dispatchStarted")
+    if status == "rejected" and dispatch_started is not False:
+        return "unknown", "The atomic room/history/Send rejection lacked pre-dispatch proof"
+    if status in {"clicked", "unknown"} and dispatch_started is not True:
+        return "unknown", "The atomic room/history/Send result lacked dispatch proof"
+    if status not in {"clicked", "rejected", "unknown"}:
+        return "unknown", "The atomic room/history/Send commit returned invalid proof"
+    return status, str(message) if message else None
 
 
 async def send_message(params: SendMessageParams) -> dict:
@@ -749,15 +1574,31 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
             "external_action_taken": False,
         }
 
-    history_before = await _visible_message_history(page)
+    history_before = await _complete_message_history(page, params.room_id)
     if history_before["status"] != "complete":
         return {
             "status": "history_unreadable",
             "message": (
-                "The complete currently rendered message history could not be read; "
+                "The entire owner-system conversation history could not be proved complete; "
                 "nothing was sent."
             ),
             "visible_history_readback": history_before,
+            "external_action_taken": False,
+        }
+    if not _approved_history_matches(params, history_before):
+        return {
+            "status": "message_history_changed_since_approval",
+            "message": (
+                "The complete conversation history differs from the owner-approved snapshot; "
+                "nothing was sent. Review the current room and prepare the message again."
+            ),
+            "approved_history": {
+                "history_snapshot_sha256": params.history_snapshot_sha256,
+                "history_record_count": params.history_record_count,
+                "last_message_identity_sha256": params.last_message_identity_sha256,
+                "history_completeness_proof": params.history_completeness_proof,
+            },
+            "live_history": _message_history_approval(history_before),
             "external_action_taken": False,
         }
 
@@ -781,7 +1622,7 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
 
     matching_before = _exact_own_message_count(history_before, params.message)
 
-    composer, input_el, composer_error = await _resolve_exact_composer(page)
+    composer, input_el, composer_error = await _resolve_exact_composer(page, params.room_id)
     if composer_error or composer is None or input_el is None:
         return {
             "status": "composer_unavailable",
@@ -805,14 +1646,20 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
         await input_el.fill(params.message)
     except Exception:
         return await _preclick_failure(
+            page,
             input_el,
+            room_url=url,
+            approved_identity=approved_identity,
             status="composer_unreadable",
             message="The exact approved copy could not be filled into the bound composer",
         )
     composer_readback = await _read_composer_value(input_el)
     if composer_readback is None or not _same_utf8_bytes(composer_readback, params.message):
         return await _preclick_failure(
+            page,
             input_el,
+            room_url=url,
+            approved_identity=approved_identity,
             status="composer_readback_mismatch",
             message="The bound composer did not read back the approved copy byte-for-byte",
         )
@@ -820,7 +1667,10 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
     rebound_identity, rebound_error = await _current_conversation_identity(page)
     if rebound_identity != approved_identity:
         return await _preclick_failure(
+            page,
             input_el,
+            room_url=url,
+            approved_identity=approved_identity,
             status="live_identity_mismatch",
             message=(
                 "The live conversation or recipient changed after the composer was filled; "
@@ -833,25 +1683,74 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
             },
         )
 
-    send_btn, send_error = await _resolve_exact_scoped_send(composer)
-    if send_error or send_btn is None:
+    # Enumerate the current action surface before the commit barrier, but never retain
+    # this handle for the click. The irreversible control is re-resolved after every
+    # final target/history/composer check below.
+    probed_send, probed_send_error = await _resolve_exact_scoped_send(composer)
+    if probed_send_error or probed_send is None:
         return await _preclick_failure(
+            page,
             input_el,
+            room_url=url,
+            approved_identity=approved_identity,
             status="send_control_unavailable",
-            message=send_error or "The exact composer-scoped Send control was unavailable",
+            message=probed_send_error or "The exact composer-scoped Send control was unavailable",
         )
 
-    # Resolving the action control yields to the live page. Rebind every approved
-    # target and mutable input immediately before the irreversible click so a room
-    # switch or newly rendered inbound/outbound message cannot race the approval.
+    commit_guard, guard_error = await _install_message_commit_guard(
+        page,
+        room_id=params.room_id,
+    )
+    if commit_guard is None:
+        return await _preclick_failure(
+            page,
+            input_el,
+            room_url=url,
+            approved_identity=approved_identity,
+            status="atomic_commit_unavailable",
+            message=guard_error or "The atomic message commit guard was unavailable",
+        )
+
+    # Rebind the exact composer and room first. The complete history snapshot is
+    # deliberately the last page-wide commit check before Send resolution.
+    final_composer, final_input_el, final_composer_error = await _resolve_exact_composer(
+        page,
+        params.room_id,
+    )
+    if final_composer_error or final_composer is None or final_input_el is None:
+        return await _preclick_failure(
+            page,
+            input_el,
+            room_url=url,
+            approved_identity=approved_identity,
+            status="composer_unavailable",
+            message=final_composer_error or "The exact composer changed before Send",
+        )
+    final_composer_readback = await _read_composer_value(final_input_el)
+    if (
+        final_composer_readback is None
+        or not _same_utf8_bytes(final_composer_readback, params.message)
+    ):
+        return await _preclick_failure(
+            page,
+            final_input_el,
+            room_url=url,
+            approved_identity=approved_identity,
+            status="composer_readback_mismatch",
+            message="The approved copy changed before the exact Send control could be clicked",
+        )
+
     final_identity, final_identity_error = await _current_conversation_identity(page)
     if final_identity != approved_identity:
         return await _preclick_failure(
-            input_el,
+            page,
+            final_input_el,
+            room_url=url,
+            approved_identity=approved_identity,
             status="live_identity_mismatch",
             message=(
-                "The live conversation or recipient changed while the Send control was "
-                "resolved; nothing was sent."
+                "The live conversation or recipient changed immediately before Send; "
+                "nothing was sent."
             ),
             details={
                 "identity_read_error": final_identity_error,
@@ -860,20 +1759,26 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
             },
         )
 
-    final_history = await _visible_message_history(page)
+    final_history = await _complete_message_history(page, params.room_id)
     if final_history["status"] != "complete":
         return await _preclick_failure(
-            input_el,
+            page,
+            final_input_el,
+            room_url=url,
+            approved_identity=approved_identity,
             status="history_unreadable",
             message=(
-                "The complete visible message history could not be re-read immediately before "
+                "The complete owner-system history could not be re-read immediately before "
                 "Send; nothing was sent."
             ),
             details={"visible_history_readback": final_history},
         )
     if not _same_complete_visible_history(history_before, final_history):
         return await _preclick_failure(
-            input_el,
+            page,
+            final_input_el,
+            room_url=url,
+            approved_identity=approved_identity,
             status="message_history_changed",
             message=(
                 "The visible message history changed after the composer was filled; nothing was "
@@ -885,39 +1790,33 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
             },
         )
 
-    final_composer_readback = await _read_composer_value(input_el)
-    if (
-        final_composer_readback is None
-        or not _same_utf8_bytes(final_composer_readback, params.message)
-    ):
+    # One browser-main-thread operation now re-resolves the exact room-bound Send
+    # control, proves that the guarded complete history/composer did not mutate,
+    # validates target and copy, and dispatches the action exactly once. No
+    # browser event-loop turn exists between its final validation and dispatch.
+    commit_status, commit_error = await _atomic_message_commit(
+        page,
+        params=params,
+        history=final_history,
+        guard=commit_guard,
+    )
+    if commit_status == "rejected":
         return await _preclick_failure(
-            input_el,
-            status="composer_readback_mismatch",
-            message="The approved copy changed before the exact Send control could be clicked",
+            page,
+            final_input_el,
+            room_url=url,
+            approved_identity=approved_identity,
+            status="atomic_commit_rejected",
+            message=commit_error or "The atomic room/history/Send commit was rejected",
         )
-    try:
-        await send_btn.click()
-    except Exception:
-        return {
-            "status": "unknown",
-            "message": (
-                "The exact Send click did not complete cleanly; inspect Upwork and do not retry "
-                "automatically."
-            ),
-            "owner_system_readback": {
-                "confirmed": False,
-                "conversation_identity": approved_identity,
-                "room_url": str(getattr(page, "url", url)),
-            },
-            "external_action_taken": True,
-        }
+    atomic_click_uncertain = commit_status == "unknown"
 
     # Confirm a *new* matching owner message. A cleared input alone is not proof,
     # and the complete pre-send history prevents an older identical message from
     # being mistaken for the write performed by this call.
     last_history = history_before
     for _ in range(20):
-        last_history = await _visible_message_history(page)
+        last_history = await _complete_message_history(page, params.room_id)
         if last_history["status"] != "complete":
             return {
                 "status": "unknown",
@@ -935,7 +1834,7 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
             }
         matching_after = _exact_own_message_count(last_history, params.message)
         last_record = last_history["messages"][-1] if last_history["messages"] else None
-        input_after_send = await _read_composer_value(input_el)
+        input_after_send = await _read_composer_value(final_input_el)
         exact_new_last_record = bool(
             last_record
             and last_record.get("is_mine") is True
@@ -979,15 +1878,21 @@ async def _send_message_on_page(params: SendMessageParams, page) -> dict:
                     "matching_messages_after": matching_after,
                     "conversation_identity": readback_identity,
                     "room_url": str(getattr(page, "url", url)),
+                    "atomic_click_acknowledged": not atomic_click_uncertain,
                 },
                 "external_action_taken": True,
             }
         await asyncio.sleep(0.5)
 
-    input_value = await _read_composer_value(input_el)
+    input_value = await _read_composer_value(final_input_el)
     return {
         "status": "unknown",
-        "message": "Upwork did not show a new exact-copy message; do not retry automatically.",
+        "message": (
+            "The atomic Send dispatch outcome was uncertain and Upwork did not show a new "
+            "exact-copy message; do not retry automatically."
+            if atomic_click_uncertain
+            else "Upwork did not show a new exact-copy message; do not retry automatically."
+        ),
         "owner_system_readback": {
             "confirmed": False,
             "input_cleared": None if input_value is None else not bool(input_value),

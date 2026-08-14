@@ -40,6 +40,18 @@ class _Field:
         return self.wrong_readback if self.wrong_readback is not None else self.value
 
 
+class _UnrestorableField(_Field):
+    def __init__(self, original: str) -> None:
+        super().__init__()
+        self.value = original
+        self.original = original
+
+    async def fill(self, value: str) -> None:
+        if value == self.original and self.value != self.original:
+            raise RuntimeError("persisted owner draft refused restoration")
+        self.value = value
+
+
 class _Select:
     def __init__(self, *, wrong_readback: str | None = None, visible: bool = True) -> None:
         self.label = ""
@@ -80,6 +92,35 @@ class _HiddenButton(_Button):
         return False
 
 
+class _FadingSubmitButton(_Button):
+    def __init__(self, callback=None) -> None:
+        super().__init__("Submit proposal", callback)
+        self.visible_reads = 0
+
+    async def is_visible(self) -> bool:
+        self.visible_reads += 1
+        return self.visible_reads == 1
+
+
+class _DispatchThenRaiseButton(_Button):
+    def __init__(self) -> None:
+        super().__init__("Submit proposal")
+        self.dispatches = 0
+
+    async def click(self) -> None:
+        self.dispatches += 1
+        raise RuntimeError("browser lost acknowledgement after dispatch")
+
+
+class _FallbackTrackingPage:
+    def __init__(self) -> None:
+        self.evaluate_calls = 0
+
+    async def evaluate(self, *_args, **_kwargs) -> bool:
+        self.evaluate_calls += 1
+        return True
+
+
 class _ControlScope:
     def __init__(self, controls: list[Any]) -> None:
         self.controls = controls
@@ -110,6 +151,9 @@ async def test_final_send_for_connects_ignores_hidden_clone_but_requires_one_vis
     assert await proposals._exact_final_send_control(
         _ControlScope([visible, _Button("Send for 12 Connects")]), 12
     ) is None
+    assert await proposals._exact_final_send_control(
+        _ControlScope([visible, _Button("Send for 99 Connects")]), 12
+    ) is None
 
 
 class _CommitPage:
@@ -123,9 +167,101 @@ class _CommitPage:
         self.increase = None if mismatch == "rate_status" else _Select()
         self.submit_queries = 0
         self.submit_clicks = 0
+        self.reload_count = 0
+        self.on_atomic_submit = None
+        self.atomic_submit_raise_after_dispatch = False
+        self.proposal_event_generation = 0
+        self.proposal_handler_generation = 0
+        self.proposal_guard_callback = None
+        self.proposal_guard_snapshot: tuple[Any, ...] | None = None
+        self.submit_button = _Button(
+            "Submit proposal",
+            lambda: setattr(self, "submit_clicks", self.submit_clicks + 1),
+        )
 
     async def goto(self, url: str, **_kwargs: Any) -> None:
         self.url = url
+
+    async def reload(self, **_kwargs: Any) -> None:
+        self.reload_count += 1
+        self.rate.visible = True
+        self.cover.visible = True
+        self.answer.visible = True
+        self.duration.visible = True
+        if self.increase is not None:
+            self.increase.visible = True
+
+    def _guard_snapshot(self) -> tuple[Any, ...]:
+        return (
+            self.url,
+            self.body,
+            self.rate.value,
+            self.cover.value,
+            self.answer.value,
+            self.duration.label,
+            self.increase.label if self.increase is not None else None,
+            self.submit_button.text,
+        )
+
+    async def evaluate(self, _script: str, args: dict[str, Any]) -> dict[str, Any]:
+        operation = args.get("operation")
+        if operation == "install_proposal_commit_guard":
+            self.proposal_guard_snapshot = self._guard_snapshot()
+            self.proposal_guard_callback = self.submit_button.callback
+            return {
+                "status": "ready",
+                "generation": 0,
+                "eventGeneration": 0,
+                "handlerGeneration": 0,
+            }
+        if operation != "atomic_first_submit":
+            raise AssertionError(f"Unexpected page.evaluate operation: {operation}")
+        if self.on_atomic_submit is not None:
+            callback = self.on_atomic_submit
+            self.on_atomic_submit = None
+            callback()
+        if self.proposal_guard_snapshot != self._guard_snapshot():
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "proposal form mutated",
+            }
+        if self.proposal_event_generation != args["eventGeneration"]:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "proposal input event generation changed",
+            }
+        if self.proposal_handler_generation != args["handlerGeneration"]:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Submit event handler generation changed",
+            }
+        self.submit_queries += 1
+        if not await self.submit_button.is_visible() or not await self.submit_button.is_enabled():
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Submit control not actionable",
+            }
+        if self.submit_button.text != "Submit proposal":
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Submit control identity changed",
+            }
+        if self.submit_button.callback is not self.proposal_guard_callback:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Submit handler changed",
+            }
+        if self.submit_button.callback:
+            self.submit_button.callback()
+        if self.atomic_submit_raise_after_dispatch:
+            raise RuntimeError("execution context failed after dispatch")
+        return {"status": "clicked", "dispatchStarted": True}
 
     async def query_selector(self, selector: str):
         if selector == "body":
@@ -137,12 +273,7 @@ class _CommitPage:
     async def query_selector_all(self, selector: str) -> list[Any]:
         if selector.startswith('button[data-test="submit-proposal"]'):
             self.submit_queries += 1
-            return [
-                _Button(
-                    "Submit proposal",
-                    lambda: setattr(self, "submit_clicks", self.submit_clicks + 1),
-                )
-            ]
+            return [self.submit_button]
         if "hourly-rate-input" in selector:
             return [self.rate]
         if "cover-letter-input" in selector:
@@ -227,7 +358,7 @@ async def test_pre_submit_mismatch_never_queries_submit(
 
     result = await proposals._submit_proposal_on_page(_params(), page)
 
-    assert result["status"] in {"error", "live_form_mismatch"}
+    assert result["status"] in {"error", "live_form_mismatch", "draft_state_unavailable"}
     assert result["external_action_taken"] is False
     assert page.submit_queries == 0
     assert page.submit_clicks == 0
@@ -245,7 +376,7 @@ async def test_hidden_enabled_proposal_input_never_queries_submit(
 
     result = await proposals._submit_proposal_on_page(_params(), page)
 
-    assert result["status"] == "live_form_mismatch"
+    assert result["status"] == "draft_state_unavailable"
     assert result["external_action_taken"] is False
     assert page.submit_queries == 0
     assert page.submit_clicks == 0
@@ -267,8 +398,9 @@ async def test_control_hidden_before_final_readback_never_queries_submit(
     monkeypatch.setattr(proposals, "_select_profile_highlights", hide_control)
     result = await proposals._submit_proposal_on_page(_params(), page)
 
-    assert result["status"] == "live_form_mismatch"
-    assert result["external_action_taken"] is False
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "live_form_mismatch"
+    assert result["external_action_taken"] is True
     assert page.submit_queries == 0
     assert page.submit_clicks == 0
 
@@ -287,7 +419,7 @@ async def test_hidden_enabled_duration_or_increase_never_queries_submit(
 
     result = await proposals._submit_proposal_on_page(_params(), page)
 
-    assert result["status"] in {"error", "live_form_mismatch"}
+    assert result["status"] == "draft_state_unavailable"
     assert result["external_action_taken"] is False
     assert page.submit_queries == 0
     assert page.submit_clicks == 0
@@ -311,8 +443,9 @@ async def test_duration_or_increase_hidden_before_final_readback_never_queries_s
     monkeypatch.setattr(proposals, "_select_profile_highlights", hide_control)
     result = await proposals._submit_proposal_on_page(_params(), page)
 
-    assert result["status"] == "live_form_mismatch"
-    assert result["external_action_taken"] is False
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "live_form_mismatch"
+    assert result["external_action_taken"] is True
     assert page.submit_queries == 0
     assert page.submit_clicks == 0
 
@@ -348,6 +481,293 @@ async def test_silent_cover_reset_after_other_interactions_never_queries_submit(
     assert result["external_action_taken"] is False
     assert page.submit_queries == 0
     assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_preclick_failure_restores_every_field_and_owner_reload_confirms_it(
+    monkeypatch,
+) -> None:
+    page = _CommitPage()
+    page.rate.value = "51"
+    page.cover.value = "Original cover draft"
+    page.answer.value = "Original answer draft"
+    page.duration.label = "Less than 1 month"
+    assert page.increase is not None
+    page.increase.label = "Quarterly"
+    _commercial_inspectors(monkeypatch, changed="fee")
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "live_form_mismatch"
+    assert result["draft_restored"] is True
+    assert result["external_action_taken"] is False
+    assert page.rate.value == "51"
+    assert page.cover.value == "Original cover draft"
+    assert page.answer.value == "Original answer draft"
+    assert page.duration.label == "Less than 1 month"
+    assert page.increase.label == "Quarterly"
+    assert page.reload_count == 1
+    restoration = result["draft_restoration_readback"]
+    assert restoration["owner_reload_completed"] is True
+    assert restoration["identity_confirmed"] is True
+    assert restoration["snapshot_confirmed"] is True
+    assert restoration["original_snapshot_sha256"] == restoration["live_snapshot_sha256"]
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_persisted_proposal_draft_is_terminal_unknown(monkeypatch) -> None:
+    page = _CommitPage()
+    page.cover = _UnrestorableField("Original cover draft")
+    _commercial_inspectors(monkeypatch, changed="fee")
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "live_form_mismatch"
+    assert result["external_action_taken"] is True
+    assert result["draft_restored"] is False
+    assert "do not retry automatically" in result["message"]
+    assert result["draft_restoration_readback"]["owner_reload_completed"] is True
+    assert result["draft_restoration_readback"]["snapshot_confirmed"] is False
+    assert page.cover.value == "Exact approved copy"
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_one_restore_failure_does_not_skip_other_touched_fields(monkeypatch) -> None:
+    page = _CommitPage()
+    page.rate = _UnrestorableField("51")
+    page.cover.value = "Original cover"
+    page.answer.value = "Original answer"
+    page.duration.label = "Less than 1 month"
+    assert page.increase is not None
+    page.increase.label = "Quarterly"
+    _commercial_inspectors(monkeypatch, changed="fee")
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["external_action_taken"] is True
+    assert result["draft_restoration_readback"]["local_restoration"]["price"] is False
+    assert result["draft_restoration_readback"]["local_restoration"]["cover"] is True
+    assert result["draft_restoration_readback"]["local_restoration"]["answers"] is True
+    assert result["draft_restoration_readback"]["local_restoration"]["duration"] is True
+    assert result["draft_restoration_readback"]["local_restoration"]["rate_increase"] is True
+    assert page.cover.value == "Original cover"
+    assert page.answer.value == "Original answer"
+    assert page.duration.label == "Less than 1 month"
+    assert page.increase.label == "Quarterly"
+
+
+@pytest.mark.asyncio
+async def test_unexpected_preclick_exception_still_restores_and_reload_proves_draft(
+    monkeypatch,
+) -> None:
+    page = _CommitPage()
+    page.rate.value = "57"
+    page.cover.value = "Original cover"
+    page.answer.value = "Original answer"
+    _commercial_inspectors(monkeypatch)
+
+    async def raise_during_duration(_page, _duration):
+        raise RuntimeError("detached duration control")
+
+    monkeypatch.setattr(proposals, "_select_duration", raise_during_duration)
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "error"
+    assert result["draft_restored"] is True
+    assert result["external_action_taken"] is False
+    assert page.rate.value == "57"
+    assert page.cover.value == "Original cover"
+    assert page.answer.value == "Original answer"
+    assert page.reload_count == 1
+    assert page.submit_queries == 0
+
+
+@pytest.mark.asyncio
+async def test_first_submit_actionability_failure_restores_entire_draft(monkeypatch) -> None:
+    page = _CommitPage()
+    page.rate.value = "58"
+    page.cover.value = "Original cover"
+    page.answer.value = "Original answer"
+    page.submit_button = _FadingSubmitButton(
+        lambda: setattr(page, "submit_clicks", page.submit_clicks + 1)
+    )
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "submit_control_changed"
+    assert result["draft_restored"] is True
+    assert result["external_action_taken"] is False
+    assert page.rate.value == "58"
+    assert page.cover.value == "Original cover"
+    assert page.answer.value == "Original answer"
+    assert page.reload_count == 1
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_submit_mutation_is_rejected_and_entire_draft_restored(
+    monkeypatch,
+) -> None:
+    page = _CommitPage()
+    page.rate.value = "58"
+    page.cover.value = "Original cover"
+    page.answer.value = "Original answer"
+    wrong_clicks = 0
+
+    def mutate_submit() -> None:
+        page.submit_button.text = "Delete"
+
+        def wrong_action() -> None:
+            nonlocal wrong_clicks
+            wrong_clicks += 1
+
+        page.submit_button.callback = wrong_action
+
+    page.on_atomic_submit = mutate_submit
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "submit_control_changed"
+    assert result["draft_restored"] is True
+    assert result["external_action_taken"] is False
+    assert page.rate.value == "58"
+    assert page.cover.value == "Original cover"
+    assert page.answer.value == "Original answer"
+    assert page.reload_count == 1
+    assert page.submit_clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_programmatic_form_value_race_is_rejected_by_commit_fingerprint(
+    monkeypatch,
+) -> None:
+    page = _CommitPage()
+    page.cover.value = "Original cover"
+    page.on_atomic_submit = lambda: setattr(page.cover, "value", "Programmatic reset")
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "submit_control_changed"
+    assert result["draft_restored"] is True
+    assert result["external_action_taken"] is False
+    assert page.cover.value == "Original cover"
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_proposal_input_event_aba_is_rejected_with_approved_dom_restored(
+    monkeypatch,
+) -> None:
+    page = _CommitPage()
+
+    def event_aba() -> None:
+        page.cover.value = "UNAPPROVED COVER"
+        page.proposal_event_generation += 1
+        page.cover.value = "Exact approved copy"
+
+    page.on_atomic_submit = event_aba
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "submit_control_changed"
+    assert result["external_action_taken"] is False
+    assert result["draft_restored"] is True
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_submit_handler_replacement_is_rejected_without_wrong_dispatch(monkeypatch) -> None:
+    page = _CommitPage()
+    wrong_clicks = 0
+
+    def replace_handler() -> None:
+        def wrong_action() -> None:
+            nonlocal wrong_clicks
+            wrong_clicks += 1
+
+        page.submit_button.callback = wrong_action
+
+    page.on_atomic_submit = replace_handler
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "submit_control_changed"
+    assert result["external_action_taken"] is False
+    assert page.submit_clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_submit_event_listener_replacement_is_rejected_without_wrong_dispatch(
+    monkeypatch,
+) -> None:
+    page = _CommitPage()
+    wrong_clicks = 0
+
+    def replace_listener() -> None:
+        nonlocal wrong_clicks
+        page.proposal_handler_generation += 2
+
+        def wrong_action() -> None:
+            nonlocal wrong_clicks
+            wrong_clicks += 1
+
+        page.submit_button.callback = wrong_action
+
+    page.on_atomic_submit = replace_listener
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "submit_control_changed"
+    assert result["external_action_taken"] is False
+    assert page.submit_clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_submit_evaluation_failure_after_dispatch_is_terminal_unknown(
+    monkeypatch,
+) -> None:
+    page = _CommitPage()
+    page.atomic_submit_raise_after_dispatch = True
+    _commercial_inspectors(monkeypatch)
+
+    async def unconfirmed(*_args, **_kwargs):
+        return {"confirmed": False}
+
+    monkeypatch.setattr(proposals, "_proposal_confirmation", unconfirmed)
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "unknown"
+    assert result["external_action_taken"] is True
+    assert result["boost_spend_verified"] is False
+    assert page.submit_clicks == 1
+    assert page.reload_count == 0
+
+
+@pytest.mark.asyncio
+async def test_native_click_that_dispatches_then_raises_is_never_retried() -> None:
+    page = _FallbackTrackingPage()
+    button = _DispatchThenRaiseButton()
+
+    with pytest.raises(proposals._ClickOutcomeUnknown):
+        await proposals._click(page, button)
+
+    assert button.dispatches == 1
+    assert page.evaluate_calls == 0
 
 
 @pytest.mark.asyncio
@@ -387,7 +807,7 @@ async def test_missing_required_highlight_tab_never_queries_submit(monkeypatch) 
         _params(profile_highlights=["Family Law Growth"]),
         page,
     )
-    assert result["status"] == "live_form_mismatch"
+    assert result["status"] == "draft_state_unavailable"
     assert page.submit_queries == 0
 
 
@@ -429,12 +849,15 @@ class _BoostDialog(_Text):
         boost_readback: str | None = None,
         choice: _Choice | None = None,
         send_label: str = "Send for 12 Connects",
+        extra_send_labels: list[str] | None = None,
     ) -> None:
         super().__init__("Boost your proposal with Connects")
         self.boost = _Field(wrong_readback=boost_readback)
         self.choice = choice
+        self.positive_selected = False
         self.send_queries = 0
         self.send = _Button(send_label)
+        self.extra_sends = [_Button(label) for label in (extra_send_labels or [])]
 
     async def is_visible(self) -> bool:
         return True
@@ -446,16 +869,89 @@ class _BoostDialog(_Text):
             return [self.choice] if self.choice else []
         if selector == "button":
             self.send_queries += 1
-            return [self.send]
+            return [self.send, *self.extra_sends]
         return []
 
 
 class _BoostPage:
     def __init__(self, dialog: _BoostDialog) -> None:
         self.dialog = dialog
+        self.on_atomic_final_send = None
+        self.raise_after_final_send = False
+        self.final_send_event_generation = 0
+        self.final_send_handler_generation = 0
+        self.final_send_guard_snapshot: tuple[Any, ...] | None = None
+        self.final_send_guard_callback = None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
         return [self.dialog] if selector == '[role="dialog"]' else []
+
+    async def evaluate(self, _script: str, args: dict[str, Any]) -> dict[str, Any]:
+        operation = args.get("operation")
+        if operation == "install_final_send_commit_guard":
+            self.final_send_guard_snapshot = (
+                self.dialog.choice.selected if self.dialog.choice else None,
+                self.dialog.positive_selected,
+                self.dialog.send.text,
+                tuple(item.text for item in self.dialog.extra_sends),
+            )
+            self.final_send_guard_callback = self.dialog.send.callback
+            return {
+                "status": "ready",
+                "generation": 0,
+                "eventGeneration": 0,
+                "handlerGeneration": 0,
+            }
+        if operation != "atomic_final_send":
+            raise AssertionError("Unexpected atomic operation")
+        if self.on_atomic_final_send is not None:
+            callback = self.on_atomic_final_send
+            self.on_atomic_final_send = None
+            callback()
+        current_snapshot = (
+            self.dialog.choice.selected if self.dialog.choice else None,
+            self.dialog.positive_selected,
+            self.dialog.send.text,
+            tuple(item.text for item in self.dialog.extra_sends),
+        )
+        if (
+            current_snapshot != self.final_send_guard_snapshot
+            or self.final_send_event_generation != args["eventGeneration"]
+            or self.final_send_handler_generation != args["handlerGeneration"]
+        ):
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "final boost dialog changed",
+            }
+        if (
+            self.dialog.choice is None
+            or not self.dialog.choice.selected
+            or self.dialog.positive_selected
+        ):
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "no-boost state changed",
+            }
+        send_labels = [self.dialog.send.text, *(item.text for item in self.dialog.extra_sends)]
+        if send_labels != [f'Send for {args["baseConnects"]} Connects']:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "approved cost changed",
+            }
+        if self.dialog.send.callback is not self.final_send_guard_callback:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "final Send handler changed",
+            }
+        if self.dialog.send.callback:
+            self.dialog.send.callback()
+        if self.raise_after_final_send:
+            raise RuntimeError("execution context failed after dispatch")
+        return {"status": "clicked", "dispatchStarted": True}
 
 
 @pytest.mark.asyncio
@@ -480,8 +976,8 @@ async def test_boost_mismatch_never_queries_final_send(
 @pytest.mark.asyncio
 async def test_explicit_no_boost_is_read_back_before_exact_cost_scoped_send() -> None:
     unboosted = _BoostDialog(choice=_Choice())
-    send, error = await proposals._configure_boost_step(_BoostPage(unboosted), 0, 12)
-    assert (send, error) == (unboosted.send, None)
+    guard, error = await proposals._configure_boost_step(_BoostPage(unboosted), 0, 12)
+    assert guard is not None and error is None
     assert unboosted.choice and unboosted.choice.selected is True
 
     wrong_cost = _BoostDialog(choice=_Choice(), send_label="Send for 999 Connects")
@@ -507,6 +1003,190 @@ async def test_hidden_enabled_no_boost_control_never_reaches_final_send() -> Non
     assert error and "no-boost control" in error
     assert hidden_choice.selected is False
     assert dialog.send_queries == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_final_send_revalidates_no_boost_and_cost_before_one_dispatch() -> None:
+    clicks = 0
+
+    def sent() -> None:
+        nonlocal clicks
+        clicks += 1
+
+    dialog = _BoostDialog(choice=_Choice())
+    dialog.send.callback = sent
+    page = _BoostPage(dialog)
+    guard, error = await proposals._configure_boost_step(page, 0, 12)
+    assert guard is not None and error is None
+
+    status, click_error = await proposals._atomic_click_final_send(page, _params(), guard)
+
+    assert (status, click_error) == ("clicked", None)
+    assert clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_atomic_final_send_rejects_positive_boost_race_without_dispatch() -> None:
+    clicks = 0
+
+    def sent() -> None:
+        nonlocal clicks
+        clicks += 1
+
+    dialog = _BoostDialog(choice=_Choice())
+    dialog.send.callback = sent
+    page = _BoostPage(dialog)
+    guard, error = await proposals._configure_boost_step(page, 0, 12)
+    assert guard is not None and error is None
+    page.on_atomic_final_send = lambda: setattr(dialog, "positive_selected", True)
+
+    status, click_error = await proposals._atomic_click_final_send(page, _params(), guard)
+
+    assert status == "rejected"
+    assert click_error and "dialog" in click_error
+    assert clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_final_boost_event_aba_is_rejected_with_no_boost_dom_restored() -> None:
+    clicks = 0
+
+    def sent() -> None:
+        nonlocal clicks
+        clicks += 1
+
+    dialog = _BoostDialog(choice=_Choice())
+    dialog.send.callback = sent
+    page = _BoostPage(dialog)
+    guard, error = await proposals._configure_boost_step(page, 0, 12)
+    assert guard is not None and error is None
+
+    def boost_event_aba() -> None:
+        assert dialog.choice is not None
+        dialog.choice.selected = False
+        dialog.positive_selected = True
+        page.final_send_event_generation += 1
+        dialog.choice.selected = True
+        dialog.positive_selected = False
+
+    page.on_atomic_final_send = boost_event_aba
+
+    status, click_error = await proposals._atomic_click_final_send(page, _params(), guard)
+
+    assert status == "rejected"
+    assert click_error and "dialog" in click_error
+    assert clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_final_send_handler_replacement_is_rejected_without_wrong_dispatch() -> None:
+    clicks = 0
+    wrong_clicks = 0
+
+    def sent() -> None:
+        nonlocal clicks
+        clicks += 1
+
+    dialog = _BoostDialog(choice=_Choice())
+    dialog.send.callback = sent
+    page = _BoostPage(dialog)
+    guard, error = await proposals._configure_boost_step(page, 0, 12)
+    assert guard is not None and error is None
+
+    def replace_handler() -> None:
+        def wrong_action() -> None:
+            nonlocal wrong_clicks
+            wrong_clicks += 1
+
+        dialog.send.callback = wrong_action
+
+    page.on_atomic_final_send = replace_handler
+    status, click_error = await proposals._atomic_click_final_send(page, _params(), guard)
+
+    assert status == "rejected"
+    assert click_error and "handler" in click_error
+    assert clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_final_send_listener_replacement_is_rejected_without_wrong_dispatch() -> None:
+    clicks = 0
+    wrong_clicks = 0
+
+    def sent() -> None:
+        nonlocal clicks
+        clicks += 1
+
+    dialog = _BoostDialog(choice=_Choice())
+    dialog.send.callback = sent
+    page = _BoostPage(dialog)
+    guard, error = await proposals._configure_boost_step(page, 0, 12)
+    assert guard is not None and error is None
+
+    def replace_listener() -> None:
+        nonlocal wrong_clicks
+        page.final_send_handler_generation += 2
+
+        def wrong_action() -> None:
+            nonlocal wrong_clicks
+            wrong_clicks += 1
+
+        dialog.send.callback = wrong_action
+
+    page.on_atomic_final_send = replace_listener
+    status, click_error = await proposals._atomic_click_final_send(page, _params(), guard)
+
+    assert status == "rejected"
+    assert click_error and "dialog" in click_error
+    assert clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_final_send_rejects_second_wrong_cost_send_without_dispatch() -> None:
+    clicks = 0
+
+    def sent() -> None:
+        nonlocal clicks
+        clicks += 1
+
+    dialog = _BoostDialog(choice=_Choice())
+    dialog.send.callback = sent
+    page = _BoostPage(dialog)
+    guard, error = await proposals._configure_boost_step(page, 0, 12)
+    assert guard is not None and error is None
+    page.on_atomic_final_send = lambda: dialog.extra_sends.append(
+        _Button("Send for 99 Connects")
+    )
+
+    status, click_error = await proposals._atomic_click_final_send(page, _params(), guard)
+
+    assert status == "rejected"
+    assert click_error and "dialog" in click_error
+    assert clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_final_send_evaluation_failure_is_unknown_after_one_dispatch() -> None:
+    clicks = 0
+
+    def sent() -> None:
+        nonlocal clicks
+        clicks += 1
+
+    dialog = _BoostDialog(choice=_Choice())
+    dialog.send.callback = sent
+    page = _BoostPage(dialog)
+    guard, error = await proposals._configure_boost_step(page, 0, 12)
+    assert guard is not None and error is None
+    page.raise_after_final_send = True
+
+    status, click_error = await proposals._atomic_click_final_send(page, _params(), guard)
+
+    assert status == "unknown"
+    assert click_error and "unknown" in click_error
+    assert clicks == 1
 
 
 @pytest.mark.asyncio
@@ -559,8 +1239,8 @@ class _HighlightButton(_Button):
         self.selected = selected
 
     async def click(self) -> None:
-        self.selected = True
-        self.text = "Selected"
+        self.selected = not self.selected
+        self.text = "Selected" if self.selected else "Select highlight"
 
     async def evaluate(self, _script: str) -> str:
         return self.title
@@ -674,6 +1354,28 @@ async def test_highlights_use_exact_titles_and_verify_exact_selected_set() -> No
     )
     assert (ok, error) == (True, None)
     assert page.options["portfolio"][0].selected is True
+
+
+@pytest.mark.asyncio
+async def test_profile_highlight_snapshot_restores_original_selected_set() -> None:
+    selected = _HighlightButton("Family Law Growth")
+    page = _HighlightPage(
+        {
+            "portfolio": [selected],
+            "certifications": [],
+            "upwork_jobs": [],
+        }
+    )
+    snapshot, error = await proposals._capture_profile_highlight_state(page)
+    assert error is None
+    assert snapshot is not None
+    assert snapshot["selected"] == []
+
+    assert await proposals._select_profile_highlights(page, ["Family Law Growth"]) == (True, None)
+    assert selected.selected is True
+    assert await proposals._restore_profile_highlight_state(page, snapshot) is True
+    assert selected.selected is False
+    assert page.save_clicks == 2
 
 
 @pytest.mark.asyncio

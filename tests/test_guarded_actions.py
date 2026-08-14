@@ -18,6 +18,46 @@ def _browser_must_not_open() -> None:
     raise AssertionError("browser access happened before approval")
 
 
+def _history_binding(
+    records: list[tuple[str, bool]] | None = None,
+) -> dict[str, Any]:
+    canonical_records = [
+        {
+            "identity": f'data-message-id:{messages._sha256_json({"content": content, "is_mine": is_mine})[:24]}',
+            "content": content,
+            "is_mine": is_mine,
+        }
+        for content, is_mine in (records or [])
+    ]
+    binding = messages._message_history_approval(
+        {
+            "status": "complete",
+            "completeness_proof": "exact_owner_complete_boundary",
+            "messages": canonical_records,
+            "rendered_record_count": len(canonical_records),
+        }
+    )
+    assert binding is not None
+    return binding
+
+
+def _bound_message_params(
+    *,
+    room_url: str = "https://www.upwork.com/nx/messages/room-1234567",
+    room_id: str = "room-1234567",
+    contact_name: str = "Alex Client",
+    message: str = "Exact approved message",
+    records: list[tuple[str, bool]] | None = None,
+) -> messages.SendMessageParams:
+    return messages.SendMessageParams(
+        room_url=room_url,
+        room_id=room_id,
+        contact_name=contact_name,
+        message=message,
+        **_history_binding(records),
+    )
+
+
 def _approved_once(model, payload: dict[str, Any], monkeypatch, state_dir):
     monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(state_dir))
     action_type = {
@@ -119,6 +159,7 @@ def test_message_accepts_only_observed_individual_room_forms(url: str, room_id: 
         room_id=room_id,
         contact_name="Alex Client",
         message="Exact copy",
+        **_history_binding(),
     )
     assert params.room_id == room_id
 
@@ -145,6 +186,7 @@ def test_message_rejects_indexes_subroutes_and_query_bypass(url: str) -> None:
             room_id="abc123456789",
             contact_name="Alex Client",
             message="Exact copy",
+            **_history_binding(),
         )
 
 
@@ -195,6 +237,7 @@ def test_all_action_ids_must_match_their_exact_routes() -> None:
             room_id="different",
             contact_name="Alex Client",
             message="Exact copy",
+            **_history_binding(),
         )
 
 
@@ -319,12 +362,7 @@ async def test_legacy_digest_cannot_authorize_withdrawal(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_message_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(messages, "get_browser", _browser_must_not_open)
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
 
     prepared = await messages.send_message(params)
     assert prepared["status"] == "approval_required"
@@ -404,6 +442,25 @@ class _Button(_TextElement):
         return self.attributes.get(name)
 
 
+class _MutatingSendButton(_Button):
+    """Change action identity after final resolution but before native click."""
+
+    def __init__(self, callback: Callable[[], None]) -> None:
+        super().__init__(
+            callback,
+            "Send",
+            attributes={"data-test": "send-button", "type": "submit"},
+        )
+        self.enabled_reads = 0
+
+    async def is_enabled(self) -> bool:
+        self.enabled_reads += 1
+        if self.enabled_reads == 3:
+            self.text = "Delete"
+            self.attributes = {"data-test": "delete-button", "type": "button"}
+        return True
+
+
 class _HighlightOption(_TextElement):
     def __init__(self, title: str | None) -> None:
         super().__init__("Select highlight")
@@ -444,6 +501,9 @@ class _Input(_TextElement):
         self.corrupt_readback = False
         self.fail_restore = False
         self.press_count = 0
+        self.input_reads = 0
+        self.trigger_read_number: int | None = None
+        self.on_triggered_read: Callable[[], None] | None = None
 
     async def fill(self, value: str) -> None:
         if not value and self.value and self.fail_restore:
@@ -455,6 +515,14 @@ class _Input(_TextElement):
         self.value = ""
 
     async def input_value(self) -> str:
+        self.input_reads += 1
+        if (
+            self.trigger_read_number == self.input_reads
+            and self.on_triggered_read is not None
+        ):
+            callback = self.on_triggered_read
+            self.on_triggered_read = None
+            callback()
         return f"{self.value} " if self.corrupt_readback and self.value else self.value
 
 
@@ -463,17 +531,71 @@ class _MessageElement(_TextElement):
         super().__init__(content)
         self.content = content
         self.is_mine = is_mine
+        self.message_id = messages._sha256_json(
+            {"content": content, "is_mine": is_mine}
+        )[:24]
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-message-id":
+            return self.message_id
+        return None
 
     async def query_selector(self, selector: str):
         if any(part in selector for part in ('[data-test="content"]', ".content", ".message-text", "p")):
             return _TextElement(self.content)
         if self.is_mine and any(part in selector for part in (".my-message", '[data-test="my-message"]', ".sent")):
             return _TextElement()
+        if not self.is_mine and any(
+            part in selector
+            for part in (
+                ".their-message",
+                '[data-test="other-message"]',
+                '[data-test="received-message"]',
+                ".received",
+                ".incoming",
+            )
+        ):
+            return _TextElement()
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
         if selector == '[data-test="content"]':
             return [_TextElement(self.content)]
+        return []
+
+
+class _HistoryBoundary(_TextElement):
+    def __init__(self, page: _MessagePage) -> None:
+        super().__init__()
+        self.page = page
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-history-complete":
+            return "true"
+        if name == "data-message-count":
+            return str(len(self.page.messages))
+        return None
+
+
+class _MessageHistoryScope(_TextElement):
+    def __init__(self, page: _MessagePage) -> None:
+        super().__init__()
+        self.page = page
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-room-id":
+            return "room-1234567"
+        if name == "data-virtualized" and self.page.history_root_virtualized:
+            return "true"
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == messages._MESSAGE_RECORD_SELECTOR:
+            return self.page.messages
+        if selector == messages._HISTORY_INCOMPLETE_SELECTOR:
+            return [_TextElement()] if self.page.history_virtualized else []
+        if selector == messages._HISTORY_COMPLETE_BOUNDARY_SELECTOR:
+            return [self.page.history_boundary] if self.page.history_complete else []
         return []
 
 
@@ -515,6 +637,11 @@ class _MessageComposer(_TextElement):
             attributes={"data-test": "send-button", "type": "submit"},
         )
 
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-room-id":
+            return "room-1234567"
+        return None
+
     async def query_selector_all(self, selector: str) -> list[Any]:
         if selector == messages._COMPOSER_INPUT_SELECTOR:
             self.page.action_controls_queried += 1
@@ -536,6 +663,10 @@ class _MessagePage:
         contact_name: str = "Alex Client",
         composer_count: int = 1,
         scoped_send_available: bool = True,
+        history_complete: bool = True,
+        history_virtualized: bool = False,
+        history_root_virtualized: bool = False,
+        page_wide_history_boundary: bool = False,
     ) -> None:
         self.url = "https://www.upwork.com/nx/messages/room-1234567"
         self.contact_name = contact_name
@@ -545,17 +676,118 @@ class _MessagePage:
         self.messages: list[_MessageElement] = []
         self.input = _Input()
         self.scoped_send_available = scoped_send_available
+        self.history_complete = history_complete
+        self.history_virtualized = history_virtualized
+        self.history_root_virtualized = history_root_virtualized
+        self.page_wide_history_boundary = page_wide_history_boundary
         self.on_send_resolution: Callable[[], None] | None = None
+        self.on_atomic_message_commit: Callable[[], None] | None = None
+        self.atomic_message_raise_after_dispatch = False
+        self.message_event_generation = 0
+        self.message_handler_generation = 0
+        self.message_commit_guard_snapshot: tuple[Any, ...] | None = None
         self.composers = [_MessageComposer(self) for _ in range(composer_count)]
+        self.history_boundary = _HistoryBoundary(self)
+        self.history_scope = _MessageHistoryScope(self)
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
+
+    async def wait_for_timeout(self, _milliseconds: int) -> None:
+        return None
+
+    def _message_snapshot(self) -> tuple[Any, ...]:
+        return (
+            tuple(
+                (item.message_id, item.content, item.is_mine)
+                for item in self.messages
+            ),
+            self.input.value,
+            self.contact_name,
+            self.url,
+        )
+
+    async def evaluate(self, _script: str, args: dict[str, Any]) -> dict[str, Any]:
+        operation = args.get("operation")
+        if operation == "install_message_commit_guard":
+            if len(self.composers) != 1 or not self.history_complete:
+                return {"status": "rejected", "message": "guard scope unavailable"}
+            self.message_commit_guard_snapshot = self._message_snapshot()
+            return {
+                "status": "ready",
+                "generation": 0,
+                "eventGeneration": 0,
+                "handlerGeneration": 0,
+            }
+        if operation != "atomic_message_commit":
+            raise AssertionError(f"Unexpected page.evaluate operation: {operation}")
+        if self.on_atomic_message_commit is not None:
+            callback = self.on_atomic_message_commit
+            self.on_atomic_message_commit = None
+            callback()
+        if self.message_commit_guard_snapshot != self._message_snapshot():
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "The room history or composer mutated during final readback",
+            }
+        if self.message_event_generation != args["eventGeneration"]:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "composer input event generation changed",
+            }
+        if self.message_handler_generation != args["handlerGeneration"]:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Send event handler generation changed",
+            }
+        expected = [
+            (record["identity"].split(":", 1)[1], record["content"], record["is_mine"])
+            for record in args["expectedRecords"]
+        ]
+        actual = [(item.message_id, item.content, item.is_mine) for item in self.messages]
+        if expected != actual:
+            return {"status": "rejected", "dispatchStarted": False, "message": "history changed"}
+        if (
+            self.url.rstrip("/") != str(args["roomUrl"]).rstrip("/")
+            or self.contact_name != args["contactName"]
+            or len(self.composers) != 1
+            or self.input.value != args["message"]
+        ):
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "target or composer changed",
+            }
+        button = self.composers[0].send_button
+        data_test = button.attributes.get("data-test", "")
+        if button.text not in {"Send", "Send message"} or data_test not in {
+            "send-button",
+            "send-message-button",
+        }:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Send identity changed",
+            }
+        button.callback()
+        if self.atomic_message_raise_after_dispatch:
+            raise RuntimeError("execution context failed after dispatch")
+        return {"status": "clicked", "dispatchStarted": True}
 
     async def query_selector_all(self, selector: str) -> list[Any]:
         if selector == messages._ROOM_CONTACT_SELECTOR:
             return [_TextElement(self.contact_name)]
         if selector == messages._MESSAGE_RECORD_SELECTOR:
             return self.messages
+        if selector == messages._MESSAGE_HISTORY_CONTAINER_SELECTOR:
+            return [self.history_scope]
+        if selector == messages._HISTORY_INCOMPLETE_SELECTOR:
+            return [_TextElement()] if self.history_virtualized else []
+        if selector == messages._HISTORY_COMPLETE_BOUNDARY_SELECTOR:
+            return [self.history_boundary] if self.page_wide_history_boundary else []
         if selector == messages._COMPOSER_SELECTOR:
             self.action_controls_queried += 1
             return self.composers
@@ -576,6 +808,18 @@ class _MessagePage:
 
             return _Button(send)
         return None
+
+
+class _PersistedDraftMessagePage(_MessagePage):
+    def __init__(self) -> None:
+        super().__init__(scoped_send_available=False)
+        self.goto_count = 0
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.goto_count += 1
+        self.url = url
+        if self.goto_count > 1:
+            self.input.value = "Exact approved message"
 
 
 class _ProposalPage:
@@ -682,12 +926,7 @@ async def test_conversation_list_extraction_rejects_query_room_bypass() -> None:
 async def test_approved_message_requires_exact_owner_system_readback(monkeypatch, tmp_path) -> None:
     page = _MessagePage()
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
     params = _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
 
     result = await messages.send_message(params)
@@ -705,6 +944,99 @@ async def test_approved_message_requires_exact_owner_system_readback(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_new_inbound_after_preparation_invalidates_exact_history_approval(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage()
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    prepared = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+    assert prepared["valid"] is True
+    action = prepared["prepared_action"]
+    assert action is not None
+    approve_action(
+        action["action_id"],
+        action["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    page.messages.append(_MessageElement("A new inbound after approval", is_mine=False))
+    params = messages.SendMessageParams(
+        **prepared["exact_message"],
+        action_id=action["action_id"],
+    )
+
+    result = await messages.send_message(params)
+
+    assert result["status"] == "message_history_changed_since_approval"
+    assert result["external_action_taken"] is False
+    assert page.send_clicks == 0
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+async def test_virtualized_history_cannot_create_message_approval(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(history_virtualized=True)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert result["history_approval"] is None
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_root_virtualized_history_container_fails_closed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(history_root_virtualized=True)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "virtualized" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_page_wide_complete_boundary_spoof_cannot_authorize_message(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(
+        history_complete=False,
+        page_wide_history_boundary=True,
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
 async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_history(
     monkeypatch,
     tmp_path,
@@ -715,11 +1047,11 @@ async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_hist
         _MessageElement("A newer different message", is_mine=True),
     ]
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
+    params = _bound_message_params(
+        records=[
+            ("Exact approved message", True),
+            ("A newer different message", True),
+        ]
     )
 
     result = await messages.send_message(
@@ -740,11 +1072,9 @@ async def test_approved_message_does_not_treat_matching_inbound_copy_as_our_dupl
     page = _MessagePage()
     page.messages = [_MessageElement("Thanks!", is_mine=False)]
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
+    params = _bound_message_params(
         message="Thanks!",
+        records=[("Thanks!", False)],
     )
 
     result = await messages.send_message(
@@ -762,12 +1092,7 @@ async def test_approved_message_requires_byte_exact_duplicate_before_blocking(
     page = _MessagePage()
     page.messages = [_MessageElement("Exact approved message ", is_mine=True)]
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params(records=[("Exact approved message ", True)])
 
     result = await messages.send_message(
         _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
@@ -782,6 +1107,20 @@ class _UnreadableMessageElement(_MessageElement):
         raise RuntimeError("detached")
 
 
+class _AmbiguousBodyMessageElement(_MessageElement):
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == '[data-test="content"]':
+            return [_TextElement("Approved-looking body")]
+        if selector == ".message-text":
+            return [_TextElement("Different competing body")]
+        return []
+
+
+class _IdentitylessMessageElement(_MessageElement):
+    async def get_attribute(self, _name: str) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
     monkeypatch,
@@ -790,12 +1129,7 @@ async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
     page = _MessagePage()
     page.messages = [_UnreadableMessageElement("Unreadable", is_mine=True)]
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params(records=[("Unreadable", True)])
 
     result = await messages.send_message(
         _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
@@ -808,17 +1142,69 @@ async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
 
 
 @pytest.mark.asyncio
+async def test_message_history_without_owner_record_identity_fails_closed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.messages = [_IdentitylessMessageElement("No stable identity", is_mine=False)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "identity" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_owner_message_identity_fails_closed(monkeypatch, tmp_path) -> None:
+    page = _MessagePage()
+    page.messages = [
+        _MessageElement("Repeated owner record", is_mine=False),
+        _MessageElement("Repeated owner record", is_mine=False),
+    ]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "duplicate" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_competing_visible_message_bodies_fail_closed(monkeypatch, tmp_path) -> None:
+    page = _MessagePage()
+    page.messages = [_AmbiguousBodyMessageElement("Ignored", is_mine=False)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "competing body" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
 async def test_approved_message_never_uses_page_send_or_enter_fallback(
     monkeypatch, tmp_path
 ) -> None:
     page = _MessagePage(scoped_send_available=False)
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
 
     result = await messages.send_message(
         _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
@@ -834,15 +1220,170 @@ async def test_approved_message_never_uses_page_send_or_enter_fallback(
 
 
 @pytest.mark.asyncio
+async def test_exact_send_identity_is_revalidated_after_final_resolution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    wrong_clicks = 0
+
+    def wrong_action() -> None:
+        nonlocal wrong_clicks
+        wrong_clicks += 1
+
+    page.composers[0].send_button = _Button(
+        wrong_action,
+        "Send",
+        attributes={"data-test": "send-button", "type": "submit"},
+    )
+    page.on_atomic_message_commit = lambda: (
+        setattr(page.composers[0].send_button, "text", "Delete"),
+        setattr(
+            page.composers[0].send_button,
+            "attributes",
+            {"data-test": "delete-button", "type": "button"},
+        ),
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert result["draft_restoration_readback"]["persisted_composer_cleared"] is True
+    assert page.send_clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_inbound_during_atomic_send_resolution_is_rejected_before_click(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.on_atomic_message_commit = lambda: page.messages.append(
+        _MessageElement("Inbound after final history barrier", is_mine=False)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.send_clicks == 0
+    assert page.messages[-1].content == "Inbound after final history barrier"
+
+
+@pytest.mark.asyncio
+async def test_atomic_message_evaluation_failure_after_dispatch_uses_owner_readback(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.atomic_message_raise_after_dispatch = True
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "sent"
+    assert result["external_action_taken"] is True
+    assert result["owner_system_readback"]["atomic_click_acknowledged"] is False
+    assert page.send_clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_message_input_event_aba_is_rejected_even_when_dom_value_is_restored(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+
+    def event_aba() -> None:
+        page.input.value = "UNAPPROVED MESSAGE"
+        page.message_event_generation += 1
+        page.input.value = "Exact approved message"
+
+    page.on_atomic_message_commit = event_aba
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_message_listener_replacement_is_rejected_without_wrong_dispatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    wrong_clicks = 0
+
+    def replace_listener() -> None:
+        nonlocal wrong_clicks
+        page.message_handler_generation += 2
+
+        def wrong_action() -> None:
+            nonlocal wrong_clicks
+            wrong_clicks += 1
+
+        page.composers[0].send_button.callback = wrong_action
+
+    page.on_atomic_message_commit = replace_listener
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert page.send_clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_locally_cleared_but_persisted_message_draft_is_terminal_unknown(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _PersistedDraftMessagePage()
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "send_control_unavailable"
+    assert result["external_action_taken"] is True
+    assert result["draft_restoration_readback"]["local_composer_cleared"] is True
+    assert result["draft_restoration_readback"]["persisted_composer_cleared"] is False
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
 async def test_approved_message_requires_one_exact_visible_composer(monkeypatch, tmp_path) -> None:
     page = _MessagePage(composer_count=2)
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
 
     result = await messages.send_message(
         _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
@@ -861,12 +1402,7 @@ async def test_approved_message_requires_byte_exact_composer_readback(
     page = _MessagePage()
     page.input.corrupt_readback = True
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
 
     result = await messages.send_message(
         _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
@@ -899,12 +1435,7 @@ async def test_approved_message_stops_if_history_changes_during_send_resolution(
         _MessageElement(new_content, is_mine=is_mine)
     )
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
 
     result = await messages.send_message(
         _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
@@ -914,6 +1445,29 @@ async def test_approved_message_stops_if_history_changes_during_send_resolution(
     assert result["external_action_taken"] is False
     assert result["composer_restored"] is True
     assert page.input.value == ""
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_inbound_during_final_composer_read_is_caught_by_last_history_barrier(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.input.trigger_read_number = 3
+    page.input.on_triggered_read = lambda: page.messages.append(
+        _MessageElement("Inbound during final composer read", is_mine=False)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "message_history_changed"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
     assert page.send_clicks == 0
 
 
@@ -929,12 +1483,7 @@ async def test_unrestorable_history_race_draft_is_terminal_and_action_remains_on
         _MessageElement("A new inbound message", is_mine=False)
     )
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
     payload = messages.message_payload(params)
     prepared = prepare_action("message", payload)
     approve_action(
@@ -974,20 +1523,18 @@ async def test_approved_message_stops_if_identity_changes_during_send_resolution
 
     page.on_send_resolution = change_identity
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
 
     result = await messages.send_message(
         _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
-    assert result["status"] == "live_identity_mismatch"
-    assert result["external_action_taken"] is False
-    assert result["composer_restored"] is True
+    expected_status = "draft_state_unknown" if changed_field == "contact" else "live_identity_mismatch"
+    assert result["status"] == expected_status
+    if changed_field == "contact":
+        assert result["preclick_failure_status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is (changed_field == "contact")
+    assert result["composer_restored"] is (changed_field == "room")
     assert page.input.value == ""
     assert page.send_clicks == 0
 
@@ -1000,12 +1547,7 @@ async def test_unrestorable_preclick_draft_is_terminal_and_action_remains_one_sh
     page = _MessagePage(scoped_send_available=False)
     page.input.fail_restore = True
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
     payload = messages.message_payload(params)
     prepared = prepare_action("message", payload)
     approve_action(
@@ -1032,12 +1574,7 @@ async def test_approved_message_stops_if_live_recipient_changed(monkeypatch, tmp
     monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
     page = _MessagePage(contact_name="Different Client")
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
     payload = messages.message_payload(params)
     prepared = prepare_action("message", payload)
     approve_action(

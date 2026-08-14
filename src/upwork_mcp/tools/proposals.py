@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import re
+import secrets
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
@@ -69,6 +70,512 @@ _SUBMITTED_PROPOSAL_TITLE_SELECTOR = '[data-test="job-title"], .job-title'
 _SUBMITTED_PROPOSAL_STATUS_SELECTOR = (
     '[data-test="proposal-status"], .proposal-status, [data-test*="proposal-status"]'
 )
+
+_PROPOSAL_COMMIT_GUARD_SCRIPT = r"""
+(args) => {
+  const visible = (element) => {
+    if (!(element instanceof Element) || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" &&
+      rect.width > 0 && rect.height > 0;
+  };
+  const normalized = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const coverSelector = 'textarea[data-test="cover-letter-input"], ' +
+    '[data-test="cover-letter-input"] textarea, textarea[name="coverLetter"]';
+  const formFingerprint = (root) => JSON.stringify(
+    Array.from(root.querySelectorAll('input, textarea, select, button, [contenteditable="true"]'))
+      .map((control, ordinal) => ({
+        ordinal,
+        tag: control.tagName,
+        type: control.getAttribute("type") || "",
+        name: control.getAttribute("name") || "",
+        id: control.id || "",
+        dataTest: control.getAttribute("data-test") || "",
+        value: "value" in control ? String(control.value) : "",
+        checked: "checked" in control ? Boolean(control.checked) : null,
+        selectedIndex: "selectedIndex" in control ? control.selectedIndex : null,
+        selectedValues: control instanceof HTMLSelectElement ?
+          Array.from(control.selectedOptions).map((option) => option.value) : [],
+        text: control.isContentEditable || control instanceof HTMLButtonElement ?
+          control.textContent : "",
+        disabled: "disabled" in control ? Boolean(control.disabled) : null,
+        ariaChecked: control.getAttribute("aria-checked") || "",
+        ariaPressed: control.getAttribute("aria-pressed") || "",
+        ariaSelected: control.getAttribute("aria-selected") || "",
+        dataSelected: control.getAttribute("data-selected") || ""
+      }))
+  );
+  const covers = Array.from(document.querySelectorAll(coverSelector)).filter(visible);
+  if (covers.length !== 1) {
+    return {status: "rejected", message: "One exact cover field was not available for the commit guard"};
+  }
+  const root = covers[0].closest('form, [data-test="proposal-form"], ' +
+    '[data-test="application-form"], [data-test="submit-proposal-form"]');
+  if (!root || !visible(root)) {
+    return {status: "rejected", message: "One exact proposal form root was not available for the commit guard"};
+  }
+  const submitSelector = 'button[data-test="submit-proposal"], ' +
+    '[data-test="submit-proposal"] button';
+  const submitCandidates = Array.from(root.querySelectorAll(submitSelector)).filter((candidate) =>
+    candidate instanceof HTMLButtonElement && visible(candidate) && !candidate.disabled &&
+    normalized(candidate.getAttribute("aria-disabled")).toLowerCase() !== "true");
+  if (submitCandidates.length !== 1 ||
+      normalized(submitCandidates[0].textContent) !== "Submit proposal") {
+    return {status: "rejected", message: "One exact Submit proposal action was not available for the commit guard"};
+  }
+  const prior = root.__upworkMcpProposalCommitGuard;
+  if (prior && prior.observer instanceof MutationObserver) prior.observer.disconnect();
+  const state = {
+    token: args.token,
+    generation: 0,
+    eventGeneration: 0,
+    handlerGeneration: 0,
+    handlerGeneration: 0,
+    observer: null,
+    inputListener: null,
+    changeListener: null,
+    fingerprint: "",
+    actionTarget: submitCandidates[0],
+    actionOnClick: submitCandidates[0].onclick,
+    formOnSubmit: root instanceof HTMLFormElement ? root.onsubmit : null,
+    documentOnClick: document.onclick,
+    documentOnSubmit: document.onsubmit,
+    originalAddEventListener: EventTarget.prototype.addEventListener,
+    originalRemoveEventListener: EventTarget.prototype.removeEventListener,
+    addEventListenerWrapper: null,
+    removeEventListenerWrapper: null
+  };
+  const actionEventTarget = (target, type) => {
+    if (type !== "click" && type !== "submit") return false;
+    return target === window || target === submitCandidates[0] ||
+      (target instanceof Node && target.contains(submitCandidates[0]));
+  };
+  state.addEventListenerWrapper = function(type, listener, options) {
+    if (actionEventTarget(this, String(type).toLowerCase())) state.handlerGeneration += 1;
+    return state.originalAddEventListener.call(this, type, listener, options);
+  };
+  state.removeEventListenerWrapper = function(type, listener, options) {
+    if (actionEventTarget(this, String(type).toLowerCase())) state.handlerGeneration += 1;
+    return state.originalRemoveEventListener.call(this, type, listener, options);
+  };
+  EventTarget.prototype.addEventListener = state.addEventListenerWrapper;
+  EventTarget.prototype.removeEventListener = state.removeEventListenerWrapper;
+  if (EventTarget.prototype.addEventListener !== state.addEventListenerWrapper ||
+      EventTarget.prototype.removeEventListener !== state.removeEventListenerWrapper) {
+    return {status: "rejected", message: "Submit-listener mutation tracking could not be installed"};
+  }
+  state.observer = new MutationObserver((records) => {
+    state.generation += records.length;
+  });
+  state.observer.observe(root, {
+    subtree: true, childList: true, characterData: true, attributes: true
+  });
+  state.inputListener = () => { state.eventGeneration += 1; };
+  state.changeListener = () => { state.eventGeneration += 1; };
+  root.addEventListener("input", state.inputListener, true);
+  root.addEventListener("change", state.changeListener, true);
+  state.fingerprint = formFingerprint(root);
+  Object.defineProperty(root, "__upworkMcpProposalCommitGuard", {
+    value: state, configurable: true
+  });
+  return {
+    status: "ready",
+    generation: state.generation,
+    eventGeneration: state.eventGeneration,
+    handlerGeneration: state.handlerGeneration
+  };
+}
+"""
+
+_ATOMIC_FIRST_SUBMIT_SCRIPT = r"""
+(args) => {
+  const reject = (message) => ({status: "rejected", dispatchStarted: false, message});
+  const visible = (element) => {
+    if (!(element instanceof Element) || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" &&
+      rect.width > 0 && rect.height > 0;
+  };
+  const normalized = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const formFingerprint = (root) => JSON.stringify(
+    Array.from(root.querySelectorAll('input, textarea, select, button, [contenteditable="true"]'))
+      .map((control, ordinal) => ({
+        ordinal,
+        tag: control.tagName,
+        type: control.getAttribute("type") || "",
+        name: control.getAttribute("name") || "",
+        id: control.id || "",
+        dataTest: control.getAttribute("data-test") || "",
+        value: "value" in control ? String(control.value) : "",
+        checked: "checked" in control ? Boolean(control.checked) : null,
+        selectedIndex: "selectedIndex" in control ? control.selectedIndex : null,
+        selectedValues: control instanceof HTMLSelectElement ?
+          Array.from(control.selectedOptions).map((option) => option.value) : [],
+        text: control.isContentEditable || control instanceof HTMLButtonElement ?
+          control.textContent : "",
+        disabled: "disabled" in control ? Boolean(control.disabled) : null,
+        ariaChecked: control.getAttribute("aria-checked") || "",
+        ariaPressed: control.getAttribute("aria-pressed") || "",
+        ariaSelected: control.getAttribute("aria-selected") || "",
+        dataSelected: control.getAttribute("data-selected") || ""
+      }))
+  );
+  const expectedUrl = new URL(args.formUrl);
+  if (location.origin !== expectedUrl.origin || location.pathname.replace(/\/$/, "") !==
+      expectedUrl.pathname.replace(/\/$/, "") || location.search || location.hash) {
+    return reject("The exact application route changed at the atomic commit boundary");
+  }
+  const titleSelector = `[data-test="job-title"], .job-title, ` +
+    `a[href="/jobs/${args.jobId}"], a[href^="/jobs/${args.jobId}?"]`;
+  const titles = Array.from(document.querySelectorAll(titleSelector)).filter(visible);
+  if (titles.length !== 1 || normalized(titles[0].textContent) !== args.jobTitle) {
+    return reject("The exact application title changed at the atomic commit boundary");
+  }
+  const bodyText = normalized(document.body && document.body.textContent);
+  const fixedStructure = /\bby project\b|\bby milestone\b/i.test(bodyText);
+  const hourlyStructure = /rate increase frequency|select a frequency/i.test(bodyText);
+  const fixedCopy = /fixed[- ]price|project budget/i.test(bodyText);
+  const hourlyCopy = /hourly rate|hourly contract|\/hr\b/i.test(bodyText);
+  const detectedType = fixedStructure ? "fixed" : hourlyStructure ? "hourly" :
+    (fixedCopy && !hourlyCopy) ? "fixed" : (hourlyCopy && !fixedCopy) ? "hourly" : null;
+  if (detectedType !== args.jobType) {
+    return reject("The exact application job type changed at the atomic commit boundary");
+  }
+  const coverSelector = 'textarea[data-test="cover-letter-input"], ' +
+    '[data-test="cover-letter-input"] textarea, textarea[name="coverLetter"]';
+  const covers = Array.from(document.querySelectorAll(coverSelector)).filter(visible);
+  if (covers.length !== 1) return reject("One exact guarded proposal form was not present at commit");
+  const root = covers[0].closest('form, [data-test="proposal-form"], ' +
+    '[data-test="application-form"], [data-test="submit-proposal-form"]');
+  if (!root || !visible(root)) return reject("The guarded proposal form detached before commit");
+  const state = root.__upworkMcpProposalCommitGuard;
+  if (!state || state.token !== args.token || !(state.observer instanceof MutationObserver)) {
+    return reject("The guarded proposal form was replaced before commit");
+  }
+  const cleanup = () => {
+    state.observer.disconnect();
+    if (state.inputListener) root.removeEventListener("input", state.inputListener, true);
+    if (state.changeListener) root.removeEventListener("change", state.changeListener, true);
+    if (EventTarget.prototype.addEventListener === state.addEventListenerWrapper) {
+      EventTarget.prototype.addEventListener = state.originalAddEventListener;
+    }
+    if (EventTarget.prototype.removeEventListener === state.removeEventListenerWrapper) {
+      EventTarget.prototype.removeEventListener = state.originalRemoveEventListener;
+    }
+  };
+  state.generation += state.observer.takeRecords().length;
+  if (state.generation !== args.generation || state.eventGeneration !== args.eventGeneration ||
+      state.handlerGeneration !== args.handlerGeneration ||
+      EventTarget.prototype.addEventListener !== state.addEventListenerWrapper ||
+      EventTarget.prototype.removeEventListener !== state.removeEventListenerWrapper ||
+      state.fingerprint !== formFingerprint(root)) {
+    cleanup();
+    return reject("The proposal form or input event state mutated during final readback");
+  }
+  const submitSelector = 'button[data-test="submit-proposal"], ' +
+    '[data-test="submit-proposal"] button';
+  const candidates = Array.from(root.querySelectorAll(submitSelector)).filter((candidate) =>
+    candidate instanceof HTMLButtonElement && visible(candidate) && !candidate.disabled &&
+    normalized(candidate.getAttribute("aria-disabled")).toLowerCase() !== "true");
+  if (candidates.length !== 1 || normalized(candidates[0].textContent) !== "Submit proposal") {
+    cleanup();
+    return reject("One exact enabled Submit proposal control was not present at commit");
+  }
+  const submit = candidates[0];
+  if (submit !== state.actionTarget || submit.onclick !== state.actionOnClick ||
+      (root instanceof HTMLFormElement ? root.onsubmit : null) !== state.formOnSubmit ||
+      document.onclick !== state.documentOnClick ||
+      document.onsubmit !== state.documentOnSubmit) {
+    cleanup();
+    return reject("The exact Submit proposal action handler changed during final readback");
+  }
+  if (!submit.isConnected || !root.contains(submit) || normalized(submit.textContent) !== "Submit proposal") {
+    cleanup();
+    return reject("The exact Submit proposal control detached or changed before dispatch");
+  }
+  cleanup();
+  try {
+    HTMLElement.prototype.click.call(submit);
+  } catch (_error) {
+    return {status: "unknown", dispatchStarted: true, message: "The single atomic Submit proposal dispatch raised"};
+  }
+  return {status: "clicked", dispatchStarted: true};
+}
+"""
+
+_FINAL_SEND_COMMIT_GUARD_SCRIPT = r"""
+(args) => {
+  const visible = (element) => {
+    if (!(element instanceof Element) || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" &&
+      rect.width > 0 && rect.height > 0;
+  };
+  const normalized = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const fingerprint = (dialog) => JSON.stringify(
+    Array.from(dialog.querySelectorAll('input, textarea, select, button, [contenteditable="true"]'))
+      .map((control, ordinal) => ({
+        ordinal,
+        tag: control.tagName,
+        type: control.getAttribute("type") || "",
+        name: control.getAttribute("name") || "",
+        dataTest: control.getAttribute("data-test") || "",
+        value: "value" in control ? String(control.value) : "",
+        checked: "checked" in control ? Boolean(control.checked) : null,
+        selectedIndex: "selectedIndex" in control ? control.selectedIndex : null,
+        text: control.isContentEditable || control instanceof HTMLButtonElement ?
+          control.textContent : "",
+        disabled: "disabled" in control ? Boolean(control.disabled) : null,
+        ariaChecked: control.getAttribute("aria-checked") || "",
+        ariaPressed: control.getAttribute("aria-pressed") || "",
+        dataSelected: control.getAttribute("data-selected") || ""
+      }))
+  );
+  const dialog = args.dialog;
+  if (!(dialog instanceof Element) || !visible(dialog)) {
+    return {status: "rejected", message: "The exact boost dialog was unavailable for the final guard"};
+  }
+  const selectable = Array.from(dialog.querySelectorAll('input[type="radio"], input[type="checkbox"], button'));
+  const noBoost = selectable.filter((control) => {
+    if (!visible(control)) return false;
+    const aria = normalized(control.getAttribute("aria-label")).toLowerCase();
+    const ownText = normalized(control.textContent).toLowerCase();
+    const labelText = normalized(control.closest("label") && control.closest("label").textContent).toLowerCase();
+    return [aria, ownText, labelText].some((value) => value === "don't boost" || value === "no, thanks");
+  });
+  const selected = (control) =>
+    (control instanceof HTMLInputElement && control.checked) ||
+    ["aria-checked", "aria-pressed", "data-selected"].some((attribute) =>
+      normalized(control.getAttribute(attribute)).toLowerCase() === "true");
+  if (noBoost.length !== 1 || !selected(noBoost[0]) ||
+      selectable.some((control) => control !== noBoost[0] && selected(control))) {
+    return {status: "rejected", message: "The exact no-boost state was unavailable for the final guard"};
+  }
+  const sends = Array.from(dialog.querySelectorAll("button")).filter((button) =>
+    button instanceof HTMLButtonElement && visible(button) && !button.disabled &&
+    normalized(button.getAttribute("aria-disabled")).toLowerCase() !== "true" &&
+    /^Send for ([0-9]+) Connects?$/i.test(normalized(button.textContent)));
+  const sendCost = sends.length === 1 ?
+    Number(normalized(sends[0].textContent).match(/^Send for ([0-9]+) Connects?$/i)[1]) : null;
+  if (sends.length !== 1 || sendCost !== args.baseConnects) {
+    return {status: "rejected", message: "The exact approved-cost Send was unavailable for the final guard"};
+  }
+  const prior = dialog.__upworkMcpFinalSendCommitGuard;
+  if (prior && prior.observer instanceof MutationObserver) prior.observer.disconnect();
+  const actionForm = sends[0].closest("form");
+  const state = {
+    token: args.token,
+    generation: 0,
+    eventGeneration: 0,
+    observer: null,
+    inputListener: null,
+    changeListener: null,
+    fingerprint: "",
+    actionTarget: sends[0],
+    actionOnClick: sends[0].onclick,
+    formOnSubmit: actionForm ? actionForm.onsubmit : null,
+    documentOnClick: document.onclick,
+    documentOnSubmit: document.onsubmit,
+    originalAddEventListener: EventTarget.prototype.addEventListener,
+    originalRemoveEventListener: EventTarget.prototype.removeEventListener,
+    addEventListenerWrapper: null,
+    removeEventListenerWrapper: null
+  };
+  const actionEventTarget = (target, type) => {
+    if (type !== "click" && type !== "submit") return false;
+    return target === window || target === sends[0] ||
+      (target instanceof Node && target.contains(sends[0]));
+  };
+  state.addEventListenerWrapper = function(type, listener, options) {
+    if (actionEventTarget(this, String(type).toLowerCase())) state.handlerGeneration += 1;
+    return state.originalAddEventListener.call(this, type, listener, options);
+  };
+  state.removeEventListenerWrapper = function(type, listener, options) {
+    if (actionEventTarget(this, String(type).toLowerCase())) state.handlerGeneration += 1;
+    return state.originalRemoveEventListener.call(this, type, listener, options);
+  };
+  EventTarget.prototype.addEventListener = state.addEventListenerWrapper;
+  EventTarget.prototype.removeEventListener = state.removeEventListenerWrapper;
+  if (EventTarget.prototype.addEventListener !== state.addEventListenerWrapper ||
+      EventTarget.prototype.removeEventListener !== state.removeEventListenerWrapper) {
+    return {status: "rejected", message: "Final-Send listener mutation tracking could not be installed"};
+  }
+  state.observer = new MutationObserver((records) => { state.generation += records.length; });
+  state.observer.observe(dialog, {
+    subtree: true, childList: true, characterData: true, attributes: true
+  });
+  state.inputListener = () => { state.eventGeneration += 1; };
+  state.changeListener = () => { state.eventGeneration += 1; };
+  dialog.addEventListener("input", state.inputListener, true);
+  dialog.addEventListener("change", state.changeListener, true);
+  state.fingerprint = fingerprint(dialog);
+  Object.defineProperty(dialog, "__upworkMcpFinalSendCommitGuard", {
+    value: state, configurable: true
+  });
+  return {
+    status: "ready",
+    generation: state.generation,
+    eventGeneration: state.eventGeneration,
+    handlerGeneration: state.handlerGeneration
+  };
+}
+"""
+
+_ATOMIC_FINAL_SEND_SCRIPT = r"""
+(args) => {
+  const reject = (message) => ({status: "rejected", dispatchStarted: false, message});
+  const visible = (element) => {
+    if (!(element instanceof Element) || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" &&
+      rect.width > 0 && rect.height > 0;
+  };
+  const normalized = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const fingerprint = (dialog) => JSON.stringify(
+    Array.from(dialog.querySelectorAll('input, textarea, select, button, [contenteditable="true"]'))
+      .map((control, ordinal) => ({
+        ordinal,
+        tag: control.tagName,
+        type: control.getAttribute("type") || "",
+        name: control.getAttribute("name") || "",
+        dataTest: control.getAttribute("data-test") || "",
+        value: "value" in control ? String(control.value) : "",
+        checked: "checked" in control ? Boolean(control.checked) : null,
+        selectedIndex: "selectedIndex" in control ? control.selectedIndex : null,
+        text: control.isContentEditable || control instanceof HTMLButtonElement ?
+          control.textContent : "",
+        disabled: "disabled" in control ? Boolean(control.disabled) : null,
+        ariaChecked: control.getAttribute("aria-checked") || "",
+        ariaPressed: control.getAttribute("aria-pressed") || "",
+        dataSelected: control.getAttribute("data-selected") || ""
+      }))
+  );
+  const expectedUrl = new URL(args.formUrl);
+  if (location.origin !== expectedUrl.origin || location.pathname.replace(/\/$/, "") !==
+      expectedUrl.pathname.replace(/\/$/, "") || location.search || location.hash) {
+    return reject("The exact application route changed before final Send");
+  }
+  const titleSelector = `[data-test="job-title"], .job-title, ` +
+    `a[href="/jobs/${args.jobId}"], a[href^="/jobs/${args.jobId}?"]`;
+  const titles = Array.from(document.querySelectorAll(titleSelector)).filter(visible);
+  if (titles.length !== 1 || normalized(titles[0].textContent) !== args.jobTitle) {
+    return reject("The exact application title changed before final Send");
+  }
+  const bodyText = normalized(document.body && document.body.textContent);
+  const fixedStructure = /\bby project\b|\bby milestone\b/i.test(bodyText);
+  const hourlyStructure = /rate increase frequency|select a frequency/i.test(bodyText);
+  const fixedCopy = /fixed[- ]price|project budget/i.test(bodyText);
+  const hourlyCopy = /hourly rate|hourly contract|\/hr\b/i.test(bodyText);
+  const detectedType = fixedStructure ? "fixed" : hourlyStructure ? "hourly" :
+    (fixedCopy && !hourlyCopy) ? "fixed" : (hourlyCopy && !fixedCopy) ? "hourly" : null;
+  if (detectedType !== args.jobType) return reject("The application job type changed before final Send");
+  const dialogSelector = '[role="dialog"], [data-test="boost-proposal-dialog"], .air3-modal';
+  const dialogs = Array.from(document.querySelectorAll(dialogSelector)).filter((dialog) => {
+    if (!visible(dialog)) return false;
+    const text = normalized(dialog.textContent);
+    return (/\bboost\b.*\bproposal\b|\bproposal\b.*\bboost\b/i.test(text)) &&
+      /\bconnects?\b/i.test(text);
+  });
+  if (dialogs.length !== 1) return reject("One exact boost proposal dialog was not present at final Send");
+  const dialog = dialogs[0];
+  const state = dialog.__upworkMcpFinalSendCommitGuard;
+  if (!state || state.token !== args.token || !(state.observer instanceof MutationObserver)) {
+    return reject("The guarded final Send dialog was replaced before commit");
+  }
+  const cleanup = () => {
+    state.observer.disconnect();
+    if (state.inputListener) dialog.removeEventListener("input", state.inputListener, true);
+    if (state.changeListener) dialog.removeEventListener("change", state.changeListener, true);
+    if (EventTarget.prototype.addEventListener === state.addEventListenerWrapper) {
+      EventTarget.prototype.addEventListener = state.originalAddEventListener;
+    }
+    if (EventTarget.prototype.removeEventListener === state.removeEventListenerWrapper) {
+      EventTarget.prototype.removeEventListener = state.originalRemoveEventListener;
+    }
+  };
+  state.generation += state.observer.takeRecords().length;
+  if (state.generation !== args.generation || state.eventGeneration !== args.eventGeneration ||
+      state.handlerGeneration !== args.handlerGeneration ||
+      EventTarget.prototype.addEventListener !== state.addEventListenerWrapper ||
+      EventTarget.prototype.removeEventListener !== state.removeEventListenerWrapper ||
+      state.fingerprint !== fingerprint(dialog)) {
+    cleanup();
+    return reject("The final boost dialog or input event state changed before Send");
+  }
+  const selectable = Array.from(dialog.querySelectorAll('input[type="radio"], input[type="checkbox"], button'));
+  const noBoost = selectable.filter((control) => {
+    if (!visible(control)) return false;
+    const aria = normalized(control.getAttribute("aria-label")).toLowerCase();
+    const ownText = normalized(control.textContent).toLowerCase();
+    const labelText = normalized(control.closest("label") && control.closest("label").textContent).toLowerCase();
+    return [aria, ownText, labelText].some((value) =>
+      value === "don't boost" || value === "no, thanks");
+  });
+  if (noBoost.length !== 1) {
+    cleanup();
+    return reject("One exact no-boost control was not present at final Send");
+  }
+  const choice = noBoost[0];
+  const selected = (choice instanceof HTMLInputElement && choice.checked) ||
+    ["aria-checked", "aria-pressed", "data-selected"].some((attribute) =>
+      normalized(choice.getAttribute(attribute)).toLowerCase() === "true");
+  if (!selected) {
+    cleanup();
+    return reject("The exact no-boost state changed before final Send");
+  }
+  const explicitlySelected = (control) =>
+    (control instanceof HTMLInputElement && control.checked) ||
+    ["aria-checked", "aria-pressed", "data-selected"].some((attribute) =>
+      normalized(control.getAttribute(attribute)).toLowerCase() === "true");
+  const conflictingSelection = selectable.some((control) => control !== choice &&
+    explicitlySelected(control));
+  const positiveBoostAmount = Array.from(dialog.querySelectorAll('input[name*="boost" i], ' +
+    'input[data-test*="boost" i]')).some((control) => {
+      if (control === choice) return false;
+      const value = normalized(control.value);
+      return value !== "" && value !== "0" && value !== "0.00";
+    });
+  if (conflictingSelection || positiveBoostAmount) {
+    cleanup();
+    return reject("A positive or conflicting boost state was present before final Send");
+  }
+  const sends = Array.from(dialog.querySelectorAll("button")).filter((button) => {
+    if (!(button instanceof HTMLButtonElement) || !visible(button) || button.disabled ||
+        normalized(button.getAttribute("aria-disabled")).toLowerCase() === "true") return false;
+    return /^Send for ([0-9]+) Connects?$/i.test(normalized(button.textContent));
+  });
+  const sendCost = sends.length === 1 ?
+    Number(normalized(sends[0].textContent).match(/^Send for ([0-9]+) Connects?$/i)[1]) : null;
+  if (sends.length !== 1 || sendCost !== args.baseConnects) {
+    cleanup();
+    return reject("One exact approved-cost final Send control was not present");
+  }
+  const send = sends[0];
+  const actionForm = send.closest("form");
+  if (send !== state.actionTarget || send.onclick !== state.actionOnClick ||
+      (actionForm ? actionForm.onsubmit : null) !== state.formOnSubmit ||
+      document.onclick !== state.documentOnClick ||
+      document.onsubmit !== state.documentOnSubmit) {
+    cleanup();
+    return reject("The exact final Send action handler changed before dispatch");
+  }
+  if (!send.isConnected || !dialog.contains(send)) {
+    cleanup();
+    return reject("The exact approved-cost final Send control detached before dispatch");
+  }
+  cleanup();
+  try {
+    HTMLElement.prototype.click.call(send);
+  } catch (_error) {
+    return {status: "unknown", dispatchStarted: true, message: "The single atomic final Send dispatch raised"};
+  }
+  return {status: "clicked", dispatchStarted: true};
+}
+"""
 
 
 def parse_job_url(value: str) -> tuple[str, str]:
@@ -810,36 +1317,27 @@ async def _page_text(page) -> str:
     return ((await body.text_content()) if body else "") or ""
 
 
-async def _click(page, element) -> None:
-    """Click one visible, enabled control, including the overlay fallback."""
+class _ControlNotActionable(RuntimeError):
+    """The control changed before any native click was attempted."""
+
+
+class _ClickOutcomeUnknown(RuntimeError):
+    """A single native click raised and may already have dispatched."""
+
+
+async def _click(_page, element) -> None:
+    """Attempt exactly one native click after an immediate actionability check."""
 
     if not await _element_is_visible(element) or not await _element_is_enabled(element):
-        raise RuntimeError("Refusing to click a control that is not visible and enabled")
+        raise _ControlNotActionable(
+            "Refusing to click a control that is not visible and enabled"
+        )
     try:
         await element.click()
     except Exception as error:
-        # Keep the historical overlay fallback, but perform the actionability
-        # check and DOM click in one browser-side operation.  A hidden clone or
-        # a control that changed state after resolution must never be clicked.
-        clicked = await page.evaluate(
-            """element => {
-              const style = window.getComputedStyle(element);
-              const visible = Boolean(
-                element.isConnected
-                && element.getClientRects().length
-                && style.display !== 'none'
-                && style.visibility !== 'hidden'
-              );
-              const enabled = !element.matches(':disabled')
-                && element.getAttribute('aria-disabled') !== 'true';
-              if (!visible || !enabled) return false;
-              element.click();
-              return true;
-            }""",
-            element,
-        )
-        if clicked is not True:
-            raise RuntimeError("The control stopped being visible and enabled before click") from error
+        raise _ClickOutcomeUnknown(
+            "The single native click raised; its dispatch outcome is unknown"
+        ) from error
 
 
 def _dedupe_text(values: list[str]) -> list[str]:
@@ -2805,9 +3303,12 @@ async def _configure_fixed_payment_terms(page, params: SubmitProposalParams) -> 
         )
         return (True, None) if ok else (False, "One exact by-project total input could not be filled and verified")
 
-    rows = await section.query_selector_all(
-        '[data-test="milestone-row"], [data-test*="milestone-item"], .milestone-row'
-    )
+    try:
+        rows = await section.query_selector_all(
+            '[data-test="milestone-row"], [data-test*="milestone-item"], .milestone-row'
+        )
+    except Exception:
+        return False, "Live milestone rows could not be enumerated"
     if len(rows) != len(params.milestones):
         return False, "Live milestone rows differ from the exact approved milestones"
     for row, milestone in zip(rows, params.milestones, strict=True):
@@ -3386,6 +3887,83 @@ async def _first_stage_submit_control(page) -> Any | None:
     )
 
 
+async def _install_proposal_commit_guard(page) -> tuple[dict[str, Any] | None, str | None]:
+    """Guard the exact proposal form against mutation during final readback."""
+
+    token = secrets.token_hex(24)
+    try:
+        result = await page.evaluate(
+            _PROPOSAL_COMMIT_GUARD_SCRIPT,
+            {"operation": "install_proposal_commit_guard", "token": token},
+        )
+    except Exception:
+        return None, "The atomic proposal-form commit guard could not be installed"
+    if not isinstance(result, dict) or result.get("status") != "ready":
+        message = result.get("message") if isinstance(result, dict) else None
+        return None, str(message or "The atomic proposal-form commit guard was unavailable")
+    generation = result.get("generation")
+    event_generation = result.get("eventGeneration")
+    handler_generation = result.get("handlerGeneration")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
+        return None, "The atomic proposal-form commit guard returned no valid generation"
+    if (
+        not isinstance(event_generation, int)
+        or isinstance(event_generation, bool)
+        or event_generation < 0
+    ):
+        return None, "The atomic proposal-form commit guard returned no valid event generation"
+    if (
+        not isinstance(handler_generation, int)
+        or isinstance(handler_generation, bool)
+        or handler_generation < 0
+    ):
+        return None, "The atomic proposal-form commit guard returned no valid handler generation"
+    return {
+        "token": token,
+        "generation": generation,
+        "event_generation": event_generation,
+        "handler_generation": handler_generation,
+    }, None
+
+
+async def _atomic_click_first_stage_submit(
+    page,
+    params: SubmitProposalParams,
+    guard: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    """Re-resolve, validate and dispatch Submit once in one browser-main-thread task."""
+
+    try:
+        result = await page.evaluate(
+            _ATOMIC_FIRST_SUBMIT_SCRIPT,
+            {
+                "operation": "atomic_first_submit",
+                "formUrl": params.form_url,
+                "jobId": params.job_id,
+                "jobTitle": params.job_title,
+                "jobType": params.job_type,
+                "token": guard["token"],
+                "generation": guard["generation"],
+                "eventGeneration": guard["event_generation"],
+                "handlerGeneration": guard["handler_generation"],
+            },
+        )
+    except Exception:
+        return "unknown", "The atomic Submit proposal commit outcome is unknown"
+    if not isinstance(result, dict):
+        return "unknown", "The atomic Submit proposal commit returned no proof"
+    status = result.get("status")
+    message = result.get("message")
+    dispatch_started = result.get("dispatchStarted")
+    if status == "rejected" and dispatch_started is not False:
+        return "unknown", "The atomic Submit proposal rejection lacked pre-dispatch proof"
+    if status in {"clicked", "unknown"} and dispatch_started is not True:
+        return "unknown", "The atomic Submit proposal result lacked dispatch proof"
+    if status not in {"clicked", "rejected", "unknown"}:
+        return "unknown", "The atomic Submit proposal commit returned invalid proof"
+    return status, str(message) if message else None
+
+
 async def _exact_boost_dialog(page) -> Any | None:
     try:
         dialogs = await page.query_selector_all('[role="dialog"]')
@@ -3429,16 +4007,105 @@ async def _exact_final_send_control(dialog, approved_base_connects: int) -> Any 
     """Resolve only a Send label whose cost exactly matches approved base Connects."""
 
     candidates = await _visible_enabled_elements(dialog, "button")
-    matches: list[Any] = []
+    send_controls: list[tuple[Any, int]] = []
     for button in candidates:
         try:
             label = _normalise_identity_text(await button.text_content())
         except Exception:
             continue
         match = re.fullmatch(r"Send for ([0-9]+) Connects?", label, re.I)
-        if match and int(match.group(1)) == approved_base_connects:
-            matches.append(button)
-    return matches[0] if len(matches) == 1 else None
+        if match:
+            send_controls.append((button, int(match.group(1))))
+    if len(send_controls) != 1 or send_controls[0][1] != approved_base_connects:
+        return None
+    return send_controls[0][0]
+
+
+async def _install_final_send_commit_guard(
+    page,
+    dialog,
+    approved_base_connects: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Guard the exact no-boost dialog from configuration through final Send."""
+
+    token = secrets.token_hex(24)
+    try:
+        result = await page.evaluate(
+            _FINAL_SEND_COMMIT_GUARD_SCRIPT,
+            {
+                "operation": "install_final_send_commit_guard",
+                "dialog": dialog,
+                "baseConnects": approved_base_connects,
+                "token": token,
+            },
+        )
+    except Exception:
+        return None, "The final no-boost/Send commit guard could not be installed"
+    if not isinstance(result, dict) or result.get("status") != "ready":
+        message = result.get("message") if isinstance(result, dict) else None
+        return None, str(message or "The final no-boost/Send commit guard was unavailable")
+    generation = result.get("generation")
+    event_generation = result.get("eventGeneration")
+    handler_generation = result.get("handlerGeneration")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
+        return None, "The final no-boost/Send guard returned no valid generation"
+    if (
+        not isinstance(event_generation, int)
+        or isinstance(event_generation, bool)
+        or event_generation < 0
+    ):
+        return None, "The final no-boost/Send guard returned no valid event generation"
+    if (
+        not isinstance(handler_generation, int)
+        or isinstance(handler_generation, bool)
+        or handler_generation < 0
+    ):
+        return None, "The final no-boost/Send guard returned no valid handler generation"
+    return {
+        "token": token,
+        "generation": generation,
+        "event_generation": event_generation,
+        "handler_generation": handler_generation,
+    }, None
+
+
+async def _atomic_click_final_send(
+    page,
+    params: SubmitProposalParams,
+    guard: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    """Atomically revalidate no-boost/cost and dispatch one final Send click."""
+
+    try:
+        result = await page.evaluate(
+            _ATOMIC_FINAL_SEND_SCRIPT,
+            {
+                "operation": "atomic_final_send",
+                "formUrl": params.form_url,
+                "jobId": params.job_id,
+                "jobTitle": params.job_title,
+                "jobType": params.job_type,
+                "baseConnects": params.base_connects,
+                "token": guard["token"],
+                "generation": guard["generation"],
+                "eventGeneration": guard["event_generation"],
+                "handlerGeneration": guard["handler_generation"],
+            },
+        )
+    except Exception:
+        return "unknown", "The atomic approved-cost final Send commit outcome is unknown"
+    if not isinstance(result, dict):
+        return "unknown", "The atomic approved-cost final Send commit returned no proof"
+    status = result.get("status")
+    message = result.get("message")
+    dispatch_started = result.get("dispatchStarted")
+    if status == "rejected" and dispatch_started is not False:
+        return "unknown", "The atomic final Send rejection lacked pre-dispatch proof"
+    if status in {"clicked", "unknown"} and dispatch_started is not True:
+        return "unknown", "The atomic final Send result lacked dispatch proof"
+    if status not in {"clicked", "rejected", "unknown"}:
+        return "unknown", "The atomic approved-cost final Send commit returned invalid proof"
+    return status, str(message) if message else None
 
 
 async def _configure_boost_step(
@@ -3484,7 +4151,14 @@ async def _configure_boost_step(
             None,
             "One exact final Send control matching approved base Connects was not found",
         )
-    return send, None
+    guard, guard_error = await _install_final_send_commit_guard(
+        page,
+        dialog,
+        approved_base_connects,
+    )
+    if guard is None:
+        return None, guard_error
+    return guard, None
 
 
 def _confirmed_submission_result(
@@ -3617,6 +4291,543 @@ async def _proposal_confirmation(
         "url": final_url,
         "evidence": None,
         "success_query": _success_query_is_true(final_url),
+    }
+
+
+_SUBMISSION_COVER_INPUT_SELECTOR = (
+    'textarea[data-test="cover-letter-input"], '
+    '[data-test="cover-letter-input"] textarea, textarea[name="coverLetter"]'
+)
+_DURATION_SELECT_SELECTOR = 'select[name*="duration"], [data-test*="duration"] select'
+_DURATION_TOGGLE_SELECTOR = (
+    'button:has-text("Select a duration"), '
+    '.air3-dropdown-toggle:has-text("duration"), '
+    '[data-test*="duration"] .air3-dropdown-toggle'
+)
+_MILESTONE_ROW_SELECTOR = (
+    '[data-test="milestone-row"], [data-test*="milestone-item"], .milestone-row'
+)
+_MILESTONE_DESCRIPTION_SELECTOR = (
+    'input[name*="description"], textarea[name*="description"], '
+    '[data-test*="description"] input'
+)
+_MILESTONE_DUE_DATE_SELECTOR = (
+    'input[name*="due"], input[name*="date"], [data-test*="due-date"] input'
+)
+_MILESTONE_AMOUNT_SELECTOR = 'input[name*="amount"], input[data-test*="amount"]'
+
+
+async def _raw_input_value(control) -> str | None:
+    try:
+        value = await control.input_value()
+    except Exception:
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
+async def _one_raw_input(scope, selector: str) -> tuple[str | None, str | None]:
+    control = await _one_consequential_control(scope, selector)
+    if control is None:
+        return None, "Exactly one visible and enabled draft field was not found"
+    value = await _raw_input_value(control)
+    if value is None:
+        return None, "A proposal draft field could not be read exactly"
+    return value, None
+
+
+async def _capture_select_state(
+    page,
+    *,
+    select_selector: str,
+    toggle_selector: str,
+    allow_absent: bool = False,
+) -> tuple[dict[str, str] | None, str | None]:
+    selects = await _visible_enabled_elements(page, select_selector)
+    toggles = await _visible_enabled_elements(page, toggle_selector)
+    if not selects and not toggles and allow_absent:
+        return {"kind": "absent", "label": ""}, None
+    if len(selects) == 1 and not toggles:
+        label = await _selected_option_label(selects[0])
+        if label is None:
+            return None, "A native proposal selection could not be read exactly"
+        return {"kind": "select", "label": label}, None
+    if len(toggles) == 1 and not selects:
+        try:
+            label = _normalise_identity_text(await toggles[0].text_content())
+        except Exception:
+            return None, "A proposal dropdown selection could not be read exactly"
+        return {"kind": "toggle", "label": label}, None
+    return None, "One unambiguous proposal selection control was not found"
+
+
+async def _capture_profile_highlight_state(
+    page,
+) -> tuple[dict[str, Any] | None, str | None]:
+    chooser = await _open_profile_highlight_chooser(page)
+    if chooser is None:
+        openers = await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
+        chooser_visible = await _profile_highlight_chooser_visible(page)
+        if not openers and not chooser_visible:
+            return {"mode": "absent", "records": [], "selected": []}, None
+        return None, "The profile-highlight chooser could not be opened for draft capture"
+    records, error = await _enumerate_profile_highlight_records(page)
+    stripped = sorted(
+        (
+            {
+                "identity": str(record["identity"]),
+                "title": str(record["title"]),
+                "tab": str(record["tab"]),
+                "selected": bool(record["selected"]),
+            }
+            for record in records
+        ),
+        key=lambda record: (record["tab"], record["identity"], record["title"]),
+    )
+    dismissed = await _dismiss_profile_highlight_chooser(page)
+    if error:
+        return None, error
+    if not dismissed:
+        return None, "The profile-highlight chooser could not be dismissed after draft capture"
+    identities = [record["identity"] for record in stripped]
+    if len(identities) != len(set(identities)):
+        return None, "The profile-highlight universe contains ambiguous duplicate identities"
+    return {
+        "mode": "chooser",
+        "records": stripped,
+        "selected": sorted(record["identity"] for record in stripped if record["selected"]),
+    }, None
+
+
+async def _capture_fixed_draft_state(
+    page,
+    params: SubmitProposalParams,
+) -> tuple[dict[str, Any] | None, str | None]:
+    section = await _fixed_payment_section(page)
+    if section is None or params.payment_structure is None:
+        return None, "The fixed-price draft structure could not be bound"
+    project = await _exact_payment_radio(section, "By project")
+    milestone = await _exact_payment_radio(section, "By milestone")
+    if project is None or milestone is None:
+        return None, "The exact fixed-price draft structure controls could not be read"
+    project_checked = await _checked_state(project)
+    milestone_checked = await _checked_state(milestone)
+    if (project_checked, milestone_checked) not in {(True, False), (False, True)}:
+        return None, "The selected fixed-price draft structure was ambiguous"
+    structure = "by_project" if project_checked else "by_milestone"
+    if structure != params.payment_structure:
+        return None, (
+            "The original fixed-price structure differs from the approved structure; "
+            "automatic submission will not mutate an unobservable inactive branch"
+        )
+    if structure == "by_project":
+        amount, error = await _one_raw_input(section, _BY_PROJECT_AMOUNT_INPUT_SELECTOR)
+        if error:
+            return None, error
+        return {"structure": structure, "project_amount": amount, "milestones": []}, None
+
+    try:
+        rows = await section.query_selector_all(_MILESTONE_ROW_SELECTOR)
+    except Exception:
+        return None, "The original milestone rows could not be enumerated"
+    if len(rows) != len(params.milestones):
+        return None, "The original milestone row count differs from the approved form"
+    milestones: list[dict[str, str]] = []
+    for row in rows:
+        description, description_error = await _one_raw_input(
+            row,
+            _MILESTONE_DESCRIPTION_SELECTOR,
+        )
+        due_date, due_error = await _one_raw_input(row, _MILESTONE_DUE_DATE_SELECTOR)
+        amount, amount_error = await _one_raw_input(row, _MILESTONE_AMOUNT_SELECTOR)
+        if description_error or due_error or amount_error:
+            return None, "Every original milestone draft field could not be read exactly"
+        assert description is not None and due_date is not None and amount is not None
+        milestones.append(
+            {"description": description, "due_date": due_date, "amount": amount}
+        )
+    return {"structure": structure, "project_amount": None, "milestones": milestones}, None
+
+
+async def _capture_proposal_draft_state(
+    page,
+    params: SubmitProposalParams,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Capture every field this commit path can touch before the first mutation."""
+
+    if params.rate is not None:
+        price, price_error = await _one_raw_input(page, _HOURLY_RATE_INPUT_SELECTOR)
+        fixed_state = None
+    else:
+        price = None
+        fixed_state, price_error = await _capture_fixed_draft_state(page, params)
+    if price_error:
+        return None, price_error
+
+    cover, cover_error = await _one_raw_input(page, _SUBMISSION_COVER_INPUT_SELECTOR)
+    if cover_error:
+        return None, cover_error
+    answer_controls = await _visible_enabled_elements(page, _SCREENING_ANSWER_CONTROLS)
+    if len(answer_controls) != len(params.answers or []):
+        return None, "The original screening-answer field count could not be bound"
+    answers: list[str] = []
+    for control in answer_controls:
+        value = await _raw_input_value(control)
+        if value is None:
+            return None, "An original screening-answer draft could not be read exactly"
+        answers.append(value)
+
+    duration, duration_error = await _capture_select_state(
+        page,
+        select_selector=_DURATION_SELECT_SELECTOR,
+        toggle_selector=_DURATION_TOGGLE_SELECTOR,
+    )
+    if duration_error:
+        return None, duration_error
+    rate_increase, rate_error = await _capture_select_state(
+        page,
+        select_selector=_RATE_INCREASE_SELECT,
+        toggle_selector=_RATE_INCREASE_TOGGLE,
+        allow_absent=params.job_type == "fixed",
+    )
+    if rate_error:
+        return None, rate_error
+    if params.job_type == "fixed" and rate_increase != {"kind": "absent", "label": ""}:
+        return None, "A fixed-price draft unexpectedly exposed a rate-increase control"
+
+    highlights, highlights_error = await _capture_profile_highlight_state(page)
+    if highlights_error:
+        return None, highlights_error
+    if params.profile_highlights and highlights is not None and highlights.get("mode") == "absent":
+        return None, "Approved profile highlights are not available on the original live draft"
+    assert cover is not None and duration is not None and rate_increase is not None
+    assert highlights is not None
+    return {
+        "price": price,
+        "fixed": fixed_state,
+        "cover": cover,
+        "answers": answers,
+        "duration": duration,
+        "rate_increase": rate_increase,
+        "profile_highlights": highlights,
+    }, None
+
+
+async def _restore_raw_input(scope, selector: str, value: str) -> bool:
+    control = await _one_consequential_control(scope, selector)
+    if control is None:
+        return False
+    try:
+        await control.fill(value)
+    except Exception:
+        return False
+    return await _raw_input_value(control) == value
+
+
+async def _restore_select_state(
+    page,
+    state: Mapping[str, str],
+    *,
+    select_selector: str,
+    toggle_selector: str,
+) -> bool:
+    kind = state.get("kind")
+    label = state.get("label")
+    if kind == "absent":
+        return not await _visible_enabled_elements(
+            page,
+            f"{select_selector}, {toggle_selector}",
+        )
+    if not isinstance(label, str):
+        return False
+    if kind == "select":
+        selects = await _visible_enabled_elements(page, select_selector)
+        toggles = await _visible_enabled_elements(page, toggle_selector)
+        if len(selects) != 1 or toggles:
+            return False
+        try:
+            await selects[0].select_option(label=label)
+        except Exception:
+            return False
+        return await _selected_option_label(selects[0]) == label
+    if kind == "toggle":
+        toggles = await _visible_enabled_elements(page, toggle_selector)
+        selects = await _visible_enabled_elements(page, select_selector)
+        return bool(
+            len(toggles) == 1
+            and not selects
+            and await _select_exact_dropdown_label(page, toggles[0], label)
+        )
+    return False
+
+
+async def _restore_fixed_draft_state(page, state: Mapping[str, Any]) -> bool:
+    structure = state.get("structure")
+    if structure not in {"by_project", "by_milestone"}:
+        return False
+    section = await _select_fixed_payment_structure(page, cast(Any, structure))
+    if section is None:
+        return False
+    if structure == "by_project":
+        amount = state.get("project_amount")
+        return isinstance(amount, str) and await _restore_raw_input(
+            section,
+            _BY_PROJECT_AMOUNT_INPUT_SELECTOR,
+            amount,
+        )
+    milestones = state.get("milestones")
+    if not isinstance(milestones, list):
+        return False
+    try:
+        rows = await section.query_selector_all(_MILESTONE_ROW_SELECTOR)
+    except Exception:
+        return False
+    if len(rows) != len(milestones):
+        return False
+    for row, milestone in zip(rows, milestones, strict=True):
+        if not isinstance(milestone, Mapping):
+            return False
+        values = (
+            (_MILESTONE_DESCRIPTION_SELECTOR, milestone.get("description")),
+            (_MILESTONE_DUE_DATE_SELECTOR, milestone.get("due_date")),
+            (_MILESTONE_AMOUNT_SELECTOR, milestone.get("amount")),
+        )
+        for selector, value in values:
+            if not isinstance(value, str) or not await _restore_raw_input(row, selector, value):
+                return False
+    return True
+
+
+async def _restore_profile_highlight_state(page, state: Mapping[str, Any]) -> bool:
+    mode = state.get("mode")
+    if mode == "absent":
+        return not await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
+    if mode != "chooser":
+        return False
+    target_raw = state.get("selected")
+    if not isinstance(target_raw, list) or not all(isinstance(value, str) for value in target_raw):
+        return False
+    target = set(target_raw)
+    chooser = await _open_profile_highlight_chooser(page)
+    if chooser is None:
+        return False
+    records, error = await _enumerate_profile_highlight_records(page)
+    if error:
+        await _dismiss_profile_highlight_chooser(page)
+        return False
+    indexed = _index_profile_highlight_records(records)
+    if any(len(indexed.get(identity, [])) != 1 for identity in target):
+        await _dismiss_profile_highlight_chooser(page)
+        return False
+    changed = False
+    for original in records:
+        identity = str(original["identity"])
+        desired = identity in target
+        if bool(original["selected"]) == desired:
+            continue
+        if not await _activate_profile_highlight_tab(page, str(original["tab"])):
+            await _dismiss_profile_highlight_chooser(page)
+            return False
+        visible, visible_error = await _visible_profile_highlight_records(
+            page,
+            str(original["tab"]),
+        )
+        matches = [record for record in visible if str(record["identity"]) == identity]
+        if visible_error or len(matches) != 1 or bool(matches[0]["selected"]) == desired:
+            await _dismiss_profile_highlight_chooser(page)
+            return False
+        try:
+            await _click(page, matches[0]["button"])
+            await _settle_profile_highlight_view(page)
+        except Exception:
+            await _dismiss_profile_highlight_chooser(page)
+            return False
+        changed = True
+    records, error = await _enumerate_profile_highlight_records(page)
+    selected = {str(record["identity"]) for record in records if record["selected"]}
+    if error or selected != target:
+        await _dismiss_profile_highlight_chooser(page)
+        return False
+    if changed:
+        chooser = await _exact_profile_highlight_chooser(page)
+        if chooser is None:
+            return False
+        add_buttons = await _enabled_elements(chooser, 'button:text-is("Add to highlights")')
+        if len(add_buttons) != 1:
+            await _dismiss_profile_highlight_chooser(page)
+            return False
+        try:
+            await _click(page, add_buttons[0])
+            await _settle_profile_highlight_view(page)
+        except Exception:
+            return False
+        return not await _profile_highlight_chooser_visible(page)
+    return await _dismiss_profile_highlight_chooser(page)
+
+
+async def _restore_proposal_draft_locally(
+    page,
+    params: SubmitProposalParams,
+    snapshot: Mapping[str, Any],
+) -> dict[str, bool]:
+    """Best-effort restoration; only the later reload readback can prove success."""
+
+    results: dict[str, bool] = {}
+    try:
+        if params.rate is not None:
+            price = snapshot.get("price")
+            results["price"] = isinstance(price, str) and await _restore_raw_input(
+                page,
+                _HOURLY_RATE_INPUT_SELECTOR,
+                price,
+            )
+        else:
+            fixed = snapshot.get("fixed")
+            results["price"] = isinstance(fixed, Mapping) and await _restore_fixed_draft_state(
+                page,
+                fixed,
+            )
+    except Exception:
+        results["price"] = False
+
+    try:
+        cover = snapshot.get("cover")
+        results["cover"] = isinstance(cover, str) and await _restore_raw_input(
+            page,
+            _SUBMISSION_COVER_INPUT_SELECTOR,
+            cover,
+        )
+    except Exception:
+        results["cover"] = False
+
+    try:
+        original_answers = snapshot.get("answers")
+        answer_controls = await _visible_enabled_elements(page, _SCREENING_ANSWER_CONTROLS)
+        answer_values = (
+            cast(list[str], original_answers)
+            if isinstance(original_answers, list)
+            and all(isinstance(value, str) for value in original_answers)
+            else None
+        )
+        results["answers"] = answer_values is not None and len(answer_controls) == len(
+            answer_values
+        )
+        if results["answers"]:
+            assert answer_values is not None
+            for control, value in zip(answer_controls, answer_values, strict=True):
+                try:
+                    await control.fill(value)
+                except Exception:
+                    results["answers"] = False
+                    break
+                if await _raw_input_value(control) != value:
+                    results["answers"] = False
+                    break
+    except Exception:
+        results["answers"] = False
+
+    try:
+        duration = snapshot.get("duration")
+        results["duration"] = isinstance(duration, Mapping) and await _restore_select_state(
+            page,
+            duration,
+            select_selector=_DURATION_SELECT_SELECTOR,
+            toggle_selector=_DURATION_TOGGLE_SELECTOR,
+        )
+    except Exception:
+        results["duration"] = False
+
+    try:
+        increase = snapshot.get("rate_increase")
+        results["rate_increase"] = isinstance(increase, Mapping) and await _restore_select_state(
+            page,
+            increase,
+            select_selector=_RATE_INCREASE_SELECT,
+            toggle_selector=_RATE_INCREASE_TOGGLE,
+        )
+    except Exception:
+        results["rate_increase"] = False
+
+    try:
+        highlights = snapshot.get("profile_highlights")
+        results["profile_highlights"] = isinstance(
+            highlights,
+            Mapping,
+        ) and await _restore_profile_highlight_state(page, highlights)
+    except Exception:
+        results["profile_highlights"] = False
+    return results
+
+
+def _proposal_draft_digest(snapshot: Mapping[str, Any]) -> str:
+    encoded = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+async def _proposal_preclick_failure(
+    page,
+    params: SubmitProposalParams,
+    approved_identity: Mapping[str, Any],
+    original_snapshot: Mapping[str, Any],
+    *,
+    status: str,
+    message: str | None,
+    details: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Restore every proposal draft field and prove persistence from a fresh owner readback."""
+
+    local_results = await _restore_proposal_draft_locally(page, params, original_snapshot)
+    readback: dict[str, Any] = {
+        "original_snapshot_sha256": _proposal_draft_digest(original_snapshot),
+        "local_restoration": local_results,
+        "owner_reload_completed": False,
+        "identity_confirmed": False,
+        "snapshot_confirmed": False,
+    }
+    live_snapshot: dict[str, Any] | None = None
+    capture_error: str | None = None
+    try:
+        try:
+            await page.wait_for_timeout(300)
+        except Exception:
+            await asyncio.sleep(0)
+        reload_method = getattr(page, "reload", None)
+        if not callable(reload_method):
+            raise RuntimeError("owner reload unavailable")
+        await reload_method(wait_until="networkidle")
+        readback["owner_reload_completed"] = True
+        live_identity = await _application_identity_from_current_page(page)
+        readback["identity_confirmed"] = live_identity == dict(approved_identity)
+        if readback["identity_confirmed"]:
+            live_snapshot, capture_error = await _capture_proposal_draft_state(page, params)
+    except Exception as error:
+        capture_error = f"Owner reload/readback failed: {type(error).__name__}"
+    if live_snapshot is not None:
+        readback["live_snapshot_sha256"] = _proposal_draft_digest(live_snapshot)
+        readback["snapshot_confirmed"] = live_snapshot == dict(original_snapshot)
+    readback["capture_error"] = capture_error
+    restored = bool(readback["identity_confirmed"] and readback["snapshot_confirmed"])
+    if restored:
+        return {
+            "status": status,
+            "message": message,
+            **dict(details or {}),
+            "draft_restored": True,
+            "draft_restoration_readback": readback,
+            "external_action_taken": False,
+        }
+    return {
+        "status": "draft_state_unknown",
+        "message": (
+            "The proposal was not intentionally submitted, but every touched draft field could "
+            "not be restored and proved unchanged after an owner-system reload. Inspect the exact "
+            "application and do not retry automatically."
+        ),
+        "preclick_failure_status": status,
+        "preclick_failure_message": message,
+        **dict(details or {}),
+        "draft_restored": False,
+        "draft_restoration_readback": readback,
+        "external_action_taken": True,
     }
 
 
@@ -3756,24 +4967,62 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
             "external_action_taken": False,
         }
 
+    try:
+        original_draft, draft_error = await _capture_proposal_draft_state(page, params)
+    except Exception as error:
+        original_draft = None
+        draft_error = f"Original proposal draft capture failed: {type(error).__name__}"
+    if original_draft is None:
+        return {
+            "status": "draft_state_unavailable",
+            "message": (
+                "The original proposal draft could not be captured completely before mutation; "
+                "nothing was filled or submitted."
+            ),
+            "draft_capture_error": draft_error,
+            "external_action_taken": False,
+        }
+
+    async def preclick_failure(
+        *,
+        status: str,
+        message: str | None,
+        details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await _proposal_preclick_failure(
+            page,
+            params,
+            approved_identity,
+            original_draft,
+            status=status,
+            message=message,
+            details=details,
+        )
+
     # Only after exact identity readback may form controls be queried or filled.
     if params.rate is not None:
-        rate_ok = await _fill_one_exact_input(
-            page,
-            _HOURLY_RATE_INPUT_SELECTOR,
-            str(params.rate),
-        )
+        try:
+            rate_ok = await _fill_one_exact_input(
+                page,
+                _HOURLY_RATE_INPUT_SELECTOR,
+                str(params.rate),
+            )
+        except Exception:
+            rate_ok = False
         if not rate_ok:
-            return {
-                "status": "live_form_mismatch",
-                "message": "One exact hourly rate could not be filled and read back.",
-                "external_action_taken": False,
-            }
+            return await preclick_failure(
+                status="live_form_mismatch",
+                message="One exact hourly rate could not be filled and read back.",
+            )
 
     if params.bid is not None:
-        fixed_ok, fixed_error = await _configure_fixed_payment_terms(page, params)
+        try:
+            fixed_ok, fixed_error = await _configure_fixed_payment_terms(page, params)
+        except Exception as error:
+            fixed_ok = False
+            fixed_error = f"Fixed-price configuration failed: {type(error).__name__}"
         if not fixed_ok:
-            return {"status": "error", "message": fixed_error, "external_action_taken": False}
+            return await preclick_failure(status="error", message=fixed_error)
 
     cover_textarea = await _one_consequential_control(
         page,
@@ -3784,82 +5033,136 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
         cover_textarea,
         params.cover_letter,
     ):
-        return {
-            "status": "live_form_mismatch",
-            "message": "One exact cover letter could not be filled and read back.",
-            "external_action_taken": False,
-        }
+        return await preclick_failure(
+            status="live_form_mismatch",
+            message="One exact cover letter could not be filled and read back.",
+        )
 
     # Answer screening questions only when the live field count still matches.
     answers = params.answers or []
     question_inputs = await _visible_enabled_elements(page, _SCREENING_ANSWER_CONTROLS)
     if len(question_inputs) != len(answers):
-        return {
-            "status": "live_form_mismatch",
-            "message": "The number of live screening answer fields differs from the approved answers.",
-            "approved_answers": len(answers),
-            "live_answer_fields": len(question_inputs),
-            "external_action_taken": False,
-        }
+        return await preclick_failure(
+            status="live_form_mismatch",
+            message="The number of live screening answer fields differs from the approved answers.",
+            details={
+                "approved_answers": len(answers),
+                "live_answer_fields": len(question_inputs),
+            },
+        )
     if answers:
         for i, answer in enumerate(answers):
             if not answer.strip():
-                return {
-                    "status": "live_form_mismatch",
-                    "message": "An approved screening answer is blank.",
-                    "external_action_taken": False,
-                }
+                return await preclick_failure(
+                    status="live_form_mismatch",
+                    message="An approved screening answer is blank.",
+                )
             if not await _fill_and_readback_text(question_inputs[i], answer):
-                return {
-                    "status": "live_form_mismatch",
-                    "message": "An approved screening answer could not be read back exactly.",
-                    "answer_index": i,
-                    "external_action_taken": False,
-                }
+                return await preclick_failure(
+                    status="live_form_mismatch",
+                    message="An approved screening answer could not be read back exactly.",
+                    details={"answer_index": i},
+                )
 
-    if not await _select_duration(page, params.duration):
-        return {"status": "error", "message": "Approved duration option could not be selected", "external_action_taken": False}
-    if not await _select_rate_increase_never(
-        page,
-        params.rate_increase_control_status,
-    ):
-        return {
-            "status": "live_form_mismatch",
-            "message": 'Rate increase frequency/status could not be verified as "Never".',
-            "external_action_taken": False,
-        }
+    try:
+        duration_ok = await _select_duration(page, params.duration)
+    except Exception:
+        duration_ok = False
+    if not duration_ok:
+        return await preclick_failure(
+            status="error",
+            message="Approved duration option could not be selected",
+        )
+    try:
+        rate_increase_ok = await _select_rate_increase_never(
+            page,
+            params.rate_increase_control_status,
+        )
+    except Exception:
+        rate_increase_ok = False
+    if not rate_increase_ok:
+        return await preclick_failure(
+            status="live_form_mismatch",
+            message='Rate increase frequency/status could not be verified as "Never".',
+        )
     if params.profile_highlights and params.available_profile_highlights_status != "complete":
-        return {
-            "status": "live_form_mismatch",
-            "message": "Approved profile-highlight enumeration was not complete.",
-            "external_action_taken": False,
-        }
-    highlights_ok, highlights_error = await _select_profile_highlights(page, params.profile_highlights)
+        return await preclick_failure(
+            status="live_form_mismatch",
+            message="Approved profile-highlight enumeration was not complete.",
+        )
+    try:
+        highlights_ok, highlights_error = await _select_profile_highlights(
+            page,
+            params.profile_highlights,
+        )
+    except Exception as error:
+        highlights_ok = False
+        highlights_error = f"Profile-highlight selection failed: {type(error).__name__}"
     if not highlights_ok:
-        return {
-            "status": "live_form_mismatch",
-            "message": highlights_error,
-            "external_action_taken": False,
-        }
+        return await preclick_failure(
+            status="live_form_mismatch",
+            message=highlights_error,
+        )
 
-    final_ok, final_error = await _reinspect_every_approved_live_state(
-        page,
-        params,
-        approved_identity,
-    )
+    commit_guard, guard_error = await _install_proposal_commit_guard(page)
+    if commit_guard is None:
+        return await preclick_failure(
+            status="atomic_commit_unavailable",
+            message=guard_error,
+        )
+
+    try:
+        final_ok, final_error = await _reinspect_every_approved_live_state(
+            page,
+            params,
+            approved_identity,
+        )
+    except Exception as error:
+        final_ok = False
+        final_error = f"Final proposal readback failed: {type(error).__name__}"
     if not final_ok:
-        return {
-            "status": "live_form_mismatch",
-            "message": final_error,
-            "external_action_taken": False,
-        }
+        return await preclick_failure(
+            status="live_form_mismatch",
+            message=final_error,
+        )
 
     # This is intentionally the first query for a first-stage submit control.
     submit_btn = await _first_stage_submit_control(page)
     if submit_btn is None:
-        return {"status": "error", "message": "Submit proposal button not found", "external_action_taken": False}
+        return await preclick_failure(
+            status="error",
+            message="Submit proposal button not found",
+        )
 
-    await _click(page, submit_btn)
+    commit_status, commit_error = await _atomic_click_first_stage_submit(
+        page,
+        params,
+        commit_guard,
+    )
+    if commit_status == "rejected":
+        return await preclick_failure(
+            status="submit_control_changed",
+            message=commit_error or "The atomic Submit proposal commit was rejected",
+        )
+    if commit_status == "unknown":
+        click_readback = await _proposal_confirmation(
+            page,
+            approved_proposal_target,
+            timeout_seconds=2,
+        )
+        if click_readback["confirmed"]:
+            return _confirmed_submission_result(params=params, readback=click_readback)
+        return {
+            "status": "unknown",
+            "message": (
+                "The single atomic Submit dispatch was not acknowledged and its owner-system outcome could not "
+                "be confirmed; do not retry automatically."
+            ),
+            "click_error": commit_error,
+            "owner_system_readback": click_readback,
+            "boost_spend_verified": False,
+            "external_action_taken": True,
+        }
     consequential_click_taken = True
 
     immediate_confirmation = await _proposal_confirmation(
@@ -3881,22 +5184,64 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
             }
         return _confirmed_submission_result(params=params, readback=immediate_confirmation)
 
-    send_btn, boost_error = await _configure_boost_step(
+    final_send_guard, boost_error = await _configure_boost_step(
         page,
         params.boost_connects,
         params.base_connects,
     )
-    if send_btn is None:
+    if final_send_guard is None:
         return {
             "status": "unknown",
             "message": boost_error,
             "boost_spend_verified": False,
             "external_action_taken": consequential_click_taken,
         }
-    await _click(page, send_btn)
+    final_send_status, final_send_error = await _atomic_click_final_send(
+        page,
+        params,
+        final_send_guard,
+    )
+    if final_send_status != "clicked":
+        send_readback = await _proposal_confirmation(
+            page,
+            approved_proposal_target,
+            timeout_seconds=2,
+        )
+        if send_readback["confirmed"]:
+            return _confirmed_submission_result(params=params, readback=send_readback)
+        return {
+            "status": "unknown",
+            "message": (
+                "The final proposal Send click did not complete cleanly and its owner-system "
+                "outcome could not be confirmed; do not retry automatically."
+            ),
+            "click_error": final_send_error,
+            "owner_system_readback": send_readback,
+            "boost_spend_verified": False,
+            "external_action_taken": True,
+        }
 
     if params.bid is not None:
-        await _acknowledge_fixed_price_warning(page)
+        try:
+            await _acknowledge_fixed_price_warning(page)
+        except Exception:
+            warning_readback = await _proposal_confirmation(
+                page,
+                approved_proposal_target,
+                timeout_seconds=2,
+            )
+            if warning_readback["confirmed"]:
+                return _confirmed_submission_result(params=params, readback=warning_readback)
+            return {
+                "status": "unknown",
+                "message": (
+                    "The fixed-price acknowledgement outcome could not be determined after "
+                    "Send; do not retry automatically."
+                ),
+                "owner_system_readback": warning_readback,
+                "boost_spend_verified": False,
+                "external_action_taken": True,
+            }
 
     readback = await _proposal_confirmation(
         page,
@@ -4035,6 +5380,35 @@ async def _exact_withdraw_control(scope, selector: str) -> Any | None:
     return matches[0] if len(matches) == 1 else None
 
 
+async def _withdraw_control_identity(control) -> bool:
+    try:
+        label = _normalise_identity_text(await control.text_content())
+    except Exception:
+        return False
+    return bool(re.fullmatch(r"Withdraw(?: proposal)?", label, re.I))
+
+
+async def _click_exact_withdraw(control) -> None:
+    """Revalidate one exact Withdraw control and dispatch its native click once."""
+
+    if not await _withdraw_control_identity(control):
+        raise _ControlNotActionable("The exact Withdraw control identity changed")
+    if not await _element_is_visible(control) or not await _element_is_enabled(control):
+        raise _ControlNotActionable(
+            "The exact Withdraw control was no longer visible and enabled"
+        )
+    if not await _withdraw_control_identity(control):
+        raise _ControlNotActionable(
+            "The exact Withdraw control identity changed during actionability readback"
+        )
+    try:
+        await control.click()
+    except Exception as error:
+        raise _ClickOutcomeUnknown(
+            "The single native Withdraw click raised; its outcome is unknown"
+        ) from error
+
+
 async def _withdrawal_reason_state(
     dialog,
     approved_reason: str | None,
@@ -4118,13 +5492,29 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
             "external_action_taken": False,
         }
 
-    await _click(page, withdraw_btn)
+    initial_click_unknown = False
+    try:
+        await _click_exact_withdraw(withdraw_btn)
+    except _ControlNotActionable as error:
+        return {
+            "status": "withdraw_control_changed",
+            "message": str(error),
+            "external_action_taken": False,
+        }
+    except _ClickOutcomeUnknown:
+        # Opening the dialog is reversible.  Continue only if the owner UI proves
+        # that this one dispatch reached the exact withdrawal dialog.
+        initial_click_unknown = True
 
     dialog = await _exact_withdrawal_dialog(page)
     if dialog is None:
         return {
             "status": "error",
-            "message": "One exact visible withdrawal dialog was not found.",
+            "message": (
+                "The initial Withdraw click outcome could not be proven from the owner UI."
+                if initial_click_unknown
+                else "One exact visible withdrawal dialog was not found."
+            ),
             "external_action_taken": False,
         }
     reason_ok, reason_state = await _withdrawal_reason_state(
@@ -4174,7 +5564,18 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
             "message": "One exact final Withdraw control was not found in the withdrawal dialog.",
             "external_action_taken": False,
         }
-    await _click(page, confirm_btn)
+    try:
+        await _click_exact_withdraw(confirm_btn)
+    except _ControlNotActionable as error:
+        return {
+            "status": "withdraw_control_changed",
+            "message": str(error),
+            "external_action_taken": False,
+        }
+    except _ClickOutcomeUnknown:
+        # The single irreversible dispatch may have succeeded.  Never retry it;
+        # only the owner-system status readback below may confirm the outcome.
+        pass
 
     last_readback_identity: dict[str, str] | None = None
     for _ in range(20):
