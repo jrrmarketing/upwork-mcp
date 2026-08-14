@@ -380,11 +380,15 @@ async def test_preparation_binds_explicit_live_by_project_structure(
 
 
 class _Text:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, visible: bool = True) -> None:
         self.text = text
+        self.visible = visible
 
     async def text_content(self) -> str:
         return self.text
+
+    async def is_visible(self) -> bool:
+        return self.visible
 
 
 class _IdentityPage:
@@ -833,8 +837,15 @@ class _Link(_Text):
 
 
 class _StoredProposalPage:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        body: str = "Submitted proposal",
+        statuses: list[_Text] | None = None,
+    ) -> None:
         self.url = "https://www.upwork.com/nx/proposals/1111111111111111111"
+        self.body = body
+        self.statuses = statuses if statuses is not None else [_Text("submitted")]
 
     async def goto(self, url: str, **_kwargs: Any) -> None:
         self.url = url
@@ -847,10 +858,14 @@ class _StoredProposalPage:
         if "proposal-status" in selector:
             return _Text("submitted")
         if selector == "body":
-            return _Text("Submitted proposal")
+            return _Text(self.body)
         return None
 
-    async def query_selector_all(self, _selector: str) -> list[Any]:
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == proposals._SUBMITTED_PROPOSAL_TITLE_SELECTOR:
+            return [_Text("Google Ads audit")]
+        if selector == proposals._SUBMITTED_PROPOSAL_STATUS_SELECTOR:
+            return self.statuses
         return []
 
 
@@ -865,6 +880,30 @@ async def test_stored_proposal_readback_extracts_exact_job_identity() -> None:
     assert details["job_id"] == "~abc123"
     assert details["job_title"] == "Google Ads audit"
     assert details["status"] == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_stored_proposal_status_requires_one_exact_visible_scoped_control() -> None:
+    spoofed = await proposals._get_proposal_details_on_page(
+        "https://www.upwork.com/nx/proposals/1111111111111111111",
+        _StoredProposalPage(body="Proposal was withdrawn", statuses=[]),
+    )
+    assert "status" not in spoofed
+
+    visible_wins = await proposals._get_proposal_details_on_page(
+        "https://www.upwork.com/nx/proposals/1111111111111111111",
+        _StoredProposalPage(
+            body="Proposal was withdrawn",
+            statuses=[_Text("withdrawn", visible=False), _Text("active")],
+        ),
+    )
+    assert visible_wins["status"] == "active"
+
+    ambiguous = await proposals._get_proposal_details_on_page(
+        "https://www.upwork.com/nx/proposals/1111111111111111111",
+        _StoredProposalPage(statuses=[_Text("active"), _Text("withdrawn")]),
+    )
+    assert "status" not in ambiguous
 
 
 def _approved_identity() -> dict[str, str]:

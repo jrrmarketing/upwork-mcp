@@ -60,6 +60,16 @@ class _Button(_Element):
         self.callback()
 
 
+class _HidesBeforeClickButton(_Button):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.visibility_reads = 0
+
+    async def is_visible(self) -> bool:
+        self.visibility_reads += 1
+        return self.visibility_reads == 1
+
+
 class _Option(_Element):
     pass
 
@@ -166,10 +176,16 @@ class _Dialog(_Element):
 
 
 class _InvitationPage:
-    def __init__(self, dialog: _Dialog) -> None:
+    def __init__(
+        self,
+        dialog: _Dialog,
+        *,
+        update_scoped_status_on_confirm: bool = True,
+    ) -> None:
         self.url = "https://www.upwork.com/nx/proposals/interview/uid/3333333333333333333"
         self.title = "Agency Google Ads support"
         self.body = "Pending invitation"
+        self.status_elements = [_Element("pending")]
         self.dialogs = [dialog]
         self.final_clicks = 0
         self.title_reads = 0
@@ -179,6 +195,8 @@ class _InvitationPage:
         def confirm() -> None:
             self.final_clicks += 1
             self.body = "You have declined this invitation"
+            if update_scoped_status_on_confirm:
+                self.status_elements[0].text = "declined"
             dialog.visible = False
 
         if not dialog.buttons:
@@ -207,6 +225,8 @@ class _InvitationPage:
             if self.title_reads == 2 and self.before_final_identity_read:
                 self.before_final_identity_read()
             return [_Element(self.title)]
+        if selector == invitations._INVITATION_STATUS_SELECTOR:
+            return self.status_elements
         if selector == invitations._INITIAL_DECLINE_SELECTOR:
             return [self.initial_button]
         if selector == invitations._DIALOG_SELECTOR:
@@ -393,6 +413,68 @@ async def test_invitation_identity_is_rechecked_immediately_before_confirmation(
     assert result["status"] == "live_identity_mismatch"
     assert result["external_action_taken"] is False
     assert page.final_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_invitation_status_uses_only_one_exact_visible_scoped_control() -> None:
+    page = _InvitationPage(_Dialog())
+    page.body = "You have declined this invitation"
+
+    identity = await invitations._current_invitation_identity(page, _params().invitation_url)
+
+    assert identity and identity["invitation_status"] == "pending"
+
+    page.status_elements = [_Element("declined", visible=False), _Element("pending")]
+    identity = await invitations._current_invitation_identity(page, _params().invitation_url)
+    assert identity and identity["invitation_status"] == "pending"
+
+    page.body = "Pending invitation"
+    page.status_elements = [_Element("declined")]
+    identity = await invitations._current_invitation_identity(page, _params().invitation_url)
+    assert identity and identity["invitation_status"] == "declined"
+
+    page.status_elements = [_Element("pending"), _Element("declined")]
+    assert await invitations._current_invitation_identity(
+        page,
+        _params().invitation_url,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_spoofed_decline_copy_cannot_confirm_pending_scoped_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(invitations.asyncio, "sleep", no_sleep)
+    page = _InvitationPage(
+        _Dialog(),
+        update_scoped_status_on_confirm=False,
+    )
+
+    result = await invitations._decline_invitation_on_page(_params(), page)
+
+    assert result["status"] == "unknown"
+    assert result["owner_system_readback"]["confirmed"] is False
+    assert result["owner_system_readback"]["invitation_identity"][
+        "invitation_status"
+    ] == "pending"
+    assert page.body == "You have declined this invitation"
+    assert page.final_clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_final_decline_hidden_at_click_is_never_clicked() -> None:
+    hidden_at_click = _HidesBeforeClickButton("Decline invitation")
+    page = _InvitationPage(_Dialog(buttons=[hidden_at_click]))
+
+    result = await invitations._decline_invitation_on_page(_params(), page)
+
+    assert result["status"] == "live_form_mismatch"
+    assert result["external_action_taken"] is False
+    assert page.final_clicks == 0
+    assert hidden_at_click.visibility_reads == 2
 
 
 @pytest.mark.asyncio

@@ -1144,6 +1144,20 @@ class _WithdrawalPage:
         return []
 
 
+class _SpoofedWithdrawalPage(_WithdrawalPage):
+    """Body copy changes after click, but the scoped owner status stays active."""
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.url = url
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return await super().query_selector(selector)
+        if "job-title" in selector or "h1" in selector:
+            return _TextElement(self.title)
+        return None
+
+
 def _withdrawal_params(*, reason: str | None = None) -> proposals.WithdrawProposalParams:
     return proposals.WithdrawProposalParams(
         proposal_url="https://www.upwork.com/nx/proposals/1111111111111111111",
@@ -1253,6 +1267,28 @@ async def test_withdrawal_exact_dialog_reason_and_control_are_read_back(monkeypa
     assert result["external_action_taken"] is True
     assert reason.value == "Specific approved reason"
     assert dialog.confirm_clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_body_spoof_cannot_confirm_active_scoped_status(
+    monkeypatch,
+) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(proposals.asyncio, "sleep", no_sleep)
+    dialog = _WithdrawalDialog()
+    page = _SpoofedWithdrawalPage([dialog])
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "unknown"
+    assert result["owner_system_readback"]["confirmed"] is False
+    assert result["owner_system_readback"]["proposal_identity"][
+        "proposal_status"
+    ] == "active"
+    assert dialog.confirm_clicks == 1
+    assert (await page.query_selector("body")).text == "Proposal was withdrawn"
 
 
 @pytest.mark.asyncio

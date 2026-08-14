@@ -22,6 +22,10 @@ _INVITATION_DISCOVERY_PATH = re.compile(
 )
 
 _INVITATION_TITLE_SELECTOR = '[data-test="job-title"], .job-title, main h1'
+_INVITATION_STATUS_SELECTOR = (
+    '[data-test="invitation-status"], [data-test^="invitation-status-"], '
+    '[data-test*="invitation-status"], .invitation-status'
+)
 _INITIAL_DECLINE_SELECTOR = (
     '[data-test="decline-button"], button, [role="button"]'
 )
@@ -191,20 +195,45 @@ async def get_invitations(params: InvitationsParams | None = None) -> list[dict[
     return invitations
 
 
-async def _page_text(page) -> str:
-    body = await page.query_selector("body")
-    return ((await body.text_content()) if body else "") or ""
+class _InteractionStateChanged(RuntimeError):
+    """The resolved invitation control was no longer actionable at click time."""
 
 
-async def _click(page, element) -> None:
+async def _click(_scope, element) -> None:
+    """Click only after a fresh visible-and-enabled read, with no DOM fallback."""
+
     try:
-        await element.click()
-    except Exception:
-        await page.evaluate("element => element.click()", element)
+        visible = bool(await element.is_visible())
+        enabled = bool(await element.is_enabled())
+    except Exception as error:
+        raise _InteractionStateChanged(
+            "The exact invitation control actionability could not be re-read"
+        ) from error
+    if not visible or not enabled:
+        raise _InteractionStateChanged(
+            "The exact invitation control was no longer visible and enabled"
+        )
+    await element.click()
 
 
 def _normalise(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _canonical_invitation_status(value: str) -> str | None:
+    """Canonicalize only an exact scoped invitation-status control value."""
+
+    normalized = _normalise(value).casefold()
+    match = re.fullmatch(
+        r"(?:(?:invitation\s+)?status\s*[:\-]\s*)?"
+        r"(?:invitation\s+)?(pending|declined|accepted|closed|expired)"
+        r"(?:\s+invitation)?",
+        normalized,
+    )
+    if not match:
+        return None
+    status = match.group(1)
+    return "closed" if status == "expired" else status
 
 
 async def _visible_elements(scope, selector: str) -> list[Any] | None:
@@ -252,34 +281,14 @@ async def _current_invitation_identity(
     if len(titles) != 1:
         return None
 
-    try:
-        text = await _page_text(page)
-    except Exception:
+    status_elements = await _visible_elements(page, _INVITATION_STATUS_SELECTOR)
+    if status_elements is None or len(status_elements) != 1:
         return None
-    if re.search(
-        r"you (?:have )?declined (?:this |the )?invitation|invitation (?:was |has been )?declined",
-        text,
-        re.I,
-    ):
-        invitation_status = "declined"
-    elif re.search(r"invitation (?:was |has been )?accepted|you accepted (?:this |the )?invitation", text, re.I):
-        invitation_status = "accepted"
-    elif re.search(r"invitation (?:has )?expired|invitation (?:is )?closed", text, re.I):
-        invitation_status = "closed"
-    elif re.search(
-        r"pending invitation|invitation to (?:apply|interview)|"
-        r"invited you to (?:apply|interview)|respond to (?:this |the )?invitation",
-        text,
-        re.I,
-    ):
-        invitation_status = "pending"
-    else:
-        status_el = await page.query_selector('[data-test*="invitation-status"], .invitation-status')
-        invitation_status = (
-            _normalise((await status_el.text_content()) or "") if status_el else ""
-        )
-
-    if not invitation_status:
+    status_text = await _element_text(status_elements[0])
+    invitation_status = (
+        _canonical_invitation_status(status_text) if status_text is not None else None
+    )
+    if invitation_status is None:
         return None
     return {
         "invitation_url": live_url,
@@ -689,7 +698,14 @@ async def _decline_invitation_on_page(params: DeclineInvitationParams, page) -> 
             "message": decline_error,
             "external_action_taken": False,
         }
-    await _click(page, decline_button)
+    try:
+        await _click(page, decline_button)
+    except Exception:
+        return {
+            "status": "live_form_mismatch",
+            "message": "The exact initial Decline invitation control changed before click.",
+            "external_action_taken": False,
+        }
 
     dialog, dialog_error = await _wait_for_exact_decline_dialog(page)
     if dialog is None:
@@ -783,44 +799,52 @@ async def _decline_invitation_on_page(params: DeclineInvitationParams, page) -> 
             "external_action_taken": False,
         }
 
-    await _click(dialog, confirm_button)
+    try:
+        await _click(dialog, confirm_button)
+    except _InteractionStateChanged as error:
+        return {
+            "status": "live_form_mismatch",
+            "message": str(error),
+            "external_action_taken": False,
+        }
+    except Exception:
+        return {
+            "status": "unknown",
+            "message": (
+                "The exact final Decline click outcome could not be determined; "
+                "do not retry automatically."
+            ),
+            "owner_system_readback": {
+                "confirmed": False,
+                "invitation_identity": None,
+                "url": str(getattr(page, "url", params.invitation_url)),
+            },
+            "external_action_taken": True,
+        }
 
+    last_readback_identity: dict[str, str] | None = None
     for _ in range(20):
-        text = await _page_text(page)
-        evidence = re.search(
-            r"you (?:have )?declined (?:this |the )?invitation|invitation (?:was |has been )?declined",
-            text,
-            re.I,
-        )
-        if evidence:
+        try:
             readback_identity = await _read_invitation_identity(page, params.invitation_url)
-            same_target = bool(
-                readback_identity
-                and readback_identity["invitation_id"] == params.invitation_id
-                and readback_identity["job_title"] == approved_identity["job_title"]
-                and readback_identity["invitation_status"].casefold() == "declined"
-            )
-            if not same_target:
-                return {
-                    "status": "unknown",
-                    "message": (
-                        "Upwork showed decline text but the same invitation identity and declined "
-                        "status could not be read back; do not retry automatically."
-                    ),
-                    "owner_system_readback": {
-                        "confirmed": False,
-                        "evidence": evidence.group(0),
-                        "invitation_identity": readback_identity,
-                        "url": str(getattr(page, "url", params.invitation_url)),
-                    },
-                    "external_action_taken": True,
-                }
+        except Exception:
+            readback_identity = None
+        last_readback_identity = readback_identity
+        same_target = bool(
+            readback_identity
+            and readback_identity["invitation_id"] == params.invitation_id
+            and readback_identity["job_title"] == approved_identity["job_title"]
+        )
+        if (
+            readback_identity is not None
+            and same_target
+            and readback_identity["invitation_status"] == "declined"
+        ):
             return {
                 "status": "declined",
                 "message": "Invitation decline read back from Upwork",
                 "owner_system_readback": {
                     "confirmed": True,
-                    "evidence": evidence.group(0),
+                    "evidence": "exact scoped invitation status: declined",
                     "invitation_identity": readback_identity,
                     "url": str(getattr(page, "url", params.invitation_url)),
                 },
@@ -833,7 +857,7 @@ async def _decline_invitation_on_page(params: DeclineInvitationParams, page) -> 
         "message": "Upwork did not confirm the decline; do not retry automatically.",
         "owner_system_readback": {
             "confirmed": False,
-            "invitation_identity": approved_identity,
+            "invitation_identity": last_readback_identity,
             "url": str(getattr(page, "url", params.invitation_url)),
         },
         "external_action_taken": True,

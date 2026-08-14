@@ -65,6 +65,10 @@ _JOB_PATH = re.compile(rf"^/jobs/(?P<job_id>{_JOB_ID})/?$")
 _APPLICATION_PATH = re.compile(
     rf"^/(?:nx|ab)/proposals/job/(?P<job_id>{_JOB_ID})/apply/?$"
 )
+_SUBMITTED_PROPOSAL_TITLE_SELECTOR = '[data-test="job-title"], .job-title'
+_SUBMITTED_PROPOSAL_STATUS_SELECTOR = (
+    '[data-test="proposal-status"], .proposal-status, [data-test*="proposal-status"]'
+)
 
 
 def parse_job_url(value: str) -> tuple[str, str]:
@@ -677,10 +681,24 @@ async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
         "proposal_id": proposal_id,
     }
 
-    # Job title
-    title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
-    if title_el:
-        details["job_title"] = (await title_el.text_content() or "").strip()
+    async def one_exact_visible_text(selector: str) -> str | None:
+        try:
+            candidates = await page.query_selector_all(selector)
+        except Exception:
+            return None
+        visible = [candidate for candidate in candidates if await _element_is_visible(candidate)]
+        if len(visible) != 1:
+            return None
+        try:
+            value = _normalise_identity_text(await visible[0].text_content())
+        except Exception:
+            return None
+        return value or None
+
+    # Identity and owner status must come from unique visible scoped controls.
+    job_title = await one_exact_visible_text(_SUBMITTED_PROPOSAL_TITLE_SELECTOR)
+    if job_title:
+        details["job_title"] = job_title
     job_link = await page.query_selector('a[href^="/jobs/~"], a[href^="https://www.upwork.com/jobs/~"]')
     if job_link:
         try:
@@ -704,27 +722,9 @@ async def _get_proposal_details_on_page(proposal_url: str, page) -> dict:
     if bid_el:
         details["bid"] = (await bid_el.text_content() or "").strip()
 
-    # Status
-    status_el = await page.query_selector(
-        '[data-test="proposal-status"], .proposal-status, [data-test*="proposal-status"]'
-    )
-    if status_el:
-        details["status"] = (await status_el.text_content() or "").strip()
-    if not details.get("status"):
-        page_text = await _page_text(page)
-        if re.search(r"proposal (?:was |has been )?withdrawn", page_text, re.I):
-            details["status"] = "withdrawn"
-        else:
-            live_status = re.search(
-                r"\b(active|submitted|archived|closed)\s+proposal\b|"
-                r"\bproposal\s+(?:status\s*[:\-]?\s*)?(active|submitted|archived|closed)\b",
-                page_text,
-                re.I,
-            )
-            if live_status:
-                details["status"] = next(
-                    group for group in live_status.groups() if group is not None
-                ).lower()
+    proposal_status = await one_exact_visible_text(_SUBMITTED_PROPOSAL_STATUS_SELECTOR)
+    if proposal_status:
+        details["status"] = proposal_status
 
     # Client response/messages
     messages = []
@@ -753,6 +753,18 @@ def _proposal_identity(details: Mapping[str, Any]) -> dict[str, str] | None:
     }
 
 
+def _proposal_status_is_withdrawn(value: str) -> bool:
+    """Match only an exact withdrawn state read from the scoped status control."""
+
+    return bool(
+        re.fullmatch(
+            r"(?:proposal\s+)?withdrawn(?:\s+proposal)?",
+            re.sub(r"\s+", " ", value).strip(),
+            re.I,
+        )
+    )
+
+
 async def prepare_proposal_withdrawal(
     proposal_url: str,
     reason: str | None = None,
@@ -765,7 +777,7 @@ async def prepare_proposal_withdrawal(
     errors: list[str] = []
     if identity is None:
         errors.append("The proposal identity and live status could not be read back from Upwork")
-    elif identity["proposal_status"].casefold() == "withdrawn":
+    elif _proposal_status_is_withdrawn(identity["proposal_status"]):
         errors.append("The proposal is already withdrawn")
 
     payload: dict[str, Any] | None = None
@@ -3975,10 +3987,8 @@ async def _current_submitted_proposal_identity(
             return None
         return value or None
 
-    job_title = await one_visible_text('[data-test="job-title"], .job-title')
-    proposal_status = await one_visible_text(
-        '[data-test="proposal-status"], .proposal-status, [data-test*="proposal-status"]'
-    )
+    job_title = await one_visible_text(_SUBMITTED_PROPOSAL_TITLE_SELECTOR)
+    proposal_status = await one_visible_text(_SUBMITTED_PROPOSAL_STATUS_SELECTOR)
     if not job_title or not proposal_status:
         return None
     return {
@@ -4074,7 +4084,7 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
         "job_title": re.sub(r"\s+", " ", params.job_title).strip(),
         "proposal_status": re.sub(r"\s+", " ", params.proposal_status).strip(),
     }
-    if live_identity and live_identity["proposal_status"].casefold() == "withdrawn":
+    if live_identity and _proposal_status_is_withdrawn(live_identity["proposal_status"]):
         return {
             "status": "already_withdrawn",
             "owner_system_readback": {
@@ -4166,42 +4176,33 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
         }
     await _click(page, confirm_btn)
 
+    last_readback_identity: dict[str, str] | None = None
     for _ in range(20):
-        text = await _page_text(page)
-        evidence = re.search(r"proposal (?:was |has been )?withdrawn|withdrawal confirmed", text, re.I)
-        if evidence:
-            try:
-                readback_details = await _get_proposal_details_on_page(params.proposal_url, page)
-            except ValueError:
-                readback_details = {}
-            readback_identity = _proposal_identity(readback_details)
-            same_target = bool(
-                readback_identity
-                and readback_identity["proposal_id"] == params.proposal_id
-                and readback_identity["job_title"] == approved_identity["job_title"]
-                and "withdraw" in readback_identity["proposal_status"].casefold()
-            )
-            if not same_target:
-                return {
-                    "status": "unknown",
-                    "message": (
-                        "Upwork showed withdrawal text but the same proposal identity and withdrawn "
-                        "status could not be read back; do not retry automatically."
-                    ),
-                    "owner_system_readback": {
-                        "confirmed": False,
-                        "evidence": evidence.group(0),
-                        "proposal_identity": readback_identity,
-                        "url": str(getattr(page, "url", params.proposal_url)),
-                    },
-                    "external_action_taken": True,
-                }
+        try:
+            readback_details = await _get_proposal_details_on_page(params.proposal_url, page)
+        except Exception:
+            readback_details = {}
+        readback_identity = _proposal_identity(readback_details)
+        last_readback_identity = readback_identity
+        same_target = bool(
+            readback_identity
+            and readback_identity["proposal_id"] == params.proposal_id
+            and readback_identity["job_title"] == approved_identity["job_title"]
+        )
+        if (
+            readback_identity is not None
+            and same_target
+            and _proposal_status_is_withdrawn(readback_identity["proposal_status"])
+        ):
             return {
                 "status": "withdrawn",
                 "message": "Proposal withdrawal read back from Upwork",
                 "owner_system_readback": {
                     "confirmed": True,
-                    "evidence": evidence.group(0),
+                    "evidence": (
+                        "exact scoped proposal status: "
+                        f"{readback_identity['proposal_status']}"
+                    ),
                     "proposal_identity": readback_identity,
                     "url": str(getattr(page, "url", params.proposal_url)),
                 },
@@ -4213,7 +4214,7 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
         "message": "Upwork did not confirm withdrawal; do not retry automatically.",
         "owner_system_readback": {
             "confirmed": False,
-            "proposal_identity": approved_identity,
+            "proposal_identity": last_readback_identity,
             "url": str(getattr(page, "url", params.proposal_url)),
         },
         "external_action_taken": True,
