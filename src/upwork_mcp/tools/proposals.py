@@ -2237,7 +2237,7 @@ async def _select_exact_dropdown_label(page, toggle, approved_label: str) -> boo
 
 
 async def _select_duration(page, duration: str) -> bool:
-    selects = await _enabled_elements(
+    selects = await _visible_enabled_elements(
         page,
         'select[name*="duration"], [data-test*="duration"] select',
     )
@@ -2250,7 +2250,7 @@ async def _select_duration(page, duration: str) -> bool:
             return False
         return await _selected_option_label(selects[0]) == duration
 
-    toggle = await _one_enabled(
+    toggle = await _one_consequential_control(
         page,
         'button:has-text("Select a duration"), '
         '.air3-dropdown-toggle:has-text("duration"), '
@@ -2269,11 +2269,11 @@ async def _select_rate_increase_never(
 
     if approved_control_status not in {None, "complete", "not_applicable"}:
         return False
-    selects = await _enabled_elements(
+    selects = await _visible_enabled_elements(
         page,
         'select[name*="increase"], [data-test*="rate-increase"] select',
     )
-    toggles = await _enabled_elements(
+    toggles = await _visible_enabled_elements(
         page,
         '[data-test*="rate-increase"] button, '
         '.air3-dropdown-toggle:has-text("rate increase"), '
@@ -3138,11 +3138,11 @@ async def _readback_text_input(scope, selector: str, expected: str) -> bool:
 
 
 async def _readback_duration(page, expected: str) -> bool:
-    selects = await _enabled_elements(
+    selects = await _visible_enabled_elements(
         page,
         'select[name*="duration"], [data-test*="duration"] select',
     )
-    toggles = await _enabled_elements(
+    toggles = await _visible_enabled_elements(
         page,
         'button:has-text("Select a duration"), '
         '.air3-dropdown-toggle:has-text("duration"), '
@@ -3164,8 +3164,8 @@ async def _readback_rate_increase(
     job_type: Literal["hourly", "fixed"],
     approved_status: RateIncreaseControlStatus,
 ) -> bool:
-    selects = await _enabled_elements(page, _RATE_INCREASE_SELECT)
-    toggles = await _enabled_elements(page, _RATE_INCREASE_TOGGLE)
+    selects = await _visible_enabled_elements(page, _RATE_INCREASE_SELECT)
+    toggles = await _visible_enabled_elements(page, _RATE_INCREASE_TOGGLE)
     if job_type == "fixed":
         return approved_status == "not_applicable" and not selects and not toggles
     if approved_status != "complete":

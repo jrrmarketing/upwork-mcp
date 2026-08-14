@@ -41,12 +41,16 @@ class _Field:
 
 
 class _Select:
-    def __init__(self, *, wrong_readback: str | None = None) -> None:
+    def __init__(self, *, wrong_readback: str | None = None, visible: bool = True) -> None:
         self.label = ""
         self.wrong_readback = wrong_readback
+        self.visible = visible
 
     async def is_enabled(self) -> bool:
         return True
+
+    async def is_visible(self) -> bool:
+        return self.visible
 
     async def select_option(self, *, label: str) -> None:
         self.label = label
@@ -258,6 +262,50 @@ async def test_control_hidden_before_final_readback_never_queries_submit(
 
     async def hide_control(_page, _highlights):
         getattr(page, hidden_control).visible = False
+        return True, None
+
+    monkeypatch.setattr(proposals, "_select_profile_highlights", hide_control)
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "live_form_mismatch"
+    assert result["external_action_taken"] is False
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden_control", ["duration", "increase"])
+async def test_hidden_enabled_duration_or_increase_never_queries_submit(
+    monkeypatch,
+    hidden_control: str,
+) -> None:
+    page = _CommitPage()
+    control = getattr(page, hidden_control)
+    assert control is not None
+    control.visible = False
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] in {"error", "live_form_mismatch"}
+    assert result["external_action_taken"] is False
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden_control", ["duration", "increase"])
+async def test_duration_or_increase_hidden_before_final_readback_never_queries_submit(
+    monkeypatch,
+    hidden_control: str,
+) -> None:
+    page = _CommitPage()
+    _commercial_inspectors(monkeypatch)
+
+    async def hide_control(_page, _highlights):
+        control = getattr(page, hidden_control)
+        assert control is not None
+        control.visible = False
         return True, None
 
     monkeypatch.setattr(proposals, "_select_profile_highlights", hide_control)
