@@ -799,12 +799,35 @@ async def _page_text(page) -> str:
 
 
 async def _click(page, element) -> None:
-    """Click through Upwork overlays, falling back to a DOM click."""
+    """Click one visible, enabled control, including the overlay fallback."""
 
+    if not await _element_is_visible(element) or not await _element_is_enabled(element):
+        raise RuntimeError("Refusing to click a control that is not visible and enabled")
     try:
         await element.click()
-    except Exception:
-        await page.evaluate("element => element.click()", element)
+    except Exception as error:
+        # Keep the historical overlay fallback, but perform the actionability
+        # check and DOM click in one browser-side operation.  A hidden clone or
+        # a control that changed state after resolution must never be clicked.
+        clicked = await page.evaluate(
+            """element => {
+              const style = window.getComputedStyle(element);
+              const visible = Boolean(
+                element.isConnected
+                && element.getClientRects().length
+                && style.display !== 'none'
+                && style.visibility !== 'hidden'
+              );
+              const enabled = !element.matches(':disabled')
+                && element.getAttribute('aria-disabled') !== 'true';
+              if (!visible || !enabled) return false;
+              element.click();
+              return true;
+            }""",
+            element,
+        )
+        if clicked is not True:
+            raise RuntimeError("The control stopped being visible and enabled before click") from error
 
 
 def _dedupe_text(values: list[str]) -> list[str]:
@@ -1297,7 +1320,8 @@ async def _open_proposal_form(page, job_url: str) -> tuple[str, str | None]:
     if live_job_id != expected_job_id:
         return "identity_mismatch", None
 
-    apply_btn = await page.query_selector(
+    apply_btn = await _one_consequential_control(
+        page,
         '[data-test="apply-button"]:text-is("Apply Now"), '
         'button:text-is("Apply Now"), a:text-is("Apply Now")'
     )
@@ -1363,11 +1387,7 @@ async def _inspect_duration_options(page) -> dict[str, Any]:
         "unexpected_options": [],
         "message": "The duration menu was not inspected.",
     }
-    toggles = [
-        element
-        for element in await page.query_selector_all(_DURATION_TOGGLE)
-        if await _element_is_visible(element)
-    ]
+    toggles = await _enabled_elements(page, _DURATION_TOGGLE)
     details["toggle_count"] = len(toggles)
     if not toggles:
         details["message"] = "Exactly one visible duration control could not be identified."
@@ -1539,16 +1559,8 @@ async def _inspect_rate_increase_control(
         return {"status": "unavailable", "details": details}
 
     try:
-        selects = [
-            element
-            for element in await page.query_selector_all(_RATE_INCREASE_SELECT)
-            if await _element_is_visible(element)
-        ]
-        toggles = [
-            element
-            for element in await page.query_selector_all(_RATE_INCREASE_TOGGLE)
-            if await _element_is_visible(element)
-        ]
+        selects = await _enabled_elements(page, _RATE_INCREASE_SELECT)
+        toggles = await _enabled_elements(page, _RATE_INCREASE_TOGGLE)
     except Exception as error:
         details["message"] = f"Rate-increase control inspection failed: {type(error).__name__}."
         return {"status": "unavailable", "details": details}
@@ -1672,6 +1684,14 @@ async def _element_is_visible(element) -> bool:
         return False
 
 
+async def _element_is_enabled(element) -> bool:
+    try:
+        return bool(await element.is_enabled())
+    except Exception:
+        # Detached or unreadable controls cannot be safely interacted with.
+        return False
+
+
 async def _highlight_title_for_button(button) -> str | None:
     """Read the title belonging to one Select highlight button without clicking it."""
 
@@ -1743,9 +1763,7 @@ async def _visible_profile_highlight_options(page) -> tuple[list[str], int]:
 
     titles: list[str] = []
     option_count = 0
-    for button in await page.query_selector_all(_PROFILE_HIGHLIGHT_SELECT_BUTTONS):
-        if not await _element_is_visible(button):
-            continue
+    for button in await _enabled_elements(page, _PROFILE_HIGHLIGHT_SELECT_BUTTONS):
         label = _normalize_visible_title((await button.text_content()) or "")
         if label and not re.search(r"select highlight", label, re.I):
             continue
@@ -1759,9 +1777,7 @@ async def _visible_profile_highlight_options(page) -> tuple[list[str], int]:
 async def _profile_highlight_tabs(page) -> list[tuple[str, Any]]:
     tabs: list[tuple[str, Any]] = []
     seen: set[str] = set()
-    for index, tab in enumerate(await page.query_selector_all(_PROFILE_HIGHLIGHT_TABS)):
-        if not await _element_is_visible(tab):
-            continue
+    for index, tab in enumerate(await _enabled_elements(page, _PROFILE_HIGHLIGHT_TABS)):
         try:
             tab_id = _normalize_visible_title((await tab.get_attribute("data-ev-tab")) or "")
         except Exception:
@@ -1798,8 +1814,8 @@ async def _wait_for_profile_highlight_chooser(page) -> None:
 
 
 async def _dismiss_profile_highlight_chooser(page) -> bool:
-    close_button = await page.query_selector(_PROFILE_HIGHLIGHT_CLOSE)
-    if close_button and await _element_is_visible(close_button):
+    close_button = await _one_enabled(page, _PROFILE_HIGHLIGHT_CLOSE)
+    if close_button is not None:
         try:
             await _click(page, close_button)
             await _settle_profile_highlight_view(page)
@@ -1834,11 +1850,7 @@ async def _inspect_available_profile_highlights(page) -> dict[str, Any]:
             "message": "The live profile-highlight chooser was not inspected.",
         },
     }
-    open_buttons = [
-        opener
-        for opener in await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
-        if await _element_is_visible(opener)
-    ]
+    open_buttons = await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
     result["details"]["opener_controls_seen"] = len(open_buttons)
     if len(open_buttons) != 1:
         result["details"]["message"] = (
@@ -2093,7 +2105,12 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
 
 
 async def _enabled_elements(scope, selector: str) -> list[Any]:
-    """Return only controls whose enabled state can be read as true."""
+    """Return only controls proven both visible and enabled.
+
+    Upwork leaves hidden responsive and modal clones in the DOM.  Every
+    interaction resolver uses this common fail-closed definition so an enabled
+    hidden clone can never become an action target.
+    """
 
     enabled: list[Any] = []
     try:
@@ -2101,11 +2118,10 @@ async def _enabled_elements(scope, selector: str) -> list[Any]:
     except Exception:
         return enabled
     for element in candidates:
-        try:
-            if await element.is_enabled():
-                enabled.append(element)
-        except Exception:
+        if not await _element_is_visible(element):
             continue
+        if await _element_is_enabled(element):
+            enabled.append(element)
     return enabled
 
 
@@ -2115,28 +2131,9 @@ async def _one_enabled(scope, selector: str) -> Any | None:
 
 
 async def _visible_enabled_elements(scope, selector: str) -> list[Any]:
-    """Return controls proven both visible and enabled.
+    """Compatibility name for the shared visible-and-enabled resolver."""
 
-    Upwork can leave hidden responsive/modal clones in the DOM.  Consequential
-    actions must never bind one of those clones merely because ``is_enabled`` is
-    true.
-    """
-
-    try:
-        candidates = await scope.query_selector_all(selector)
-    except Exception:
-        return []
-    controls: list[Any] = []
-    for element in candidates:
-        if not await _element_is_visible(element):
-            continue
-        try:
-            enabled = bool(await element.is_enabled())
-        except Exception:
-            enabled = False
-        if enabled:
-            controls.append(element)
-    return controls
+    return await _enabled_elements(scope, selector)
 
 
 async def _one_consequential_control(scope, selector: str) -> Any | None:
@@ -2215,7 +2212,8 @@ async def _select_exact_dropdown_label(page, toggle, approved_label: str) -> boo
         return False
     matches: list[Any] = []
     try:
-        options = await page.query_selector_all(
+        options = await _enabled_elements(
+            page,
             'li.air3-menu-item, [role="option"], [role="menuitem"]'
         )
     except Exception:
@@ -2225,7 +2223,7 @@ async def _select_exact_dropdown_label(page, toggle, approved_label: str) -> boo
             label = _normalise_identity_text(await option.text_content())
         except Exception:
             continue
-        if label == approved_label and await _element_is_visible(option):
+        if label == approved_label:
             matches.append(option)
     if len(matches) != 1:
         return False
@@ -2323,6 +2321,8 @@ async def _fixed_payment_section(page) -> Any | None:
     )
     exact: list[Any] = []
     for candidate in candidates:
+        if not await _element_is_visible(candidate):
+            continue
         try:
             text = _normalise_identity_text(await candidate.text_content())
         except Exception:
@@ -2336,7 +2336,8 @@ async def _fixed_payment_section(page) -> Any | None:
 
 async def _exact_payment_radio(section, label: str):
     token = "project" if label == "By project" else "milestone"
-    matches = await section.query_selector_all(
+    matches = await _enabled_elements(
+        section,
         ", ".join(
             (
                 f'label:text-is("{label}") input[type="radio"]',
@@ -2835,48 +2836,63 @@ async def _configure_fixed_payment_terms(page, params: SubmitProposalParams) -> 
 async def _acknowledge_fixed_price_warning(page) -> bool:
     """Acknowledge only the exact fixed-price warning dialog, if it is present."""
 
-    matching_dialogs: list[Any] = []
-    try:
-        dialogs = await page.query_selector_all('[role="dialog"]')
-    except Exception:
-        return False
-    for dialog in dialogs:
+
+    async def exact_dialog() -> Any | None:
+        matching_dialogs: list[Any] = []
         try:
-            dialog_text = _normalise_identity_text(await dialog.text_content())
+            dialogs = await page.query_selector_all('[role="dialog"]')
         except Exception:
-            continue
-        if re.search(r"\b3 things you need to know\b", dialog_text, re.I) and re.search(
-            r"\bYes, I understand\.?\b", dialog_text, re.I
-        ):
-            matching_dialogs.append(dialog)
-    if len(matching_dialogs) != 1:
+            return None
+        for candidate in dialogs:
+            if not await _element_is_visible(candidate):
+                continue
+            try:
+                dialog_text = _normalise_identity_text(await candidate.text_content())
+            except Exception:
+                continue
+            if re.search(r"\b3 things you need to know\b", dialog_text, re.I) and re.search(
+                r"\bYes, I understand\.?\b", dialog_text, re.I
+            ):
+                matching_dialogs.append(candidate)
+        return matching_dialogs[0] if len(matching_dialogs) == 1 else None
+
+    dialog = await exact_dialog()
+    if dialog is None:
         return False
-    dialog = matching_dialogs[0]
-    try:
-        acknowledgements = await dialog.query_selector_all(
-            'label:text-is("Yes, I understand") input[type="checkbox"], '
-            'label:text-is("Yes, I understand.") input[type="checkbox"], '
-            'input[type="checkbox"][aria-label="Yes, I understand"], '
-            'input[type="checkbox"][aria-label="Yes, I understand."]'
-        )
-        continue_buttons = await dialog.query_selector_all('button:text-is("Continue")')
-    except Exception:
-        return False
+    acknowledgement_selector = (
+        'label:text-is("Yes, I understand") input[type="checkbox"], '
+        'label:text-is("Yes, I understand.") input[type="checkbox"], '
+        'input[type="checkbox"][aria-label="Yes, I understand"], '
+        'input[type="checkbox"][aria-label="Yes, I understand."]'
+    )
+    acknowledgements = await _enabled_elements(dialog, acknowledgement_selector)
+    continue_buttons = await _enabled_elements(dialog, 'button:text-is("Continue")')
     if len(acknowledgements) != 1 or len(continue_buttons) != 1:
         return False
     acknowledgement = acknowledgements[0]
-    continue_btn = continue_buttons[0]
     try:
         await acknowledgement.check()
     except Exception:
-        try:
-            await _click(page, acknowledgement)
-        except Exception:
-            return False
+        return False
     if await _checked_state(acknowledgement) is not True:
         return False
+
+    # Re-resolve the one visible dialog and its exact controls after checking.
+    # The final Continue is a direct actionability-checked click: there is no
+    # DOM fallback capable of reaching a hidden warning control.
+    dialog = await exact_dialog()
+    if dialog is None:
+        return False
+    acknowledgements = await _enabled_elements(dialog, acknowledgement_selector)
+    continue_buttons = await _enabled_elements(dialog, 'button:text-is("Continue")')
+    if (
+        len(acknowledgements) != 1
+        or len(continue_buttons) != 1
+        or await _checked_state(acknowledgements[0]) is not True
+    ):
+        return False
     try:
-        await _click(page, continue_btn)
+        await continue_buttons[0].click()
     except Exception:
         return False
     return True
@@ -2915,11 +2931,7 @@ async def _exact_profile_highlight_chooser(page) -> Any | None:
 
 
 async def _open_profile_highlight_chooser(page) -> Any | None:
-    openers = [
-        opener
-        for opener in await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
-        if await _element_is_visible(opener)
-    ]
+    openers = await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
     if len(openers) != 1:
         return None
     try:
@@ -2947,12 +2959,10 @@ async def _activate_profile_highlight_tab(page, identity: str) -> bool:
 async def _visible_profile_highlight_records(page, tab_identity: str) -> tuple[list[dict[str, Any]], str | None]:
     records: list[dict[str, Any]] = []
     try:
-        buttons = await page.query_selector_all(_PROFILE_HIGHLIGHT_ACTION_BUTTONS)
+        buttons = await _enabled_elements(page, _PROFILE_HIGHLIGHT_ACTION_BUTTONS)
     except Exception:
         return [], "Profile highlight controls could not be enumerated"
     for button in buttons:
-        if not await _element_is_visible(button):
-            continue
         title = await _highlight_title_for_button(button)
         selected = await _highlight_action_selected(button)
         if not title or selected is None:

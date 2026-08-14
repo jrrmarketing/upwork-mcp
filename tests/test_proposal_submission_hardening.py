@@ -508,6 +508,12 @@ class _Radio:
     async def is_checked(self) -> bool:
         return self.checked
 
+    async def is_enabled(self) -> bool:
+        return True
+
+    async def is_visible(self) -> bool:
+        return True
+
     async def click(self) -> None:
         if self.changes:
             self.checked = True
@@ -554,6 +560,9 @@ class _PaymentSection:
 
     async def text_content(self) -> str:
         return "Payment terms By milestone By project"
+
+    async def is_visible(self) -> bool:
+        return True
 
     async def query_selector_all(self, selector: str) -> list[Any]:
         self.selectors.append(selector)
@@ -687,8 +696,16 @@ async def test_one_exact_milestone_is_selected_filled_and_read_back() -> None:
 
 
 class _WarningCheckbox:
-    def __init__(self) -> None:
+    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
         self.checked = False
+        self.visible = visible
+        self.enabled = enabled
+
+    async def is_visible(self) -> bool:
+        return self.visible
+
+    async def is_enabled(self) -> bool:
+        return self.enabled
 
     async def check(self) -> None:
         self.checked = True
@@ -698,19 +715,40 @@ class _WarningCheckbox:
 
 
 class _WarningButton:
-    def __init__(self) -> None:
+    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
         self.clicked = False
+        self.visible = visible
+        self.enabled = enabled
+
+    async def is_visible(self) -> bool:
+        return self.visible
+
+    async def is_enabled(self) -> bool:
+        return self.enabled
 
     async def click(self) -> None:
         self.clicked = True
 
 
 class _WarningDialog:
-    def __init__(self, *, checkbox: bool = True, button: bool = True, exact_text: bool = True) -> None:
-        self.checkbox = _WarningCheckbox() if checkbox else None
-        self.button = _WarningButton() if button else None
+    def __init__(
+        self,
+        *,
+        checkbox: bool = True,
+        button: bool = True,
+        exact_text: bool = True,
+        visible: bool = True,
+        checkbox_visible: bool = True,
+        button_visible: bool = True,
+    ) -> None:
+        self.checkbox = _WarningCheckbox(visible=checkbox_visible) if checkbox else None
+        self.button = _WarningButton(visible=button_visible) if button else None
         self.exact_text = exact_text
+        self.visible = visible
         self.selectors: list[str] = []
+
+    async def is_visible(self) -> bool:
+        return self.visible
 
     async def text_content(self) -> str:
         if self.exact_text:
@@ -757,6 +795,23 @@ async def test_fixed_price_warning_never_queries_a_broad_checkbox_or_continue() 
         ]
     )
     assert await proposals._acknowledge_fixed_price_warning(split_controls) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dialog",
+    [
+        _WarningDialog(visible=False),
+        _WarningDialog(checkbox_visible=False),
+        _WarningDialog(button_visible=False),
+    ],
+)
+async def test_fixed_price_warning_rejects_hidden_dialog_or_controls(
+    dialog: _WarningDialog,
+) -> None:
+    assert await proposals._acknowledge_fixed_price_warning(_WarningPage([dialog])) is False
+    assert dialog.checkbox is None or dialog.checkbox.checked is False
+    assert dialog.button is None or dialog.button.clicked is False
 
 
 class _ConfirmationPage:

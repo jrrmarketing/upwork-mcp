@@ -404,10 +404,14 @@ async def test_rate_increase_absence_requires_bound_not_applicable() -> None:
 
 
 class _Choice(_Button):
-    def __init__(self, *, readable: bool = True) -> None:
+    def __init__(self, *, readable: bool = True, visible: bool = True) -> None:
         super().__init__("Don't boost")
         self.selected = False
         self.readable = readable
+        self.visible = visible
+
+    async def is_visible(self) -> bool:
+        return self.visible
 
     async def click(self) -> None:
         self.selected = True
@@ -493,6 +497,19 @@ async def test_explicit_no_boost_is_read_back_before_exact_cost_scoped_send() ->
 
 
 @pytest.mark.asyncio
+async def test_hidden_enabled_no_boost_control_never_reaches_final_send() -> None:
+    hidden_choice = _Choice(visible=False)
+    dialog = _BoostDialog(choice=hidden_choice)
+
+    send, error = await proposals._configure_boost_step(_BoostPage(dialog), 0, 12)
+
+    assert send is None
+    assert error and "no-boost control" in error
+    assert hidden_choice.selected is False
+    assert dialog.send_queries == 0
+
+
+@pytest.mark.asyncio
 async def test_direct_submission_never_infers_connect_spend(monkeypatch) -> None:
     page = _CommitPage()
     _commercial_inspectors(monkeypatch)
@@ -571,7 +588,7 @@ class _HighlightChooser(_Text):
 
     async def query_selector_all(self, selector: str) -> list[Any]:
         if 'text-is("Add to highlights")' in selector:
-            return [_Button("Add to highlights", lambda: setattr(self.page, "open", False))]
+            return [self.page.save_button]
         return []
 
 
@@ -581,12 +598,33 @@ class _Keyboard:
 
 
 class _HighlightPage:
-    def __init__(self, options: dict[str, list[_HighlightButton]]) -> None:
+    def __init__(
+        self,
+        options: dict[str, list[_HighlightButton]],
+        *,
+        opener_visible: bool = True,
+        save_visible: bool = True,
+    ) -> None:
         self.options = options
         self.tab = next(iter(options))
         self.open = False
+        self.opener_clicks = 0
+        self.save_clicks = 0
         self.keyboard = _Keyboard()
         self.chooser = _HighlightChooser(self)
+
+        def open_chooser() -> None:
+            self.opener_clicks += 1
+            self.open = True
+
+        def save_chooser() -> None:
+            self.save_clicks += 1
+            self.open = False
+
+        opener_type = _Button if opener_visible else _HiddenButton
+        save_type = _Button if save_visible else _HiddenButton
+        self.opener = opener_type("Add a portfolio project", open_chooser)
+        self.save_button = save_type("Add to highlights", save_chooser)
 
     async def wait_for_selector(self, *_args, **_kwargs) -> None:
         return None
@@ -604,9 +642,11 @@ class _HighlightPage:
     async def query_selector_all(self, selector: str) -> list[Any]:
         if "Add a portfolio project" in selector or "Edit profile highlights" in selector:
             if not self.open:
-                return [_Button("Add a portfolio project", lambda: setattr(self, "open", True))]
+                return [self.opener]
         if '[role="dialog"]:has-text("Add profile highlights")' in selector:
             return [self.chooser] if self.open else []
+        if "aria-label" in selector and "Close" in selector and self.open:
+            return [_Button("Close", lambda: setattr(self, "open", False))]
         if 'role="tab"' in selector and self.open:
             return [_HighlightTab(identity, self) for identity in self.options]
         if "Select highlight" in selector and self.open:
@@ -663,3 +703,35 @@ async def test_highlights_inspect_extra_tabs_but_still_require_known_tabs() -> N
     ok, error = await proposals._select_profile_highlights(missing, [])
     assert ok is False
     assert error and "required profile-highlight tab set" in error
+
+
+@pytest.mark.asyncio
+async def test_hidden_enabled_profile_highlight_opener_is_never_clicked() -> None:
+    page = _HighlightPage(
+        {"portfolio": [], "certifications": [], "upwork_jobs": []},
+        opener_visible=False,
+    )
+
+    chooser = await proposals._open_profile_highlight_chooser(page)
+
+    assert chooser is None
+    assert page.opener_clicks == 0
+    assert page.open is False
+
+
+@pytest.mark.asyncio
+async def test_hidden_enabled_profile_highlight_save_is_never_clicked() -> None:
+    page = _HighlightPage(
+        {
+            "portfolio": [_HighlightButton("Family Law Growth")],
+            "certifications": [],
+            "upwork_jobs": [],
+        },
+        save_visible=False,
+    )
+
+    ok, error = await proposals._select_profile_highlights(page, ["Family Law Growth"])
+
+    assert ok is False
+    assert error and "Add to highlights control" in error
+    assert page.save_clicks == 0

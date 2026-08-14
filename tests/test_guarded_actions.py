@@ -1385,6 +1385,25 @@ Boost your proposal auction: top bid 8 Connects
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
+        if not self.form_open and "apply-button" in selector:
+            def open_form() -> None:
+                self.form_open = True
+                self.url = "https://www.upwork.com/ab/proposals/job/~123/apply/"
+                self.body = """Google Ads audit
+Fixed-price project
+By milestone
+By project
+12 Connects required to submit
+Upwork service fee $50
+You'll receive $450 net
+Less than 1 month
+1 to 3 months
+3 to 6 months
+More than 6 months
+Boost your proposal auction: top bid 8 Connects
+"""
+
+            return [_Button(open_form, "Apply Now")]
         if self.form_open and selector == proposals._BASE_CONNECTS_CONTROL_SELECTOR:
             return [_TextElement("12 Connects required to submit")]
         if self.form_open and selector == proposals._BOOST_AUCTION_CONTROL_SELECTOR:
@@ -1419,6 +1438,12 @@ Boost your proposal auction: top bid 8 Connects
             ]
         if self.highlight_open and "Select highlight" in selector:
             return [_HighlightOption(title) for title in self.highlight_options[self.highlight_tab]]
+        if self.highlight_open and "aria-label" in selector and "Close" in selector:
+            def close_highlights() -> None:
+                if self.dismiss_highlight:
+                    self.highlight_open = False
+
+            return [_Button(close_highlights, "Close")]
         return []
 
 
@@ -1963,6 +1988,12 @@ async def test_commercial_preflight_binds_entered_price_and_restores_original() 
 
         async def is_checked(self) -> bool:
             return self.checked
+
+        async def is_visible(self) -> bool:
+            return True
+
+        async def is_enabled(self) -> bool:
+            return True
 
         async def get_attribute(self, _name: str) -> None:
             return None
