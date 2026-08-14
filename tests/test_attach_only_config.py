@@ -38,6 +38,8 @@ def test_legacy_uninstaller_targets_only_known_upwork_agents() -> None:
 
     assert "com.jrr.upwork-chrome" in uninstaller
     assert "com.jrr.upwork-health" in uninstaller
+    assert 'CHROME_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"' in uninstaller
+    assert '"${command}" == "${CHROME_EXECUTABLE}"*' in uninstaller
     assert "--user-data-dir=${LEGACY_PROFILE}" in uninstaller
     assert "pkill" not in uninstaller
     assert "rm -rf" not in uninstaller
