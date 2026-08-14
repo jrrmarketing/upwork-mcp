@@ -151,8 +151,8 @@ class PricingContext:
     source_version: str = "upwork-profile-owner-approved-63-usd; jrr-pricing-2026-08-13"
 
     def __post_init__(self) -> None:
-        if self.minimum_hourly_rate <= 0 or self.profile_hourly_rate <= 0:
-            raise ValueError("Hourly pricing values must be positive")
+        if self.minimum_hourly_rate < 50 or self.profile_hourly_rate < 50:
+            raise ValueError("Hourly pricing values cannot be below the owner-approved $50 floor")
         if self.profile_hourly_rate < self.minimum_hourly_rate:
             raise ValueError("profile_hourly_rate cannot be below minimum_hourly_rate")
         if self.founder_advisory_benchmark < self.minimum_hourly_rate:

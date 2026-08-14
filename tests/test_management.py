@@ -64,6 +64,39 @@ def _form():
     }
 
 
+def _commercial_preflight():
+    return {
+        "job_url": "https://www.upwork.com/jobs/~law123",
+        "job_id": "~law123",
+        "form_url": "https://www.upwork.com/nx/proposals/job/~law123/apply",
+        "job_title": "Google Ads audit for family law firm",
+        "job_type": "hourly",
+        "form_status": "ready",
+        "existing_proposal": False,
+        "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "fee_net_status": "complete",
+        "fee_net_price_amount": "63.00",
+        "fee_net_source": "scoped_reversible_price_preflight",
+        "fee_net_details": {"price_restored": True},
+        "price_restored": True,
+        "identity_restored": True,
+        "reversible_form_interaction": True,
+        "external_action_taken": False,
+    }
+
+
+@pytest.fixture(autouse=True)
+def commercial_preflight_stub(monkeypatch):
+    async def fake_commercial(_params):
+        return _commercial_preflight()
+
+    monkeypatch.setattr(
+        management,
+        "inspect_proposal_commercial_preflight",
+        fake_commercial,
+    )
+
+
 @pytest.mark.parametrize(
     ("updates", "error_fragment"),
     [
@@ -104,14 +137,21 @@ def test_prepare_schema_rejects_unsafe_price_configuration_and_multiple_mileston
         "duration": "1 to 3 months",
         "profile_highlights": ["Google Ads Search Certification"],
     }
-    with pytest.raises(ValidationError, match="approved hourly rate"):
+    with pytest.raises(ValidationError, match="greater than or equal to 50"):
         management.PrepareProposalParams(**common, rate=49, minimum_hourly_rate=50)
-    with pytest.raises(ValidationError, match="profile_hourly_rate"):
+    with pytest.raises(ValidationError, match="greater than or equal to 50"):
         management.PrepareProposalParams(
             **common,
             rate=50,
             profile_hourly_rate=49,
             minimum_hourly_rate=50,
+        )
+    with pytest.raises(ValidationError, match="greater than or equal to 50"):
+        management.PrepareProposalParams(
+            **common,
+            rate=50,
+            profile_hourly_rate=63,
+            minimum_hourly_rate=49,
         )
     with pytest.raises(ValidationError, match="at most 1 item"):
         management.PrepareProposalParams(
@@ -311,7 +351,20 @@ async def test_prepare_proposal_refuses_incomplete_live_discovery(
         return _job()
 
     async def fake_form(_params):
-        return {**_form(), **form_update}
+        return {
+            **_form(),
+            **({} if "fee_net_status" in form_update else form_update),
+        }
+
+    if "fee_net_status" in form_update:
+        async def incomplete_commercial(_params):
+            return {**_commercial_preflight(), **form_update}
+
+        monkeypatch.setattr(
+            management,
+            "inspect_proposal_commercial_preflight",
+            incomplete_commercial,
+        )
 
     monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(management, "get_job_details", fake_job)
@@ -320,6 +373,51 @@ async def test_prepare_proposal_refuses_incomplete_live_discovery(
         management.PrepareProposalParams(
             job_url="https://www.upwork.com/jobs/~law123",
             cover_letter="Hey, more than happy to look properly.\n\nI can review the account.",
+            rate=63,
+            duration="1 to 3 months",
+            profile_highlights=["Google Ads Search Certification"],
+        )
+    )
+
+    assert result["ready_for_owner_approval"] is False
+    assert result["prepared_action"] is None
+    assert any(error_fragment in error for error in result["errors"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("commercial_update", "error_fragment"),
+    [
+        ({"price_restored": False, "external_action_taken": True}, "restoration"),
+        ({"identity_restored": False}, "exact approved price"),
+        ({"fee_net_price_amount": "64.00"}, "exact approved price"),
+        ({"fee_net_source": None}, "exact approved price"),
+    ],
+)
+async def test_prepare_proposal_requires_exact_restored_commercial_preflight(
+    monkeypatch,
+    tmp_path,
+    live_read_stubs,
+    commercial_update,
+    error_fragment,
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+
+    async def changed_commercial(_params):
+        return {**_commercial_preflight(), **commercial_update}
+
+    monkeypatch.setattr(
+        management,
+        "inspect_proposal_commercial_preflight",
+        changed_commercial,
+    )
+    result = await management.prepare_proposal(
+        management.PrepareProposalParams(
+            job_url="https://www.upwork.com/jobs/~law123",
+            cover_letter=(
+                "Hey, more than happy to take a look at this for you.\n\n"
+                "I'd rather inspect the account before forming an opinion."
+            ),
             rate=63,
             duration="1 to 3 months",
             profile_highlights=["Google Ads Search Certification"],

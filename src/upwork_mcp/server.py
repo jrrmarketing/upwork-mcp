@@ -118,8 +118,8 @@ async def upwork_get_job_details(
 @mcp.tool()
 async def upwork_screen_job(
     job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")],
-    profile_hourly_rate: Annotated[float, Field(gt=0)] = 63,
-    minimum_hourly_rate: Annotated[float, Field(gt=0)] = 50,
+    profile_hourly_rate: Annotated[float, Field(ge=50)] = 63,
+    minimum_hourly_rate: Annotated[float, Field(ge=50)] = 50,
     minimum_fixed_fee: Annotated[float | None, Field(gt=0)] = None,
 ) -> dict:
     """Classify one live job as strong fit, fit, price conversion, speculative, or skip."""
@@ -136,8 +136,8 @@ async def upwork_find_opportunities(
     query: Annotated[str, Field(min_length=1, description="Search keywords")],
     limit_per_view: Annotated[int, Field(ge=1, le=20)] = 5,
     include_skips: bool = False,
-    profile_hourly_rate: Annotated[float, Field(gt=0)] = 63,
-    minimum_hourly_rate: Annotated[float, Field(gt=0)] = 50,
+    profile_hourly_rate: Annotated[float, Field(ge=50)] = 63,
+    minimum_hourly_rate: Annotated[float, Field(ge=50)] = 50,
     minimum_fixed_fee: Annotated[float | None, Field(gt=0)] = None,
 ) -> dict:
     """Read Best Matches and Most Recent, hydrate each job, and rank realistic opportunities."""
@@ -237,8 +237,8 @@ async def upwork_prepare_proposal(
     ] | None = None,
     profile_highlights: list[str] | None = None,
     boost_connects: Annotated[int, Field(ge=0)] = 0,
-    profile_hourly_rate: Annotated[float, Field(gt=0)] = 63,
-    minimum_hourly_rate: Annotated[float, Field(gt=0)] = 50,
+    profile_hourly_rate: Annotated[float, Field(ge=50)] = 63,
+    minimum_hourly_rate: Annotated[float, Field(ge=50)] = 50,
     minimum_fixed_fee: Annotated[float | None, Field(gt=0)] = None,
 ) -> dict:
     """Inspect the live form and create an exact expiring proposal approval record; never submits."""

@@ -2404,6 +2404,7 @@ async def _inspect_proposal_commercial_preflight_on_page(
         "fee_net_price_amount": None,
         "fee_net_source": None,
         "price_restored": False,
+        "identity_restored": False,
         "reversible_form_interaction": False,
         "external_action_taken": False,
     }
@@ -2444,6 +2445,7 @@ async def _inspect_proposal_commercial_preflight_on_page(
     }
     exact_price_entered = False
     restored = False
+    identity_restored = False
     try:
         base_result["reversible_form_interaction"] = True
         await control.fill(format(approved_amount, "f"))
@@ -2479,8 +2481,11 @@ async def _inspect_proposal_commercial_preflight_on_page(
             except Exception:
                 pass
             restored_fee_net = await _inspect_fee_net_state(page)
+            restored_identity = await _application_identity_from_current_page(page)
+            identity_restored = restored_identity == identity
             restored = bool(
                 str(await control.input_value()) == original_value
+                and identity_restored
                 and restored_fee_net.get("status") == original_fee_net.get("status")
                 and _dedupe_text(restored_fee_net.get("text") or [])
                 == _dedupe_text(original_fee_net.get("text") or [])
@@ -2512,6 +2517,7 @@ async def _inspect_proposal_commercial_preflight_on_page(
             if status == "complete" and restored and exact_price_entered
             else None,
             "price_restored": restored,
+            "identity_restored": identity_restored,
             "external_action_taken": bool(
                 base_result["reversible_form_interaction"] and not restored
             ),

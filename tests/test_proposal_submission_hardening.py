@@ -331,9 +331,37 @@ async def test_preparation_binds_explicit_live_by_project_structure(
             rate_increase_control_status="not_applicable",
         )
 
+    async def fake_commercial(_params):
+        return {
+            "job_url": "https://www.upwork.com/jobs/~abc123",
+            "job_id": "~abc123",
+            "form_url": "https://www.upwork.com/nx/proposals/job/~abc123/apply",
+            "job_title": "Google Ads audit",
+            "job_type": "fixed",
+            "form_status": "ready",
+            "existing_proposal": False,
+            "fee_net_text": [
+                "Upwork service fee $50.00",
+                "You'll receive $450.00 net",
+            ],
+            "fee_net_status": "complete",
+            "fee_net_price_amount": "500.00",
+            "fee_net_source": "scoped_reversible_price_preflight",
+            "fee_net_details": {"price_restored": True},
+            "price_restored": True,
+            "identity_restored": True,
+            "reversible_form_interaction": True,
+            "external_action_taken": False,
+        }
+
     monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(management, "get_job_details", fake_job)
     monkeypatch.setattr(management, "inspect_proposal_form", fake_form)
+    monkeypatch.setattr(
+        management,
+        "inspect_proposal_commercial_preflight",
+        fake_commercial,
+    )
     result = await management.prepare_proposal(
         management.PrepareProposalParams(
             job_url="https://www.upwork.com/jobs/~abc123",

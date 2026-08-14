@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -20,9 +21,11 @@ from ..strategy import (
 from .jobs import JobDetailsParams, JobSearchParams, get_job_details, search_jobs
 from .proposals import (
     FixedPriceMilestone,
+    InspectProposalCommercialPreflightParams,
     InspectProposalFormParams,
     ProposalsParams,
     get_proposals,
+    inspect_proposal_commercial_preflight,
     inspect_proposal_form,
     normalize_live_context_lines,
     parse_job_url,
@@ -35,7 +38,7 @@ class PrepareProposalParams(BaseModel):
 
     job_url: str = Field(min_length=2, max_length=500)
     cover_letter: str = Field(min_length=1, max_length=10_000)
-    rate: float | None = Field(default=None, gt=0)
+    rate: float | None = Field(default=None, ge=50)
     bid: float | None = Field(default=None, gt=0)
     payment_structure: Literal["by_project", "by_milestone"] | None = None
     milestones: list[FixedPriceMilestone] = Field(default_factory=list, max_length=1)
@@ -49,8 +52,8 @@ class PrepareProposalParams(BaseModel):
     profile_highlights: list[str] = Field(default_factory=list, max_length=4)
     boost_connects: int = Field(default=0, ge=0)
     rate_increase_frequency: Literal["Never"] = "Never"
-    profile_hourly_rate: float = Field(default=63, gt=0)
-    minimum_hourly_rate: float = Field(default=50, gt=0)
+    profile_hourly_rate: float = Field(default=63, ge=50)
+    minimum_hourly_rate: float = Field(default=50, ge=50)
     minimum_fixed_fee: float | None = Field(default=None, gt=0)
 
     @field_validator("answers")
@@ -148,12 +151,121 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
     proof_check = validate_proof_claims(params.cover_letter, analysis["case_studies"])
     errors.extend(proof_check["errors"])
 
-    try:
-        _, expected_job_id = parse_job_url(params.job_url)
-    except ValueError:
-        expected_job_id = ""
+    expected_job_id = parse_job_url(params.job_url)[1]
     job_title = " ".join(str(job.get("title") or "").split())
     form_title = " ".join(str(form.get("job_title") or "").split())
+    expected_job_type = "hourly" if params.rate is not None else "fixed"
+    can_run_commercial_preflight = bool(
+        form.get("form_status") == "ready"
+        and not form.get("existing_proposal")
+        and form.get("job_id") == expected_job_id
+        and form.get("form_url")
+        and job_title
+        and form_title == job_title
+        and form.get("job_type") == expected_job_type
+        and analysis["recommendation"] != "skip"
+        and not errors
+        and params.duration in (form.get("duration_options") or [])
+        and form.get("duration_options_status") == "complete"
+        and bool(params.profile_highlights)
+        and form.get("available_profile_highlights_status") == "complete"
+        and set(params.profile_highlights).issubset(
+            set(form.get("available_profile_highlights") or [])
+        )
+        and form.get("screening_questions_status") == "complete"
+        and len(form.get("screening_questions") or []) == len(params.answers)
+        and form.get("base_connects_status") == "complete"
+        and form.get("base_connects") is not None
+        and params.boost_connects == 0
+        and (
+            form.get("rate_increase_control_status") == "complete"
+            if expected_job_type == "hourly"
+            else form.get("rate_increase_control_status") == "not_applicable"
+        )
+        and (
+            params.bid is None
+            or params.payment_structure in (form.get("fixed_payment_structures") or [])
+        )
+    )
+    commercial_preflight: dict[str, Any] | None = None
+    if can_run_commercial_preflight:
+        try:
+            commercial_preflight = await inspect_proposal_commercial_preflight(
+                InspectProposalCommercialPreflightParams(
+                    job_url=str(form["form_url"]),
+                    rate=params.rate,
+                    bid=params.bid,
+                    payment_structure=(
+                        "by_project" if params.payment_structure == "by_project" else None
+                    ),
+                )
+            )
+        except Exception as error:
+            commercial_preflight = {
+                "fee_net_text": [],
+                "fee_net_status": "unavailable",
+                "fee_net_price_amount": None,
+                "fee_net_source": None,
+                "price_restored": False,
+                "identity_restored": False,
+                "external_action_taken": True,
+                "fee_net_details": {
+                    "message": (
+                        "The reversible commercial preflight failed closed: "
+                        f"{type(error).__name__}."
+                    )
+                },
+            }
+
+    if commercial_preflight is not None:
+        approved_amount = Decimal(
+            str(params.rate if params.rate is not None else params.bid)
+        ).quantize(Decimal("0.01"))
+        preflight_identity_matches = bool(
+            commercial_preflight.get("job_url") == params.job_url
+            and commercial_preflight.get("job_id") == form.get("job_id")
+            and commercial_preflight.get("form_url") == form.get("form_url")
+            and " ".join(str(commercial_preflight.get("job_title") or "").split())
+            == form_title
+            and commercial_preflight.get("job_type") == form.get("job_type")
+            and commercial_preflight.get("form_status") == "ready"
+            and not commercial_preflight.get("existing_proposal")
+            and commercial_preflight.get("price_restored") is True
+            and commercial_preflight.get("identity_restored") is True
+            and commercial_preflight.get("external_action_taken") is False
+            and commercial_preflight.get("fee_net_status") == "complete"
+            and commercial_preflight.get("fee_net_price_amount")
+            == format(approved_amount, ".2f")
+            and commercial_preflight.get("fee_net_source")
+            == "scoped_reversible_price_preflight"
+        )
+        form = {
+            **form,
+            "commercial_preflight": commercial_preflight,
+            "fee_net_text": (
+                commercial_preflight.get("fee_net_text") or []
+                if preflight_identity_matches
+                else []
+            ),
+            "fee_net_status": (
+                "complete" if preflight_identity_matches else "incomplete"
+            ),
+            "fee_net_price_amount": (
+                commercial_preflight.get("fee_net_price_amount")
+                if preflight_identity_matches
+                else None
+            ),
+            "fee_net_source": (
+                commercial_preflight.get("fee_net_source")
+                if preflight_identity_matches
+                else None
+            ),
+            "fee_net_details": commercial_preflight.get("fee_net_details") or {},
+            "external_action_taken": bool(
+                form.get("external_action_taken")
+                or commercial_preflight.get("external_action_taken")
+            ),
+        }
     if not expected_job_id or form.get("job_id") != expected_job_id:
         errors.append("The live application form does not match the exact requested job ID")
     if not job_title or not form_title or job_title != form_title:
@@ -242,8 +354,18 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         errors.append("The selected duration is not available in the live form")
     if form.get("base_connects") is None:
         errors.append("The live base Connect cost could not be verified")
+    if form.get("base_connects_status") != "complete":
+        errors.append("Exact scoped base-Connect discovery is not complete")
     if fee_net_status == "complete" and not form.get("fee_net_text"):
         errors.append("The complete live fee/net inspection did not contain any normalized context")
+    if commercial_preflight is None:
+        errors.append("The exact reversible commercial preflight could not be started")
+    elif form.get("fee_net_source") != "scoped_reversible_price_preflight":
+        errors.append("The live fee/net preview was not bound to the exact approved price")
+    if form.get("external_action_taken"):
+        errors.append(
+            "The commercial preflight could not prove restoration of the original live form; inspect Upwork manually"
+        )
 
     recommended = set(analysis["profile_highlights"])
     if form_ready and available_highlights_status == "complete":
@@ -285,7 +407,7 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         "approval_sha256": payload_digest(payload),
         "prepared_action": prepared_action,
         "copy_sha256": copy_check["copy_sha256"],
-        "external_action_taken": False,
+        "external_action_taken": bool(form.get("external_action_taken")),
         "next_step": "Show the exact copy, answers, fee, duration, highlights, Connect cost, and boost choice to Josiah for approval",
     }
 

@@ -256,8 +256,11 @@ def test_high_client_range_does_not_trigger_an_unnecessary_low_bid():
 
 
 def test_pricing_context_rejects_a_profile_rate_below_the_floor():
-    with pytest.raises(ValueError, match="profile_hourly_rate"):
+    with pytest.raises(ValueError, match=r"owner-approved \$50 floor"):
         PricingContext(profile_hourly_rate=49, minimum_hourly_rate=50)
+
+    with pytest.raises(ValueError, match=r"owner-approved \$50 floor"):
+        PricingContext(profile_hourly_rate=63, minimum_hourly_rate=49)
 
 
 def test_unaudited_aggregate_claims_are_quarantined():
