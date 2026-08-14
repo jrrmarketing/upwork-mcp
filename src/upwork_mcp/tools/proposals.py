@@ -765,12 +765,18 @@ def normalize_live_context_lines(values: list[str]) -> list[str]:
 def _inspect_fee_net_context(text: str) -> dict[str, Any]:
     """Classify the live fee/net preview without guessing from unrelated page copy."""
 
+    net_preview_pattern = (
+        r"you(?:'|’)?ll receive|you will receive|"
+        r"(?:freelancer\s+)?(?:net\s+)?(?:earnings|payment|payout|amount)\s*(?:after fees)?\s*[:\-]?\s*[$£€]?\s*\d|"
+        r"\bnet\s+(?:earnings|payment|payout|amount)\b|"
+        r"[$£€]\s*\d[\d,.]*\s+net\b"
+    )
     lines = normalize_live_context_lines(
         [
             line
             for line in text.splitlines()
             if re.search(
-                r"service fee|upwork fee|you(?:'|’)?ll receive|you will receive|\bnet\b",
+                rf"service fee|upwork fee|{net_preview_pattern}",
                 line,
                 re.I,
             )
@@ -780,7 +786,7 @@ def _inspect_fee_net_context(text: str) -> dict[str, Any]:
     net_lines = [
         line
         for line in lines
-        if re.search(r"you(?:'|’)?ll receive|you will receive|\bnet\b", line, re.I)
+        if re.search(net_preview_pattern, line, re.I)
     ]
     if fee_lines and net_lines:
         status: DiscoveryStatus = "complete"
@@ -1354,9 +1360,9 @@ async def _element_is_visible(element) -> bool:
     try:
         return bool(await element.is_visible())
     except Exception:
-        # Older mocks and some detached handles do not expose visibility. The
-        # surrounding selector is already visibility-oriented, so keep reading.
-        return True
+        # Detached or unreadable controls cannot contribute to complete live
+        # evidence for an approval-bound consequential action.
+        return False
 
 
 async def _highlight_title_for_button(button) -> str | None:
@@ -2232,7 +2238,7 @@ async def _enumerate_profile_highlight_records(
 ) -> tuple[list[dict[str, Any]], str | None]:
     tabs = await _profile_highlight_tabs(page)
     tab_identities = {identity for identity, _ in tabs}
-    if tab_identities != _REQUIRED_PROFILE_HIGHLIGHT_TABS:
+    if not _REQUIRED_PROFILE_HIGHLIGHT_TABS.issubset(tab_identities):
         return [], "The complete required profile-highlight tab set is not visible"
     views = [identity for identity, _ in tabs] or ["current_view"]
     records: list[dict[str, Any]] = []

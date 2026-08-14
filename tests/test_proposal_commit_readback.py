@@ -434,3 +434,32 @@ async def test_highlights_use_exact_titles_and_verify_exact_selected_set() -> No
     )
     assert (ok, error) == (True, None)
     assert page.options["portfolio"][0].selected is True
+
+
+@pytest.mark.asyncio
+async def test_highlights_inspect_extra_tabs_but_still_require_known_tabs() -> None:
+    extra = _HighlightButton("Specialized Profile Result")
+    page = _HighlightPage(
+        {
+            "portfolio": [_HighlightButton("Family Law Growth")],
+            "certifications": [],
+            "upwork_jobs": [],
+            "specialized_profiles": [extra],
+        }
+    )
+
+    ok, error = await proposals._select_profile_highlights(page, [])
+
+    assert (ok, error) == (True, None)
+    assert extra.selected is False
+
+    missing = _HighlightPage(
+        {
+            "portfolio": [],
+            "certifications": [],
+            "specialized_profiles": [],
+        }
+    )
+    ok, error = await proposals._select_profile_highlights(missing, [])
+    assert ok is False
+    assert error and "required profile-highlight tab set" in error

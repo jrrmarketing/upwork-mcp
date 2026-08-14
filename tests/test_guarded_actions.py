@@ -300,6 +300,9 @@ class _TextElement:
     async def text_content(self) -> str:
         return self.text
 
+    async def is_visible(self) -> bool:
+        return True
+
     async def query_selector(self, _selector: str):
         return None
 
@@ -909,6 +912,13 @@ async def test_live_fee_and_boost_context_helpers_normalize_and_classify_exact_s
         },
     }
 
+    unrelated_net_copy = await proposals._inspect_fee_net_state(
+        None,
+        "Upwork service fee $6.30\nWe need net new leads",
+    )
+    assert unrelated_net_copy["text"] == ["Upwork service fee $6.30"]
+    assert unrelated_net_copy["status"] == "incomplete"
+
     generic_bid = await proposals._inspect_boost_auction_state(
         None,
         "Boost your proposal\nPlace a bid",
@@ -924,3 +934,12 @@ async def test_live_fee_and_boost_context_helpers_normalize_and_classify_exact_s
         "Boost your proposal\nNo bids yet",
     )
     assert no_bids["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_visibility_never_counts_as_visible() -> None:
+    class _UnreadableVisibility:
+        async def is_visible(self) -> bool:
+            raise RuntimeError("detached")
+
+    assert await proposals._element_is_visible(_UnreadableVisibility()) is False
