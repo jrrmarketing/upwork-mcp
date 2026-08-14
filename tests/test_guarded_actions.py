@@ -890,6 +890,7 @@ async def test_approved_message_requires_byte_exact_composer_readback(
 )
 async def test_approved_message_stops_if_history_changes_during_send_resolution(
     monkeypatch,
+    tmp_path,
     new_content: str,
     is_mine: bool,
 ) -> None:
@@ -906,7 +907,7 @@ async def test_approved_message_stops_if_history_changes_during_send_resolution(
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "message_history_changed"
@@ -960,6 +961,7 @@ async def test_unrestorable_history_race_draft_is_terminal_and_action_remains_on
 @pytest.mark.parametrize("changed_field", ["contact", "room"])
 async def test_approved_message_stops_if_identity_changes_during_send_resolution(
     monkeypatch,
+    tmp_path,
     changed_field: str,
 ) -> None:
     page = _MessagePage()
@@ -980,7 +982,7 @@ async def test_approved_message_stops_if_identity_changes_during_send_resolution
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "live_identity_mismatch"

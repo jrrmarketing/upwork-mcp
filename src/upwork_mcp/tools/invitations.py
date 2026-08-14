@@ -735,14 +735,6 @@ async def _decline_invitation_on_page(params: DeclineInvitationParams, page) -> 
             "message": dialog_error,
             "external_action_taken": False,
         }
-    confirm_button, confirm_error = await _exact_final_decline_control(dialog)
-    if confirm_button is None:
-        return {
-            "status": "live_form_mismatch",
-            "message": confirm_error,
-            "external_action_taken": False,
-        }
-
     final_identity = await _current_invitation_identity(page, params.invitation_url)
     if final_identity != approved_identity:
         return {
@@ -778,6 +770,16 @@ async def _decline_invitation_on_page(params: DeclineInvitationParams, page) -> 
         return {
             "status": "live_form_mismatch",
             "message": block_error,
+            "external_action_taken": False,
+        }
+
+    # Resolve the irreversible control only after every approved state has been
+    # re-read, leaving no unrelated live-page query between exact resolution and click.
+    confirm_button, confirm_error = await _exact_final_decline_control(dialog)
+    if confirm_button is None:
+        return {
+            "status": "live_form_mismatch",
+            "message": confirm_error,
             "external_action_taken": False,
         }
 
