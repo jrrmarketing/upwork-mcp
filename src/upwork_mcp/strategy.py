@@ -140,23 +140,70 @@ NON_CLIENT_DESCRIPTION_MODEL_PATTERN = re.compile(
     r")",
     re.I,
 )
-STRONG_COMMERCIAL_MODEL_PATTERN = re.compile(
-    r"\b(?:market|markets|marketed|marketing|offer|offers|offered|offering|sell|sells|"
-    r"selling|sold|vendor|provider|subscription|subscriptions|subscriber|subscribers|"
-    r"charge|charges|charged|commercial|commercially)\b|"
-    r"\bprovide(?:s|d|ing)?\s+access\b|"
-    r"\b(?:clients?|customers?)\b[^.;!?]{0,50}\bsubscribe(?:s|d)?\b|"
-    r"\blicense(?:s|d|ing)?\b[^.;!?]{0,80}\bto\b[^.;!?]{0,50}"
-    r"\b(?:clients?|customers?|law[- ]firms?|lawyers?|attorneys?|plumbers?)\b",
+PRODUCT_MODEL_PATTERN = re.compile(
+    r"\b(?:saas|software|platform|marketplace|(?:mobile|web|online)[- ]+(?:app|application)|"
+    r"app|application|portal|system|suite|dashboard|chatbot|bot|"
+    r"(?:mobile|scheduling|booking|workflow|case[- ]management|practice[- ]management|"
+    r"field[- ]service(?:\s+management)?|case[- ]intake|client[- ]intake|crm)\s+solution|"
+    r"case[- ]manager|virtual[- ]receptionist|(?:ai[- ]+)?assistant|(?:ai[- ]+)?tool|"
+    r"crm|automation|cloud[- ]service|online[- ]product|digital[- ]product|"
+    r"legal[- ]technology|clio|servicetitan)\b",
+    re.I,
+)
+EXTERNAL_PRODUCT_AUDIENCE_PATTERN = re.compile(
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law(?:\s+firms?|\s+practices?)?|"
+    r"criminal[- ]defen[cs]e(?:\s+firms?|\s+lawyers?|\s+attorneys?)?|plumbers?|"
+    r"plumbing[- ]companies|clinics?|dentists?|customers?)\b",
+    re.I,
+)
+EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:sell|sells|selling|sold|license|licenses|licensed|licensing|offer|offers|offered|"
+    r"offering|rent|rents|rented|monetize|monetizes|monetized|charge|charges|charged|"
+    r"provide|provides|provided)\b[^.;!?]{0,80}\b(?:it|access|subscriptions?|licenses?|"
+    r"saas|software|platform|app|application|portal|system|suite|dashboard|tool|product)\b"
+    r"[^.;!?]{0,60}\b(?:to|for|by)\b[^.;!?]{0,45}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b|"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,65}"
+    r"\b(?:subscribe|subscribes|subscribed|buy|buys|purchase|purchases|pay|pays|rent|rents)\b"
+    r"[^.;!?]{0,45}\b(?:it|access|subscriptions?|licenses?|software|platform|app|application|"
+    r"portal|system|suite|dashboard|tool|product)\b|"
+    r"\b(?:it|access|software|platform|app|application|portal|system|suite|dashboard|tool|"
+    r"product)\b[^.;!?]{0,45}\bavailable\s+for\s+purchase\b[^.;!?]{0,45}"
+    r"\b(?:by|to|for)\b[^.;!?]{0,35}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b|"
+    r"\b(?:monetize|monetizes|monetized)\b[^.;!?]{0,45}\baccess\b[^.;!?]{0,45}"
+    r"\b(?:for|to)\b[^.;!?]{0,35}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b|"
+    r"\b(?:it|access|software|platform|app|application|portal|system|suite|dashboard|tool|"
+    r"product)\b[^.;!?]{0,55}\b(?:offered|available)\s+(?:commercially|for\s+purchase)\b"
+    r"[^.;!?]{0,45}\b(?:to|for|by)\b[^.;!?]{0,35}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b|"
+    r"\b(?:charge|charges|charged)\b[^.;!?]{0,45}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,45}\bto\s+access\b"
+    r"[^.;!?]{0,25}\b(?:it|this|software|platform|app|system|tool)\b|"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,35}"
+    r"\b(?:can|may|could)\s+(?:buy|purchase|rent)\b(?:[^.;!?]{0,25}"
+    r"\b(?:it|this|access|software|platform|app|system|tool)\b)?"
+    r")",
     re.I,
 )
 MARKETED_PRODUCT_AUDIENCE_PATTERN = re.compile(
     r"(?:"
     r"\b(?:saas|software|platform|marketplace|mobile[- ]app|app|web\s+application|"
-    r"online\s+application|portal|online\s+product|digital\s+product|product|"
+    r"online\s+application|portal|online\s+product|digital\s+product|product|system|suite|"
+    r"dashboard|chatbot|bot|case[- ]manager|virtual\s+receptionist|"
     r"(?:ai\s+)?assistant|(?:ai\s+)?tool|crm(?:\s+solution)?|"
-    r"case[- ]management\s+solution|workflow\s+automation|cloud\s+service|"
-    r"legal\s+technology)\b[^.;!?]{0,90}"
+    r"(?:case[- ]management|practice[- ]management|case\s+intake|client\s+intake|"
+    r"mobile|booking|scheduling|field[- ]service(?:\s+management)?)\s+(?:system|solution)|"
+    r"workflow\s+automation|cloud\s+service|legal\s+technology)\b[^.;!?]{0,90}"
     r"\b(?:for|to|helps?|helping|serves?|serving|supports?|connects?|connecting|used\s+by)\b"
     r"[^.;!?]{0,75}\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law(?:\s+firms?|\s+practices?)?|"
     r"criminal[- ]defen[cs]e(?:\s+firms?|\s+lawyers?|\s+attorneys?)?|plumbers?|"
@@ -164,7 +211,8 @@ MARKETED_PRODUCT_AUDIENCE_PATTERN = re.compile(
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|"
     r"plumbers?|plumbing\s+companies|clinics?|dentists?)\b[^.;!?]{0,75}"
     r"\b(?:saas|software|platform|marketplace|app|application|portal|product|assistant|"
-    r"tool|crm|solution|automation|cloud\s+service|technology)\b"
+    r"tool|crm|solution|system|suite|dashboard|chatbot|bot|case[- ]manager|"
+    r"virtual\s+receptionist|automation|cloud\s+service|technology)\b"
     r")",
     re.I,
 )
@@ -373,6 +421,65 @@ def _classify_scope_match(
     ):
         sentence = sentence.replace(contraction, expanded)
         context = context.replace(contraction, expanded)
+
+    # Resolve grammar that unambiguously binds the target before consulting the
+    # broader patterns below.  This prevents an unrelated word such as
+    # "optional" from changing "GTM setup is needed", and prevents a generic
+    # "require" in "require WhatConverts, not GTM" from being attributed to GTM.
+    direct_required_patterns = (
+        r"<scope>\s+(?:(?:setup|work|implementation|knowledge)\s+)?"
+        r"(?:(?:is|remains)\s+)?(?:needed|required|mandatory|necessary|compulsory|"
+        r"non[- ]negotiable|a\s+requirement|a\s+must[- ]have)\b",
+        r"<scope>\s+implementation\s+must\s+be\s+completed\b",
+        r"<scope>.{0,45}\bmust\s+be\s+(?:maintained|completed|handled|owned)\b",
+        r"\b(?:we\s+)?expect\b.{0,30}<scope>\s+(?:implementation|setup|work)\b",
+        r"\bplease\s+(?:handle|manage|implement|install|configure|maintain)\b.{0,25}<scope>",
+        r"\byou(?:'ll|\s+will)\s+(?:own|handle|manage|maintain)\b.{0,25}<scope>",
+        r"\b(?:not\s+looking\s+for|will\s+not\s+hire)\b.{0,60}"
+        r"\b(?:someone|anyone|applicants?|candidates?)\b.{0,45}"
+        r"\b(?:without|lacking)\b.{0,25}<scope>",
+        r"<scope>[^.;!?]{0,75}\b(?:optional|not\s+needed)\b[^.;!?]{0,55}"
+        r"[,;]\s*(?:(?:it|this)\s+(?:is\s+)?)?(?:required|mandatory)\b",
+        r"<scope>[^.;!?]{0,70}\b(?:initially|currently|for\s+now)\b[^.;!?]{0,45}"
+        r"\bbut\b[^.;!?]{0,55}\b(?:you(?:'ll|\s+will)\s+)?"
+        r"(?:configure|install|implement|add|set\s+up)\s+(?:it|this)\b",
+        r"<scope>[^.;!?]{0,110}\botherwise\b[^.;!?]{0,45}"
+        r"\b(?:it|this)\b[^.;!?]{0,25}\b(?:is\s+)?(?:required|mandatory)\b",
+        r"<scope>[^.!?]{0,115}(?:[;,]|\b(?:yet|because|so|and)\b)[^.!?]{0,70}"
+        r"\b(?:need|needs|expect|expects)\b[^.!?]{0,35}"
+        r"(?:(?:you\s+to\s+)?(?:implement|install|configure|add|set\s+up)\s+(?:it|this)|"
+        r"(?:it|this)\s+(?:implemented|installed|configured|added|set\s+up))\b",
+        r"<scope>[^.!?]{0,115}(?:[;,]|\b(?:yet|because|so|and)\b)[^.!?]{0,55}"
+        r"\b(?:please\s+)?(?:implement|install|configure|add|set\s+up)\s+(?:it|this)\b",
+        r"<scope>[^.!?]{0,100}[;,:]?[^.!?]{0,45}"
+        r"\bimplementation\s+(?:is|will\s+be)\s+(?:required|mandatory|needed)\b",
+    )
+    if any(re.search(pattern, sentence) for pattern in direct_required_patterns):
+        return "required"
+
+    direct_excluded_patterns = (
+        r"\bwhatconverts\b[^.;!?]{0,65}\b(?:not|instead\s+of|rather\s+than)\b"
+        r"[^.;!?]{0,20}<scope>",
+        r"\b(?:require|requires|required|need|needs)\b[^.;!?]{0,90}"
+        r"\b(?:tracking|work|operate|proceed)\b[^.;!?]{0,30}\bwithout\b"
+        r"[^.;!?]{0,20}<scope>",
+        r"\b(?:do\s+not|never|will\s+not|should\s+not)\s+"
+        r"(?:install|configure|manage|touch|use|fix|change|modify)\b[^.;!?]{0,25}<scope>",
+        r"\bno\s+need\s+to\s+(?:fix|install|configure|manage|use|touch)\b"
+        r"[^.;!?]{0,25}<scope>",
+        r"\b(?:need|needs|require|requires)\b[^.;!?]{0,55}"
+        r"(?:to\s+)?(?:avoid|skip|omit|exclude)\b[^.;!?]{0,25}<scope>",
+        r"\b(?:need|needs|require|requires)\b[^.;!?]{0,70}"
+        r"\b(?:someone|freelancer|consultant|you)\b[^.;!?]{0,35}"
+        r"\bnot\s+to\s+(?:touch|use|install|configure|manage|change|modify)\b"
+        r"[^.;!?]{0,25}<scope>",
+        r"\b(?:need|needs|require|requires)\s+no\s+<scope>\s+work\b",
+        r"\b(?:require|requires)\s+(?:no|zero)\s+<scope>\s+changes?\b",
+        r"\b(?:part[- ]time|consultant|freelancer|contractor|\d+(?:\.\d+)?\s+hours?)\b"
+        r"[^.;!?]{0,55}\bnot\s+(?:a\s+)?<scope>(?:\s+employee\b)?",
+    )
+    if any(re.search(pattern, sentence) for pattern in direct_excluded_patterns):
+        return "excluded"
 
     # Strong requirement evidence wins over a current-state negative ("not
     # configured") or an earlier excluded use ("not needed for reports, but
@@ -633,12 +740,21 @@ def _has_non_client_service_business_model(job: Mapping[str, Any]) -> bool:
     if NON_CLIENT_TITLE_MODEL_PATTERN.search(title):
         return True
     description = str(job.get("description") or "")
-    if STRONG_COMMERCIAL_MODEL_PATTERN.search(description):
-        return True
+    description_has_product = PRODUCT_MODEL_PATTERN.search(description) is not None
     for sentence in re.split(r"[.;!?\n]+", description):
-        if INTERNAL_BUSINESS_TOOL_PATTERN.search(sentence):
+        internal = INTERNAL_BUSINESS_TOOL_PATTERN.search(sentence) is not None
+        commercial = EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN.search(sentence) is not None
+        if commercial and description_has_product:
+            return True
+        if internal:
             continue
-        if MARKETED_PRODUCT_AUDIENCE_PATTERN.search(sentence):
+        if (
+            MARKETED_PRODUCT_AUDIENCE_PATTERN.search(sentence)
+            or (
+                PRODUCT_MODEL_PATTERN.search(sentence)
+                and EXTERNAL_PRODUCT_AUDIENCE_PATTERN.search(sentence)
+            )
+        ):
             return True
         if NON_CLIENT_DESCRIPTION_MODEL_PATTERN.search(sentence):
             return True
