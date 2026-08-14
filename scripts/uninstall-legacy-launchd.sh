@@ -6,6 +6,7 @@ umask 077
 USER_DOMAIN="gui/$(id -u)"
 AGENTS_DIR="${HOME}/Library/LaunchAgents"
 LEGACY_PROFILE="${HOME}/.upwork-mcp/chrome-profile"
+CHROME_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 for label in com.jrr.upwork-chrome com.jrr.upwork-health; do
   plist="${AGENTS_DIR}/${label}.plist"
@@ -17,7 +18,8 @@ for label in com.jrr.upwork-chrome com.jrr.upwork-health; do
 done
 
 while read -r pid command; do
-  if [[ "${command}" == *"--user-data-dir=${LEGACY_PROFILE}"* ]]; then
+  if [[ "${command}" == "${CHROME_EXECUTABLE}"* ]] \
+    && [[ "${command}" == *"--user-data-dir=${LEGACY_PROFILE}"* ]]; then
     kill "${pid}" 2>/dev/null || true
   fi
 done < <(ps ax -o pid=,command=)
