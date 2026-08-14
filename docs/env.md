@@ -6,7 +6,8 @@ No API keys. Auth is a saved Chrome browser session.
 |---|---|
 | Session profile | `~/.upwork-mcp/chrome-profile/` (or `~/.upwork-mcp/profile/` per upstream README) |
 | MCP configs | Codex, Cursor, and Claude → `scripts/mcp-server.sh` |
-| Expected freelancer slug | `UPWORK_FREELANCER_PROFILE_SLUG` (defaults to `josiahroche2`) |
+| Expected freelancer profile identifiers | `UPWORK_FREELANCER_PROFILE_IDENTIFIERS` (comma-separated; defaults to Josiah's public slug and profile ID) |
+| Legacy single freelancer slug | `UPWORK_FREELANCER_PROFILE_SLUG` (still supported when the identifiers variable is unset) |
 
 ## One-time login
 
