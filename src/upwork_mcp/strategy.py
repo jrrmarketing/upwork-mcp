@@ -610,6 +610,7 @@ def _classify_scope_match(
         ("didn't", "did not"),
         ("can't", "cannot"),
         ("we're", "we are"),
+        ("it's", "it is"),
     ):
         sentence = sentence.replace(contraction, expanded)
         context = context.replace(contraction, expanded)
@@ -628,9 +629,45 @@ def _classify_scope_match(
         r"<scope>[^.!?]{0,100}[;,:][^.!?]{0,75}"
         r"\b(?:implementation|deployment|setup)\b[^.!?]{0,30}"
         r"\b(?:is\s+)?(?:required|mandatory|compulsory|essential|indispensable)\b",
+        r"<scope>[^.!?]{0,120}[.!?;,:]"
+        r"(?![^.!?]{0,50}\b(?:may|might|could|possibly|potentially|perhaps)\b)"
+        r"[^.!?]{0,90}"
+        r"\b(?:with\s+(?:the\s+|an?\s+)?)?"
+        r"(?:required|mandatory|compulsory|essential|indispensable)\s+"
+        r"(?:implementation|deployment|setup|maintenance|ownership)\b"
+        r"(?!\s+of\s+(?!(?:it|this)\b))",
+        r"<scope>[^.!?]{0,120}[.!?;,:][^.!?]{0,90}"
+        r"\b(?:later|eventually|subsequently|after\s+(?:launch|approval|sign[- ]off))\b"
+        r"[^.!?]{0,45}\b(?:you|the\s+(?:freelancer|consultant|contractor))\s+"
+        r"(?:(?:will\s+)?be|are|become)\s+responsible\s+for\s+(?:it|this)\b"
+        r"(?!\s+(?:only\s+)?(?:if|when|depending\b))",
     )
     if any(re.search(pattern, context) for pattern in cross_clause_requirement_patterns):
         return "required"
+
+    uncertain_future_patterns = (
+        r"<scope>[^.!?]{0,120}[.!?;,:][^.!?]{0,90}"
+        r"\b(?:later|eventually|subsequently|after\s+(?:launch|approval|sign[- ]off))\b"
+        r"[^.!?]{0,45}\b(?:you|the\s+(?:freelancer|consultant|contractor))\s+"
+        r"(?:may|might|could)\s+(?:be|become)\s+responsible\s+for\s+(?:it|this)\b",
+        r"<scope>[^.!?]{0,120}[.!?;,:][^.!?]{0,100}"
+        r"\b(?:later\s+)?(?:ownership|responsibility|scope)\b[^.!?]{0,35}"
+        r"\b(?:is|remains)\s+(?:undecided|unclear|open|not\s+(?:yet\s+)?decided)\b",
+        r"<scope>[^.!?]{0,140}[.!?;,:][^,;:.!?]{0,90}"
+        r"\b(?:may|might|could)\s+(?:be|become|require)\b[^,;:.!?]{0,35}"
+        r"\b(?:required|mandatory|compulsory|essential|indispensable|responsible|"
+        r"implementation|deployment|setup|maintenance|ownership)\b",
+        r"<scope>[^.!?]{0,140}[.!?;,:][^,;:.!?]{0,90}"
+        r"\b(?:possibly|potentially|perhaps)\b[^,;:.!?]{0,45}"
+        r"\b(?:required|mandatory|compulsory|essential|indispensable|responsible|"
+        r"implementation|deployment|setup|maintenance|ownership)\b",
+        r"<scope>[^.!?]{0,140}[.!?;,:][^.!?]{0,100}"
+        r"\b(?:you|the\s+(?:freelancer|consultant|contractor))\s+"
+        r"(?:(?:will\s+)?be|are|become)\s+responsible\s+for\s+(?:it|this)\b"
+        r"[^.!?]{0,25}\b(?:only\s+)?(?:if|when|depending\s+on)\b",
+    )
+    if any(re.search(pattern, context) for pattern in uncertain_future_patterns):
+        return "ambiguous"
 
     decisive_exclusion_patterns = (
         r"\bnon[- ]+\s*<scope>\s+(?:approach|solution|tracking|implementation)\b",
@@ -749,6 +786,10 @@ def _classify_scope_match(
         r"\b(?:contractor|freelance|fractional|part[- ]time|ten\s+hours?|"
         r"\d+(?:\.\d+)?\s+hours?)\b[^.;!?]{0,55}"
         r"\b(?:rather\s+than|instead\s+of|never|not)\b[^.;!?]{0,25}<scope>",
+        r"\bno\s+(?:contact|interaction|involvement)\s+"
+        r"(?:with|through|in)\s+<scope>",
+        r"<scope>\s+(?:is|remains|stays?)\s+"
+        r"(?:out\s+of\s+bounds|off[- ]limits)\b",
     )
     if any(re.search(pattern, sentence) for pattern in direct_excluded_patterns):
         return "excluded"

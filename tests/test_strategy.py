@@ -1688,6 +1688,59 @@ def test_gtm_free_scope_language_is_never_misread_as_required(description: str):
 @pytest.mark.parametrize(
     "description",
     [
+        "We need WhatConverts and no contact with GTM.",
+        "We need WhatConverts with no interaction with Google Tag Manager.",
+        "We require PPC; GTM remains out of bounds.",
+        "We require PPC; GTM stays off-limits.",
+        "GTM is optional now, with compulsory implementation of GA4 after approval.",
+    ],
+)
+def test_explicit_gtm_contact_and_boundary_exclusions_are_never_hard_scope(
+    description: str,
+):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert not any("Tag Manager" in blocker for blocker in result.blockers), description
+    assert result.recommendation not in {"skip", "scope_review"}, description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "We need contact with GTM.",
+        "GTM remains mandatory.",
+    ],
+)
+def test_gtm_exclusion_lookalikes_remain_required(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.recommendation == "skip", description
+    assert any("Tag Manager" in blocker for blocker in result.blockers), description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
         "GTM is optional? No, it is mandatory.",
         "GTM used to be optional. It is now required.",
         "GTM was optional during discovery. It becomes mandatory at implementation.",
@@ -1695,6 +1748,13 @@ def test_gtm_free_scope_language_is_never_misread_as_required(description: str):
         "GTM is optional today. We need it tomorrow.",
         "GTM is optional only during discovery; implementation is compulsory.",
         "GTM can be skipped until launch; after launch you own it.",
+        "GTM isn't needed for reports. It's indispensable for conversion tracking.",
+        "GTM isn’t needed for reports. It’s indispensable for conversion tracking.",
+        "GTM is optional for now, with compulsory implementation after sign-off.",
+        "GTM is optional at first; later you are responsible for it.",
+        "GTM is optional at first; later you will be responsible for it.",
+        "We need WhatConverts and no contact with GTM; after sign-off it is mandatory.",
+        "We require PPC; GTM remains out of bounds for reporting, but implementation is mandatory.",
     ],
 )
 def test_later_gtm_requirement_overrides_earlier_phase_exclusion(description: str):
@@ -1711,6 +1771,36 @@ def test_later_gtm_requirement_overrides_earlier_phase_exclusion(description: st
     )
     assert result.recommendation == "skip", description
     assert any("Tag Manager" in blocker for blocker in result.blockers), description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "GTM is optional at first; later you may be responsible for it.",
+        "GTM is optional at first; later you might be responsible for it.",
+        "GTM is optional for now; later ownership is undecided.",
+        "GTM is optional now; later you are responsible for it if the client requests it.",
+        "GTM is optional now, potentially with compulsory implementation after approval.",
+        "GTM is optional today, but may become required after discovery.",
+    ],
+)
+def test_uncertain_future_gtm_ownership_requires_scope_review(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.recommendation == "scope_review", description
+    assert not any("Tag Manager" in blocker for blocker in result.blockers), description
+    assert result.boost["recommendation"] == "no_boost", description
+    assert result.boost["max_extra_connects"] == 0, description
 
 
 @pytest.mark.parametrize(
