@@ -140,6 +140,39 @@ NON_CLIENT_DESCRIPTION_MODEL_PATTERN = re.compile(
     r")",
     re.I,
 )
+COMMERCIAL_MODEL_SALES_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:sell|sells|selling|sold|license|licenses|licensing|offer|offers|offering|"
+    r"provide|provides|providing|build|builds|built|develop|develops|developed|"
+    r"operate|operates|operating)\b"
+    r"[^.;!?]{0,90}\b(?:licenses?|subscriptions?|saas|software|platform|marketplace|"
+    r"mobile[- ]app|digital\s+product)\b|"
+    r"\b(?:our|the|this)\s+(?:saas|software|platform|marketplace|app|product)\b"
+    r"[^.;!?]{0,80}\b(?:serves?|sold|licensed|marketed|used\s+by)\b|"
+    r"\b(?:saas|software|platform|marketplace|app|product)\b[^.;!?]{0,80}"
+    r"\b(?:(?:sold|licensed|marketed)\s+(?:to|for)|used\s+by)\b|"
+    r"\b(?:a|an|our|the|this)\s+(?:saas|software|platform|marketplace|app|product)\b"
+    r"[^.;!?]{0,55}\b(?:for|serves?|used\s+by)\b[^.;!?]{0,55}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|"
+    r"plumbers?|plumbing\s+companies|clinics?|dentists?)\b|"
+    r"\b(?:case|practice)[- ]management\s+(?:saas|software|platform|system|tool)\b"
+    r"[^.;!?]{0,65}\b(?:for|serves?|sold\s+to|used\s+by)\b[^.;!?]{0,55}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e)\b"
+    r")",
+    re.I,
+)
+INTERNAL_TOOL_USE_PATTERN = re.compile(
+    r"\b(?:use|uses|using|rely|relies|relying|connect|connects|connected|connecting|"
+    r"integrate|integrates|integrated|integrating)\b[^.;!?]{0,90}\b"
+    r"(?:saas|software|platform|marketplace|app|"
+    r"practice[- ]management\s+(?:system|tool))\b[^.;!?]{0,45}"
+    r"\b(?:internally|in[- ]house|for\s+(?:(?:our|their)\s+)?(?:internal\s+)?"
+    r"(?:operations|team|firm|company|case\s+work))\b|"
+    r"\b(?:use|uses|using|rely|relies|relying|connect|connects|connected|connecting|"
+    r"integrate|integrates|integrated|integrating)\b[^.;!?]{0,30}\b"
+    r"(?:clio|servicetitan|proprietary)\b[^.;!?]{0,45}\b(?:software|system|platform)?\b",
+    re.I,
+)
 
 
 HARD_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -283,97 +316,113 @@ def _contains_bounded_term(text: str, term: str) -> bool:
 
 
 def _match_is_negated(text: str, start: int, end: int) -> bool:
-    """Classify the same contrast-bounded clause around one scope phrase."""
+    """Return true only when the matched scope is explicitly optional or excluded.
+
+    Unknown wording remains required (and therefore fail-closed). Generic negative
+    words are deliberately insufficient: "GTM is not configured" describes a
+    missing implementation, while "GTM is not required" removes it from scope.
+    """
 
     normalized = text.replace("’", "'")
-    sentence_boundary = r"[.;!?\n]"
-    sentence_prefix = re.split(
-        sentence_boundary,
-        normalized[max(0, start - 260) : start],
-        flags=re.I,
-    )[-1]
-    sentence_suffix = re.split(
-        sentence_boundary,
-        normalized[end : end + 220],
-        flags=re.I,
-    )[0]
+    sentence_prefix = re.split(r"[.!?\n]", normalized[max(0, start - 300) : start], flags=re.I)[-1]
+    sentence_suffix = re.split(r"[.!?\n]", normalized[end : end + 260], flags=re.I)[0]
     sentence = re.sub(
         r"\s+",
         " ",
         f"{sentence_prefix} <scope> {sentence_suffix}",
     ).strip().casefold()
+    for contraction, expanded in (
+        ("isn't", "is not"),
+        ("aren't", "are not"),
+        ("wasn't", "was not"),
+        ("weren't", "were not"),
+        ("won't", "will not"),
+        ("wouldn't", "would not"),
+        ("shouldn't", "should not"),
+        ("mustn't", "must not"),
+        ("don't", "do not"),
+        ("doesn't", "does not"),
+        ("didn't", "did not"),
+        ("can't", "cannot"),
+    ):
+        sentence = sentence.replace(contraction, expanded)
 
-    allowed_eligibility = (
-        r"(?:\b(?:candidates?|applicants?).{0,80}(?:cannot|can't|without).{0,50}"
-        r"<scope>.{0,70}\b(?:may|can)\s+(?:still\s+)?apply\b|"
-        r"\b(?:will\s+not|won't)\s+reject\b.{0,90}(?:without|cannot|can't).{0,40}"
-        r"<scope>|"
-        r"\b(?:will|would)\s+(?:accept|consider)\b.{0,90}(?:without|cannot|can't)"
-        r".{0,40}<scope>)"
+    # Strong requirement evidence wins over a current-state negative ("not
+    # configured") or an earlier excluded use ("not needed for reports, but
+    # mandatory for conversions").
+    required_patterns = (
+        r"<scope>\s+(?:(?:is|remains)\s+)?(?:required|mandatory|essential)\b",
+        r"<scope>.{0,55}\bnot\s+(?:optional|unnecessary|expendable)\b",
+        r"<scope>.{0,70}\b(?:must|has\s+to|needs?\s+to|will\s+need\s+to)\s+"
+        r"(?:be\s+)?(?:used|installed|implemented|configured|set\s+up|fixed|repaired|included)\b",
+        r"<scope>.{0,70}\b(?:must\s+(?:not|never)|cannot|can't)\s+be\s+"
+        r"(?:omitted|skipped|avoided|excluded)\b",
+        r"\b(?:do\s+not|don't|cannot|can't|never)\s+"
+        r"(?:omit|skip|avoid|exclude|leave\s+out)\b.{0,65}<scope>",
+        r"\b(?<!not\s)(?<!n't\s)(?<!no\s)(?:need|needs|require|requires|implement|install|configure|"
+        r"repair|fix|set\s+up)\b.{0,65}<scope>",
+        r"<scope>.{0,100}\b(?:and|but|although|though|yet)\b.{0,80}"
+        r"\b(?:it|this|that)\b.{0,45}\b(?:required|mandatory|essential|must\s+be|"
+        r"needs?\s+to\s+be|need\s+you\s+to)\b",
+        r"<scope>.{0,100}(?:\b(?:and|but|although|though|yet)\b|[;:])"
+        r"(?![^.;!?]{0,55}\bnot\b)[^.;!?]{0,55}"
+        r"(?:(?:the\s+)?(?:implementation|installation|setup)\s+)?"
+        r"(?:(?:is|remains|will\s+be)\s+)?(?:required|mandatory|essential|needed|necessary)\b",
+        r"<scope>.{0,100}\b(?:and|but|although|though|yet)\b.{0,80}"
+        r"\b(?:need|needs|must|require|requires)\b.{0,55}\b(?:it|this|that)\b",
+        r"\b(?:do\s+not|don't)\s+apply\b.{0,110}\b(?:unless|if|without|cannot|can't)\b"
+        r".{0,60}<scope>",
+        r"\bunless\b.{0,80}<scope>.{0,80}\b(?:do\s+not|don't)\s+apply\b",
+        r"\b(?:applicants?|candidates?|applications?|anyone|no\s+one)\b.{0,100}"
+        r"\b(?:without|lacking|cannot|can't|unable)\b.{0,55}<scope>.{0,100}"
+        r"(?:(?:may|must|should|can)\s+not\s+apply|(?:will\s+not|won't)\s+be\s+"
+        r"(?:considered|accepted)|(?:will|would)\s+be\s+rejected|"
+        r"(?:are|is|will\s+be)\s+ineligible)\b",
+        r"\b(?:will\s+not|won't)\s+hire\b.{0,100}\bwithout\b.{0,45}<scope>",
+        r"\b(?:cannot|can't)\s+apply\b.{0,80}\bwithout\b.{0,45}<scope>",
+        r"\bwithout\b.{0,45}<scope>.{0,80}\b(?:cannot|can't)\s+apply\b",
     )
-    if re.search(allowed_eligibility, sentence):
-        return True
-
-    required_eligibility = (
-        r"(?:\b(?:do\s+not|don't)\s+apply\b.{0,100}(?:cannot|can't|without|unless).{0,50}"
-        r"<scope>|"
-        r"\bunless\b.{0,80}<scope>.{0,80}\b(?:do\s+not|don't)\s+apply\b|"
-        r"\b(?:if|who)\b.{0,90}(?:cannot|can't|without).{0,50}<scope>.{0,90}"
-        r"(?:do\s+not|don't|must\s+not|should\s+not|cannot|can't)\s+apply\b|"
-        r"\b(?:applicants?|candidates?|applications?).{0,100}"
-        r"(?:without|cannot|can't|unable).{0,50}<scope>.{0,100}"
-        r"(?:(?:must\s+not|should\s+not|cannot|can't|do\s+not|don't)\s+apply|"
-        r"(?:will\s+not|won't)\s+be\s+(?:considered|accepted)|"
-        r"(?:will|would)\s+be\s+rejected|(?:are|will\s+be)\s+ineligible)\b|"
-        r"\bno one\b.{0,80}\bwithout\b.{0,40}<scope>.{0,80}\bshould\s+apply\b|"
-        r"\b(?:will\s+not|won't)\s+hire\b.{0,100}\bwithout\b.{0,40}<scope>|"
-        r"\b(?:cannot|can't)\s+apply\b.{0,80}\bwithout\b.{0,40}<scope>|"
-        r"\bwithout\b.{0,40}<scope>.{0,80}\b(?:cannot|can't)\s+apply\b)"
-    )
-    if re.search(required_eligibility, sentence):
+    if any(re.search(pattern, sentence) for pattern in required_patterns):
         return False
 
-    local_boundary = (
-        r"[;:!?\n]|,(?!\s*(?:which|that)\b)|"
-        r"\b(?:but|however|although|though|yet|and|because|while|whereas|so)\b"
+    optional_patterns = (
+        r"<scope>.{0,70}\b(?:not\s+(?:required|needed|necessary|expected|mandatory|essential|"
+        r"a\s+(?:requirement|prerequisite))|unnecessary|"
+        r"optional|excluded|explicitly\s+excluded|specifically\s+excluded|out\s+of\s+scope|"
+        r"outside\s+(?:the\s+)?scope)\b",
+        r"<scope>.{0,70}\b(?:(?:should|must|will|would)\s+not|cannot|can't)\s+be\s+used\b",
+        r"<scope>.{0,55}\b(?:won't|will\s+not)\s+be\s+necessary\b",
+        r"\b(?:no\s+(?:need|requirement|plan|plans|intention|commitment)|"
+        r"do\s+not|don't|does\s+not|doesn't|will\s+not|won't|are\s+not|aren't|"
+        r"is\s+not|isn't)\b.{0,75}<scope>",
+        r"\bno\b.{0,30}<scope>.{0,50}\b(?:commitment|hours?|role|position)\b"
+        r".{0,25}\b(?:required|expected)\b",
+        r"\bno\b.{0,30}<scope>.{0,50}\b(?:experience\s+)?"
+        r"(?:is\s+)?(?:required|needed|necessary|expected|mandatory)\b",
+        r"\b(?:avoid|skip|omit|exclude)\b.{0,55}<scope>",
+        r"\b(?:rather\s+than|instead\s+of)\b.{0,50}<scope>|"
+        r"<scope>.{0,50}\b(?:rather\s+than|instead\s+of)\b",
+        r"\b(?:can|may|could)\s+(?:work|operate|run|proceed)\b.{0,45}\bwithout\b"
+        r".{0,35}<scope>",
+        r"\b(?:part[- ]time|\d+(?:\.\d+)?\s*hours?)\b.{0,45}\bnot\s+<scope>",
+        r"\beither\b.{0,55}<scope>.{0,70}\bor\b.{0,90}\b(?:can|may|could)\s+be\s+used\b",
+        r"<scope>.{0,60}\bor\b.{0,80}\b(?:can|may|could)\s+be\s+used\b",
+        r"<scope>.{0,70}\bpreferred\b.{0,60}\b(?:not\s+required|optional|acceptable|accepted)\b",
+        r"<scope>.{0,70}\bpreferred\b.{0,70}\b(?:part[- ]time|alternative)\b"
+        r".{0,50}\b(?:acceptable|accepted|allowed)\b",
+        r"<scope>.{0,100}\b(?:but|although|though|yet)\b.{0,80}"
+        r"\b(?:whatconverts|an?\s+alternative|another\s+tool)\b.{0,45}"
+        r"\b(?:acceptable|accepted|allowed|available)\b.{0,25}\binstead\b",
+        r"\b(?:applicants?|candidates?|anyone)\b.{0,100}"
+        r"\b(?:without|lacking|cannot|can't|unable)\b.{0,55}<scope>.{0,100}"
+        r"(?:\b(?:may|can)\s+(?:still\s+)?apply\b|\b(?:are|remain)\s+(?:still\s+)?eligible\b|"
+        r"\bwill\s+(?:still\s+)?be\s+(?:considered|accepted)\b)",
+        r"\b(?:will\s+not|won't)\s+reject\b.{0,100}\b(?:without|lacking|cannot|can't)\b"
+        r".{0,45}<scope>",
+        r"\b(?:will|would)\s+(?:accept|consider)\b.{0,100}"
+        r"\b(?:without|lacking|cannot|can't)\b.{0,45}<scope>",
     )
-    prefix = re.split(local_boundary, normalized[max(0, start - 180) : start], flags=re.I)[-1]
-    suffix = re.split(local_boundary, normalized[end : end + 140], flags=re.I)[0]
-    clause = re.sub(r"\s+", " ", f"{prefix} <scope> {suffix}").strip().casefold()
-
-    required_despite_negative = (
-        r"(?:\b(?:cannot|can't)\b.{0,90}\bwithout\s+<scope>|"
-        r"<scope>.{0,50}\bnot\s+(?:optional|unnecessary|excluded|prohibited)\b|"
-        r"<scope>.{0,50}\bnot\s+(?:only|just)\b|"
-        r"\b(?:must|should)\s+not\s+(?:omit|skip|avoid|exclude)\b.{0,70}<scope>|"
-        r"<scope>.{0,70}\b(?:must|should)\s+not\s+be\s+"
-        r"(?:omitted|skipped|avoided|excluded)|"
-        r"<scope>.{0,70}\b(?:cannot|can't)\s+be\s+(?:omitted|skipped|avoided|excluded)|"
-        r"\b(?:cannot|can't)\s+(?:avoid|omit|skip)\b.{0,60}<scope>|"
-        r"\bnot\s+(?:only|just)\b.{0,60}<scope>)"
-    )
-    if re.search(required_despite_negative, clause):
-        return False
-
-    positive_requirement = (
-        r"(?:\b(?<!not )(?<!no )(?<!n't )(?:need|needs|require|requires|implement|configure|"
-        r"repair|fix|set up)\b.{0,50}<scope>|"
-        r"<scope>.{0,50}(?<!not )(?<!n't )\b(?:required|mandatory|essential|broken)|"
-        r"<scope>.{0,50}\b(?:must|will)\s+be\s+(?:used|implemented|configured))"
-    )
-    if re.search(positive_requirement, clause):
-        return False
-
-    # After eligibility and double-negative requirements are resolved, any
-    # explicit negative marker in the same clause makes the scope an exclusion.
-    exclusion_marker = re.compile(
-        r"\b(?:no|not|never|without|cannot|can't|isn't|aren't|wasn't|weren't|"
-        r"won't|wouldn't|shouldn't|mustn't|don't|doesn't|didn't|unnecessary|"
-        r"optional|exclude(?:d|ing)?|omit(?:ted|ting)?|skip(?:ped|ping)?|"
-        r"prohibited|forbidden|avoid(?:ed|ing)?|outside|out\s+of\s+scope|"
-        r"rather\s+than|instead(?:\s+of)?|except)\b"
-    )
-    return bool(exclusion_marker.search(clause))
+    return any(re.search(pattern, sentence) for pattern in optional_patterns)
 
 
 def _has_unnegated_pattern(text: str, pattern: str) -> bool:
@@ -435,11 +484,17 @@ def _has_non_client_service_business_model(job: Mapping[str, Any]) -> bool:
     """Detect explicit marketed models without penalising incidental wording."""
 
     title = str(job.get("title") or "")
+    if NON_CLIENT_TITLE_MODEL_PATTERN.search(title):
+        return True
     description = str(job.get("description") or "")
-    return bool(
-        NON_CLIENT_TITLE_MODEL_PATTERN.search(title)
-        or NON_CLIENT_DESCRIPTION_MODEL_PATTERN.search(description)
-    )
+    for sentence in re.split(r"[.;!?\n]+", description):
+        if COMMERCIAL_MODEL_SALES_PATTERN.search(sentence):
+            return True
+        if INTERNAL_TOOL_USE_PATTERN.search(sentence):
+            continue
+        if NON_CLIENT_DESCRIPTION_MODEL_PATTERN.search(sentence):
+            return True
+    return False
 
 
 def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:

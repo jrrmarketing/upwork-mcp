@@ -248,6 +248,51 @@ def test_internal_software_use_does_not_hide_a_separate_licensed_product_model()
     assert result.boost["recommendation"] == "no_boost"
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Our platform serves family law firms.",
+        "We built software for criminal defense law firms.",
+        "A platform for divorce attorneys.",
+        "Software used by family law firms.",
+        "We provide case management software to lawyers.",
+    ],
+)
+def test_marketed_software_models_never_borrow_law_firm_proof(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads specialist",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert not any(study["match_strength"] == "exact" for study in result.case_studies)
+    assert result.boost["recommendation"] == "no_boost"
+
+
+def test_legal_practice_software_used_internally_does_not_erase_law_firm_proof():
+    result = analyze_job(
+        {
+            "title": "Google Ads for a criminal defense law firm",
+            "description": "We use legal practice management software internally.",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.case_studies[0]["key"] == "drd-criminal-law"
+    assert result.case_studies[0]["match_strength"] == "exact"
+    assert result.boost["recommendation"] == "inspect_live_auction"
+
+
 def test_specific_plumbing_proof_outranks_generic_home_services_proof():
     result = analyze_job(
         {
@@ -415,6 +460,18 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "This is part-time instead of full-time.",
         "Candidates who can't use GTM may still apply.",
         "We won't reject candidates without GTM experience.",
+        "GTM is preferred but not required.",
+        "Either GTM or WhatConverts can be used.",
+        "No full-time commitment is required.",
+        "Full-time is preferred but part-time is acceptable.",
+        "Applicants lacking GTM are still eligible.",
+        "GTM is not mandatory.",
+        "GTM experience is not a prerequisite.",
+        "No GTM experience is necessary.",
+        "Applicants lacking GTM will still be considered.",
+        "You can use GTM, but WhatConverts is acceptable instead.",
+        "We can work without GTM.",
+        "This is 20 hours, not full-time.",
         "This ecommerce account does not need purchase tracking; Google Ads management only.",
     ):
         result = analyze_job(
@@ -454,6 +511,17 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "Candidates without GTM must not apply.",
         "Applications without GTM will be rejected.",
         "Do not apply unless you can use GTM.",
+        "We have no GTM and need you to install it.",
+        "GTM isn't configured and must be set up.",
+        "We don't use GTM yet and need you to implement it.",
+        "GTM isn't needed for reports, although it is mandatory for conversions.",
+        "Anyone without GTM may not apply.",
+        "Don't skip GTM.",
+        "GTM must never be omitted.",
+        "Never leave out GTM.",
+        "GTM is optional for reporting but required for conversion tracking.",
+        "No GTM currently; setup is needed.",
+        "We do not use GTM yet; implementation will be required.",
     ],
 )
 def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):
