@@ -120,6 +120,7 @@ def test_non_law_firm_business_models_never_receive_exact_law_firm_proof(title: 
         "Paid search for an attorney practice management platform sold to law firms.",
         "Paid search for a lawyer recruitment marketplace serving law firms.",
         "Paid search for a criminal defense software platform.",
+        "Legal SaaS for law firms whose customers use Clio software internally.",
     ],
 )
 def test_business_model_mismatch_in_description_cannot_supply_exact_law_proof(
@@ -139,6 +140,48 @@ def test_business_model_mismatch_in_description_cannot_supply_exact_law_proof(
 
     assert not any(study["match_strength"] == "exact" for study in result.case_studies)
     assert result.boost["recommendation"] == "no_boost"
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "expected_key"),
+    [
+        (
+            "Google Ads for a family law firm",
+            "Paid search lead generation. We use Clio software internally.",
+            "cage-and-miles-family-law",
+        ),
+        (
+            "Google Ads for a criminal defense law firm",
+            "Lead generation for the firm using practice-management software internally.",
+            "drd-criminal-law",
+        ),
+        (
+            "Google Ads for a plumbing company",
+            "Local plumbing leads. Our team uses ServiceTitan software internally.",
+            "priority-one-plumbing",
+        ),
+    ],
+)
+def test_internal_software_mentions_do_not_erase_genuine_vertical_proof(
+    title: str,
+    description: str,
+    expected_key: str,
+):
+    result = analyze_job(
+        {
+            "title": title,
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.case_studies[0]["key"] == expected_key
+    assert result.case_studies[0]["match_strength"] == "exact"
+    assert result.boost["recommendation"] == "inspect_live_auction"
 
 
 def test_specific_plumbing_proof_outranks_generic_home_services_proof():
@@ -270,6 +313,11 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "GTM, which is not required, can be ignored.",
         "GTM won't be necessary.",
         "GTM is specifically not required.",
+        "GTM is explicitly excluded.",
+        "GTM should not be used.",
+        "GTM must not be used.",
+        "GTM is outside the scope.",
+        "GTM excluded from this engagement.",
         "GTM isn't required.",
         "GTM isn’t required.",
         "No requirement for GTM.",
@@ -281,10 +329,12 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "We aren’t using GTM.",
         "We are not planning to use GTM.",
         "We don't plan to use GTM.",
+        "We don't want to use GTM.",
         "We will not be using Google Tag Manager.",
         "This is not a full-time role; the consultant will work five hours a week.",
         "This isn't a full-time role.",
         "Full-time support is unnecessary.",
+        "We aren't hiring full-time.",
         "This will not be a full-time position.",
         "Part-time rather than full-time support.",
         "We don't need a full-time person; this is five hours a week.",
@@ -302,6 +352,31 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
             }
         )
         assert not result.blockers, description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Do not apply if you cannot use GTM.",
+        "Candidates without GTM experience will not be considered.",
+        "We won't hire anyone without Google Tag Manager experience.",
+        "Without GTM experience, you cannot apply.",
+    ],
+)
+def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads specialist",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 80,
+            "proposal_count": 5,
+            "client": _client(),
+        }
+    )
+
+    assert result.recommendation == "skip"
+    assert any("Tag Manager" in blocker for blocker in result.blockers)
 
 
 def test_negation_does_not_leak_across_but_into_a_required_scope():

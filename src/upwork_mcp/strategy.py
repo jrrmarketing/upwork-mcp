@@ -120,6 +120,14 @@ NON_CLIENT_SERVICE_MODEL_PATTERN = re.compile(
     r"legal tech|law tech|practice management (?:platform|system|tool))\b",
     re.I,
 )
+INTERNAL_TOOL_CONTEXT_PATTERN = re.compile(
+    r"\b(?:use|uses|using|utilise|utilises|utilising|utilize|utilizes|utilizing|"
+    r"run|runs|running)\b[^.;!?]{0,80}\b(?:software|platform|marketplace|"
+    r"practice management (?:platform|system|tool))\b|"
+    r"\b(?:software|platform|marketplace)\b[^.;!?]{0,50}\b(?:internally|in-house|"
+    r"for (?:our|their) (?:operations|team|firm|company))\b",
+    re.I,
+)
 
 
 HARD_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -271,8 +279,11 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
     clause_boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
     prefix = re.split(clause_boundary, text[max(0, start - 120) : start], flags=re.I)[-1]
     suffix = re.split(clause_boundary, text[end : end + 120], flags=re.I)[0]
-    excluded_actions = r"(?:using|requiring|needing|including|implementing|managing|running|supporting)"
-    excluded_verbs = r"(?:use|require|need|include|implement|manage|run|support)"
+    excluded_actions = (
+        r"(?:using|requiring|needing|including|implementing|managing|running|supporting|"
+        r"hiring|seeking|employing)"
+    )
+    excluded_verbs = r"(?:use|require|need|include|implement|manage|run|support|hire|seek|employ)"
     negated_prefix = re.search(
         r"(?:"
         rf"\b(?:no\s+(?:need|requirement)\s+(?:for|to\s+{excluded_verbs})|"
@@ -288,11 +299,14 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         rf"|\b(?:isn't|aren't|wasn't|weren't)\s+(?:planning|going|intending)\s+to\s+{excluded_verbs}"
         rf"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't)\s+"
         rf"(?:plan|intend|expect)\s+to\s+{excluded_verbs}"
+        rf"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't)\s+"
+        rf"want\s+to\s+{excluded_verbs}"
         rf"|\b(?:will|would|should)\s+not\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
         rf"|\b(?:won't|wouldn't|shouldn't)\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
         rf"|\bnot\s+{excluded_actions}(?:\s+(?:a|an|the))?"
         r"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't|"
         r"will\s+not|won't|would\s+not|wouldn't|should\s+not|shouldn't|"
+        r"must\s+not|mustn't|"
         r"cannot|can't)\s+(?:want|need|require|use|include|implement|manage|run|support)"
         r"(?:\s+(?:a|an|the))?"
         r")$",
@@ -309,11 +323,15 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
             r"(?:not|(?:is|are|was|were)\s+"
             r"(?:(?:specifically|definitely|explicitly|currently|absolutely)\s+)?not|"
             r"isn't|aren't|wasn't|weren't|will\s+not\s+be|won't\s+be|"
-            r"would\s+not\s+be|wouldn't\s+be)\s+"
+            r"would\s+not\s+be|wouldn't\s+be|should\s+not\s+be|shouldn't\s+be|"
+            r"must\s+not\s+be|mustn't\s+be)\s+"
             r"(?:required|needed|necessary|included|used|managed|implemented|part of|in scope|"
             r"a requirement)"
-            r"|(?:is|are|was|were)\s+(?:unnecessary|optional|excluded|out of scope)"
+            r"|(?:is|are|was|were)\s+"
+            r"(?:(?:specifically|definitely|explicitly|currently|absolutely)\s+)?"
+            r"(?:unnecessary|optional|excluded|prohibited|forbidden|out(?:side| of) (?:the )?scope)"
             r"|(?:can|could|should)\s+be\s+(?:ignored|excluded|omitted|avoided)"
+            r"|(?:excluded|omitted|prohibited|forbidden|out(?:side| of) (?:the )?scope)"
             r")\b",
             suffix,
             re.I,
@@ -321,8 +339,51 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
     )
 
 
+def _match_is_required_despite_negation(text: str, start: int, end: int) -> bool:
+    """Recognize negative eligibility wording that makes the scope mandatory."""
+
+    text = text.replace("’", "'")
+    boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
+    prefix = re.split(boundary, text[max(0, start - 180) : start], flags=re.I)[-1].strip()
+    suffix = re.split(boundary, text[end : end + 140], flags=re.I)[0].strip()
+    if re.search(
+        r"\bdo\s+not\s+apply\s+if\b.{0,80}\b(?:cannot|can't|unable\s+to)\s+"
+        r"(?:use|implement|manage|work\s+with)\s*$",
+        prefix,
+        re.I,
+    ):
+        return True
+    if re.search(
+        r"\b(?:will\s+not|won't)\s+hire\b.{0,80}\bwithout\s*$",
+        prefix,
+        re.I,
+    ):
+        return True
+    if re.search(r"\bwithout\s*$", prefix, re.I) and re.match(
+        r"^(?:experience|skills?|knowledge)?\b.{0,60}\b"
+        r"(?:cannot|can't|will\s+not|won't)\b.{0,40}\b"
+        r"(?:apply|be\s+(?:considered|accepted|eligible)|qualify)\b",
+        suffix,
+        re.I,
+    ):
+        return True
+    return bool(
+        re.search(r"\b(?:candidates?|applicants?)\s+without\s*$", prefix, re.I)
+        and re.match(
+            r"^(?:experience|skills?|knowledge)?\b.{0,60}\b"
+            r"(?:will\s+not|won't)\s+be\s+(?:considered|accepted|eligible)\b",
+            suffix,
+            re.I,
+        )
+    )
+
+
 def _has_unnegated_pattern(text: str, pattern: str) -> bool:
-    return any(not _match_is_negated(text, match.start(), match.end()) for match in re.finditer(pattern, text, re.I))
+    return any(
+        _match_is_required_despite_negation(text, match.start(), match.end())
+        or not _match_is_negated(text, match.start(), match.end())
+        for match in re.finditer(pattern, text, re.I)
+    )
 
 
 def _contains_unnegated_terms(text: str, terms: Iterable[str]) -> bool:
@@ -376,10 +437,22 @@ def proposal_safe_proof_lines(study: Mapping[str, Any]) -> list[dict[str, str]]:
     return lines
 
 
+def _has_non_client_service_business_model(job: Mapping[str, Any]) -> bool:
+    """Detect a marketed non-client-service model without penalising internal tools."""
+
+    chunks = [str(job.get("title") or ""), str(job.get("description") or "")]
+    for chunk in chunks:
+        for sentence in re.split(r"[.;!?\n]+", chunk):
+            without_internal_tools = INTERNAL_TOOL_CONTEXT_PATTERN.sub("", sentence)
+            if NON_CLIENT_SERVICE_MODEL_PATTERN.search(without_internal_tools):
+                return True
+    return False
+
+
 def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str, Any]]:
     """Return the closest verified proof, with the match strength made explicit."""
     text = _text(job)
-    if NON_CLIENT_SERVICE_MODEL_PATTERN.search(text):
+    if _has_non_client_service_business_model(job):
         return []
 
     ranked: list[
