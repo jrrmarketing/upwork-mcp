@@ -1,10 +1,22 @@
 """Offline unit tests for attached-browser session safety."""
 
 import asyncio
+import os
+import stat
+import threading
+import time
 
 import pytest
 
 import upwork_mcp.browser.client as client
+
+
+@pytest.fixture(autouse=True)
+def private_browser_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(client, "PROFILE_DIR", tmp_path / "chrome-profile")
+    monkeypatch.setattr(client, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(client, "BROWSER_OPERATION_LOCK", tmp_path / "browser-operation.lock")
 
 
 class FakeCDPSession:
@@ -47,6 +59,26 @@ class FakePage:
         await asyncio.sleep(0)
         self.url = url
         self.active_navigations -= 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def title(self) -> str:
+        return "Find Work"
+
+    def locator(self, selector: str):
+        return FakeLocator(selector)
+
+
+class FakeLocator:
+    def __init__(self, selector: str):
+        self.selector = selector
+
+    async def inner_text(self, **_kwargs) -> str:
+        return "Jobs you might like"
+
+    async def evaluate_all(self, _script: str) -> list[str]:
+        return ["https://www.upwork.com/freelancers/josiahroche2"]
 
 
 class FakeContext:
@@ -143,7 +175,7 @@ def install_fake_playwright(monkeypatch, chromium) -> FakePlaywright:
         "async_playwright",
         lambda: FakePlaywrightStarter(playwright),
     )
-    monkeypatch.setattr(client, "is_chrome_running_with_debug", lambda: True)
+    monkeypatch.setattr(client, "chrome_debug_status", lambda: "dedicated")
     return playwright
 
 
@@ -181,11 +213,14 @@ def test_freelancer_context_fails_closed(
 
 @pytest.mark.asyncio
 async def test_sync_chrome_wait_does_not_nest_running_event_loop(monkeypatch, tmp_path):
-    states = iter([False, True])
+    states = iter(["stopped", "stopped", "dedicated"])
     command = []
     sleeps = []
 
     monkeypatch.setattr(client, "PROFILE_DIR", tmp_path / "profile")
+    monkeypatch.setattr(client, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(client, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(client, "BROWSER_OPERATION_LOCK", tmp_path / "browser.lock")
     monkeypatch.setattr(client, "find_chrome", lambda: "/fake/chrome")
     monkeypatch.setattr(
         client.subprocess,
@@ -194,7 +229,7 @@ async def test_sync_chrome_wait_does_not_nest_running_event_loop(monkeypatch, tm
     )
     monkeypatch.setattr(
         client,
-        "is_chrome_running_with_debug",
+        "chrome_debug_status",
         lambda: next(states),
     )
     monkeypatch.setattr(client.time, "sleep", sleeps.append)
@@ -263,18 +298,17 @@ async def test_async_start_runs_sync_chrome_launcher_in_worker(monkeypatch):
     browser = FakeBrowser([context])
     chromium = FakeChromium(browser)
     playwright = FakePlaywright(chromium)
-    thread_calls = []
+    launcher_calls = []
+    monkeypatch.setattr(client, "chrome_debug_status", lambda: "stopped")
 
-    monkeypatch.setattr(client, "is_chrome_running_with_debug", lambda: False)
-
-    async def fake_to_thread(function):
-        thread_calls.append(function)
+    def fake_launcher():
+        launcher_calls.append(True)
         return True
 
     async def no_wait(_seconds):
         return None
 
-    monkeypatch.setattr(client.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(client, "_start_chrome_with_debug_locked", fake_launcher)
     monkeypatch.setattr(client.asyncio, "sleep", no_wait)
     monkeypatch.setattr(
         client,
@@ -284,7 +318,7 @@ async def test_async_start_runs_sync_chrome_launcher_in_worker(monkeypatch):
 
     await client.UpworkBrowser().start()
 
-    assert thread_calls == [client.start_chrome_with_debug]
+    assert launcher_calls == [True]
 
 
 @pytest.mark.asyncio
@@ -343,3 +377,122 @@ async def test_close_disconnects_patchright_without_closing_owner_page(monkeypat
     assert upwork._context is None
     assert upwork._page is None
     assert upwork._started is False
+
+
+def test_listener_must_use_exact_dedicated_profile(monkeypatch):
+    monkeypatch.setattr(client, "_listener_pids", lambda: [123])
+    monkeypatch.setattr(
+        client,
+        "_process_command",
+        lambda _pid: f"Google Chrome --remote-debugging-port=9222 --user-data-dir={client.PROFILE_DIR}",
+    )
+    assert client.dedicated_chrome_pids() == [123]
+
+    monkeypatch.setattr(
+        client,
+        "_process_command",
+        lambda _pid: "Google Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/other-profile",
+    )
+    assert client.dedicated_chrome_pids() == []
+
+
+def test_file_lock_and_state_are_owner_only():
+    with client.browser_operation_file_lock():
+        assert client.BROWSER_OPERATION_LOCK.exists()
+
+    assert stat.S_IMODE(os.stat(client.STATE_DIR).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(client.BROWSER_OPERATION_LOCK).st_mode) == 0o600
+
+
+def test_file_lock_serializes_independent_callers():
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    def first() -> None:
+        with client.browser_operation_file_lock():
+            first_entered.set()
+            release_first.wait(timeout=2)
+
+    def second() -> None:
+        first_entered.wait(timeout=2)
+        with client.browser_operation_file_lock():
+            second_entered.set()
+
+    first_thread = threading.Thread(target=first)
+    second_thread = threading.Thread(target=second)
+    first_thread.start()
+    second_thread.start()
+    assert first_entered.wait(timeout=1)
+    time.sleep(0.05)
+    assert not second_entered.is_set()
+    release_first.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+    assert second_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_disposable_login_check_never_navigates_existing_tab(monkeypatch):
+    existing = FakePage("https://www.upwork.com/ab/proposals/")
+    context = FakeContext([existing])
+    browser = FakeBrowser([context])
+    install_fake_playwright(monkeypatch, FakeChromium(browser))
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(client.asyncio, "sleep", no_wait)
+    upwork = client.UpworkBrowser()
+
+    assert await upwork.is_logged_in_disposable() is True
+    assert existing.url == "https://www.upwork.com/ab/proposals/"
+    assert existing.active_navigations == 0
+    assert context.created_pages == 1
+    assert context.pages[-1].closed is True
+
+
+@pytest.mark.asyncio
+async def test_browser_diagnostics_never_write_stdout(capsys):
+    class ErrorPage(FakePage):
+        async def goto(self, url: str, **_kwargs) -> None:
+            raise RuntimeError("offline failure")
+
+    result = await client.UpworkBrowser()._is_logged_in_on_page(ErrorPage("about:blank"))
+    captured = capsys.readouterr()
+
+    assert result is False
+    assert captured.out == ""
+    assert "offline failure" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_browser_refuses_mismatched_debug_listener(monkeypatch, capsys):
+    monkeypatch.setattr(client, "chrome_debug_status", lambda: "mismatched")
+
+    with pytest.raises(RuntimeError, match="not using the dedicated Upwork profile"):
+        await client.UpworkBrowser().start()
+
+    assert capsys.readouterr().out == ""
+
+
+def test_clear_saved_session_stops_browser_before_removing_profile(monkeypatch):
+    client.PROFILE_DIR.mkdir(parents=True)
+    (client.PROFILE_DIR / "Cookies").write_text("private", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(client, "chrome_debug_status", lambda: "dedicated")
+    monkeypatch.setattr(client, "_stop_dedicated_chrome_locked", lambda: calls.append("stop") or True)
+
+    assert client.clear_saved_session() is True
+    assert calls == ["stop"]
+    assert not client.PROFILE_DIR.exists()
+
+
+def test_clear_saved_session_refuses_mismatched_listener(monkeypatch):
+    client.PROFILE_DIR.mkdir(parents=True)
+    monkeypatch.setattr(client, "chrome_debug_status", lambda: "mismatched")
+
+    with pytest.raises(RuntimeError, match="Refusing logout"):
+        client.clear_saved_session()
+
+    assert client.PROFILE_DIR.exists()

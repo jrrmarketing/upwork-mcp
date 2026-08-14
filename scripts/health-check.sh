@@ -1,12 +1,16 @@
 #!/bin/bash
 # Ensure Chrome is up and Upwork session is still valid.
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="${HOME}/.upwork-mcp/logs"
 LOG_FILE="${LOG_DIR}/health-check.log"
 
 mkdir -p "$LOG_DIR"
+chmod 700 "${HOME}/.upwork-mcp" "$LOG_DIR"
+touch "$LOG_FILE"
+chmod 600 "$LOG_FILE"
 
 "${ROOT}/scripts/start-chrome-daemon.sh"
 

@@ -20,11 +20,10 @@ uv run upwork-mcp --login    # sign in to Upwork in the opened browser
 
 ## Background Chrome (automatic)
 
-Three layers — you shouldn't need to open Chrome manually:
+Two built-in layers keep Chrome available after setup:
 
 1. **Mac login** — `com.jrr.upwork-chrome` launchd agent (off-screen Chrome on port 9222)
-2. **Cursor session start** — `~/.cursor/hooks.json` runs `start-chrome-daemon.sh`
-3. **MCP startup** — `scripts/mcp-server.sh` ensures Chrome before `upwork-mcp` starts
+2. **MCP startup** — `scripts/mcp-server.sh` ensures Chrome before `upwork-mcp` starts
 
 Install launchd once:
 
@@ -32,8 +31,9 @@ Install launchd once:
 cd ~/Projects/upwork-mcp && ./scripts/install-launchd.sh
 ```
 
-Codex, Cursor, and Claude MCP configs point at `scripts/mcp-server.sh`, so Chrome is checked
-before the server starts.
+Each MCP client must be registered with `scripts/mcp-server.sh` as its command. Start from
+`mcp-config.example.json` and use the canonical checkout's absolute path. Registration is a local
+deployment step; repository tests do not prove that a particular client is already configured.
 
 ## Use in Cursor
 
@@ -48,7 +48,8 @@ Examples:
 
 Read-only tools may inspect live Upwork. Proposals, messages, withdrawals, and invitation
 declines follow prepare -> exact owner approval -> one-time commit -> owner-system readback.
-No tool may infer approval or Connect spend from a recommendation.
+No tool may infer approval or Connect spend from a recommendation. Positive boosts remain
+recommendation-only until Upwork's first Submit transition can be proven non-consequential.
 
 ## Docs
 
@@ -59,12 +60,10 @@ No tool may infer approval or Connect spend from a recommendation.
 ## Verification
 
 ```bash
-uv lock --check
-uv sync --frozen --group dev
-uv run ruff check src tests
-uv run mypy src/upwork_mcp
-uv run pytest -q
+./scripts/verify.sh
 ```
+
+The same locked verification runs on every pull request and push to `main`.
 
 The default suite is offline. Owner-account checks are read-only and opt-in:
 

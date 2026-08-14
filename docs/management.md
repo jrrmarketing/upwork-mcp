@@ -9,15 +9,17 @@ client, spends Connects, or changes an Upwork record is prepared and approved se
 2. Hydrate the full job before judging it. Record scope, hours, duration, price, proposals,
    interviews, invitations, Connect cost, client spend, hires, hire rate, average paid rate,
    rating, and payment verification.
-3. Classify it as `strong_fit`, `fit`, `price_conversion`, `speculative`, or `skip` with
+3. Classify it as `strong_fit`, `fit`, `price_conversion`, `speculative`, `scope_review`, or `skip` with
    separate reasons for service fit, client quality, reachability, pricing, and proof.
 4. Inspect one exact `/jobs/~<job-id>` posting and its matching canonical
    `/nx/proposals/job/~<job-id>/apply` form. Bind the job ID, live title, job type, form URL,
-   questions, duration options, fee/net text, base Connect cost, boost auction, and
+   questions, duration options, exact scoped base Connect cost, boost auction, and
    existing-proposal status to the preparation.
-5. Draft in Josiah's plain-text consultative voice and answer every screening question.
-6. Prepare an expiring one-time action. Show the full copy and terms to Josiah.
-7. After a fresh exact approval, arm and commit that unchanged action once. A live-state
+5. Run the reversible commercial preflight with the exact proposed hourly rate or by-project bid;
+   bind its scoped fee/net preview only after the original form value is restored exactly.
+6. Draft in Josiah's plain-text consultative voice and answer every screening question.
+7. Prepare an expiring one-time action. Show the full copy and terms to Josiah.
+8. After a fresh exact approval, arm and commit that unchanged action once. A live-state
    change invalidates the action. Success requires owner-system readback.
 
 The commit atomically claims the action before browser work. A claimed action cannot be
@@ -29,10 +31,21 @@ canonical communication rule.
 
 Proposal commit navigates directly to the approved application form and reads back the same job
 ID, canonical job/form URLs, title, and job type before querying any rate, bid, cover-letter,
-screening, duration, highlight, payment, boost, or submit control. A fixed-price proposal must
-bind either `by_project` with no milestones or `by_milestone` with an ordered list of exact
-description, ISO due date, and amount values whose total equals the bid. The live selection and
-filled values must be readable after entry. Upwork defaults are never accepted implicitly.
+screening, duration, highlight, payment, boost, or submit control. Automated fixed-price
+preparation supports `by_project` with no milestones. Milestone rows are not created reliably and
+the reversible commercial preflight supports by-project terms only, so `by_milestone` automation
+fails closed. The live selection and filled values must be readable after entry. Upwork defaults
+are never accepted implicitly.
+
+A suitable invitation is not automatically accepted or converted into an application. Automated
+prepare/commit is supported only when Upwork already exposes the ordinary exact job application
+form; never treat an `Accept Interview` control as part of this workflow.
+
+After all form interactions, commit re-reads every approved live field and state before its first
+Submit-control query. Fee/net, auction, and base Connect evidence comes only from exact scoped
+Upwork controls, never the whole page or job description. The final no-boost Send label must show
+the exact approved base Connect amount. Stored-proposal confirmation proves submission, but the
+MCP reports actual Connect spend only when that owner-system readback explicitly verifies it.
 
 A success query or banner is only supporting context. Submission succeeds only when Upwork opens
 one exact stored `/nx/proposals/<19-digit-id>` record whose job ID, URL, title, normalized cover
@@ -76,8 +89,9 @@ advisory benchmark. Treat $50-$62 as a price-conversion decision. Never go below
 or invent a fixed fee. Fixed-price work remains an owner decision until a versioned floor or
 scoped estimate exists.
 
-Upwork fees have varied. Never assume a fixed percentage. Read the live fee/net preview and
-show it with the exact bid before approval.
+Upwork fees have varied. Never assume a fixed percentage. Read the scoped live fee/net preview
+only after temporarily entering and reading back the exact price, then restore the original form
+value. Bind the preview's exact price and preflight provenance before approval.
 
 ## Case-study proof
 
@@ -105,17 +119,31 @@ copy can remain natural on separate lines. The MCP does not claim to prove arbit
 no implied result; draft and exact owner approval remain required, and audited client evidence may
 only enter the auto-submittable copy through the generated line.
 
+Public case-study routes remain evidence metadata, not proposal content. Pre-contract proposals
+must not include an external case-study URL; use the exact generated proof line and a verified live
+Upwork profile highlight instead.
+
 Current portfolio-highlight titles must be read from the live owner system. Several old titles
 conflict with audited case-study evidence, so the old digest is not an automatic selection list.
 Proposal preparation requires a `complete` live chooser enumeration and rejects any requested
 highlight title that is not in `available_profile_highlights`. An unavailable or incomplete
 chooser inspection blocks preparation rather than claiming the title was validated.
 
+The same fail-closed rule applies to screening questions, duration options, scoped base Connect
+cost, price-bound fee/net context, and rate-increase applicability. The exact approval payload
+binds their live discovery statuses, the commercial-preflight price/source, normalized fee/net
+lines, and normalized boost-auction lines. An absent hourly rate-increase control is unavailable;
+only a fixed-price form may bind it as not applicable. Empty screening
+questions are valid only when the form-control count proves there are genuinely none; an empty or
+partial duration menu is never treated as complete.
+
 ## Boosts
 
 Default to no boost. Consider a boost only when all of these are true:
 
 - `strong_fit`
+- `scope_review` when unsupported-scope wording is not explicit enough to classify safely; this
+  state cannot prepare a proposal or recommend a boost until the scope is manually resolved
 - strong client economics
 - exact audited proof match
 - fewer than 20 proposals or similarly favourable reachability
@@ -123,8 +151,24 @@ Default to no boost. Consider a boost only when all of these are true:
 - live auction inspected
 
 The policy caps an initial recommendation at 12 extra Connects and still requires exact owner
-approval. It never spends from a recommendation alone. Capture the submitted boost and later
-outcome so the report can compare boosted and unboosted performance after enough observations.
+approval. Recommendations and live auction inspection remain available, but automatic proposal
+preparation and commit currently require `boost_connects=0`: Upwork may store the proposal on the
+first Submit click before a boost dialog can be proven. Generic boost prompts or a Connect amount
+alone are not current auction state; require current top/competing bid, rank, slot, bidder count,
+or no-bids evidence before describing auction inspection as complete.
+
+At present, automated proposal preparation accepts `boost_connects=0` only. A positive boost must
+remain a manual exact-approved flow until the live two-stage Upwork sequence proves that its first
+Submit click is non-consequential and the chosen bid is applied before the final send.
+
+### Boost a message
+
+Upwork's **Boost a message** is a separate acquisition product, not a proposal boost or an
+ordinary conversation reply. The MCP intentionally does not auto-activate it or expose a
+speculative spend tool. It must remain read-only until an authenticated live UI mapping can bind
+one exact target, the exact introductory copy, the exact duration, and one owner-approved total
+Connect cap, then read those values back from Upwork before any activation. Proposal-boost logic,
+generic Send controls, and inferred Connect spend must never be reused for this product.
 
 ## Maintenance
 

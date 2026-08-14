@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -17,13 +18,60 @@ def _browser_must_not_open() -> None:
     raise AssertionError("browser access happened before approval")
 
 
-def _approved(model, payload: dict[str, Any]):
-    return model.model_copy(
-        update={
-            "approved": True,
-            "approval_sha256": proposals.approval_payload_digest(payload),
+def _history_binding(
+    records: list[tuple[str, bool]] | None = None,
+) -> dict[str, Any]:
+    canonical_records = [
+        {
+            "identity": f'data-message-id:{messages._sha256_json({"content": content, "is_mine": is_mine})[:24]}',
+            "content": content,
+            "is_mine": is_mine,
+        }
+        for content, is_mine in (records or [])
+    ]
+    binding = messages._message_history_approval(
+        {
+            "status": "complete",
+            "completeness_proof": "exact_owner_complete_boundary",
+            "messages": canonical_records,
+            "rendered_record_count": len(canonical_records),
         }
     )
+    assert binding is not None
+    return binding
+
+
+def _bound_message_params(
+    *,
+    room_url: str = "https://www.upwork.com/nx/messages/room-1234567",
+    room_id: str = "room-1234567",
+    contact_name: str = "Alex Client",
+    message: str = "Exact approved message",
+    records: list[tuple[str, bool]] | None = None,
+) -> messages.SendMessageParams:
+    return messages.SendMessageParams(
+        room_url=room_url,
+        room_id=room_id,
+        contact_name=contact_name,
+        message=message,
+        **_history_binding(records),
+    )
+
+
+def _approved_once(model, payload: dict[str, Any], monkeypatch, state_dir):
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(state_dir))
+    action_type = {
+        "SendMessageParams": "message",
+        "WithdrawProposalParams": "withdrawal",
+        "DeclineInvitationParams": "invitation_decline",
+    }[type(model).__name__]
+    prepared = prepare_action(action_type, payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    return model.model_copy(update={"action_id": prepared["action_id"]})
 
 
 def test_action_schemas_are_strict() -> None:
@@ -111,6 +159,7 @@ def test_message_accepts_only_observed_individual_room_forms(url: str, room_id: 
         room_id=room_id,
         contact_name="Alex Client",
         message="Exact copy",
+        **_history_binding(),
     )
     assert params.room_id == room_id
 
@@ -122,6 +171,12 @@ def test_message_accepts_only_observed_individual_room_forms(url: str, room_id: 
         "https://www.upwork.com/ab/messages/rooms/",
         "https://www.upwork.com/jobs/~123?next=/nx/messages/abc123456789",
         "https://www.upwork.com/nx/messages/abc123456789/settings",
+        "https://www.upwork.com/nx/messages/abc123456789?next=/nx/messages/different123",
+        "https://www.upwork.com/ab/messages/rooms/abc123456789?room=other123456",
+        "https://www.upwork.com/nx/messages/abc123456789#different-room",
+        "https://www.upwork.com/nx/messages/abc123456789?",
+        "https://www.upwork.com/nx/messages/abc123456789#",
+        "https://www.upwork.com.evil.example/nx/messages/abc123456789",
     ],
 )
 def test_message_rejects_indexes_subroutes_and_query_bypass(url: str) -> None:
@@ -131,7 +186,34 @@ def test_message_rejects_indexes_subroutes_and_query_bypass(url: str) -> None:
             room_id="abc123456789",
             contact_name="Alex Client",
             message="Exact copy",
+            **_history_binding(),
         )
+
+
+@pytest.mark.parametrize(
+    ("url", "canonical"),
+    [
+        (
+            "https://www.upwork.com/nx/messages/abc123456789",
+            "https://www.upwork.com/nx/messages/abc123456789",
+        ),
+        (
+            "https://www.upwork.com/ab/messages/rooms/abc123456789",
+            "https://www.upwork.com/ab/messages/rooms/abc123456789",
+        ),
+    ],
+)
+def test_message_room_parser_returns_exact_room_not_route_container(
+    url: str, canonical: str
+) -> None:
+    assert messages.parse_message_room(url) == (canonical, "abc123456789")
+
+
+def test_message_room_parser_does_not_mistake_http_prefixed_id_for_url() -> None:
+    assert messages.parse_message_room("http12345678") == (
+        "https://www.upwork.com/nx/messages/http12345678",
+        "http12345678",
+    )
 
 
 def test_all_action_ids_must_match_their_exact_routes() -> None:
@@ -155,6 +237,7 @@ def test_all_action_ids_must_match_their_exact_routes() -> None:
             room_id="different",
             contact_name="Alex Client",
             message="Exact copy",
+            **_history_binding(),
         )
 
 
@@ -185,8 +268,20 @@ async def test_approved_proposal_still_requires_live_preflight_before_browser(mo
         job_type="hourly",
         action_id="uwa_missing_action",
         cover_letter="Exact approved copy",
+        fee_net_text=["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        fee_net_status="complete",
+        fee_net_price_amount="63.00",
+        fee_net_source="scoped_reversible_price_preflight",
+        boost_auction_text=[],
+        boost_auction_status="unavailable",
         rate=63,
+        screening_questions_status="complete",
         duration="1 to 3 months",
+        duration_options_status="complete",
+        available_profile_highlights_status="complete",
+        base_connects=12,
+        base_connects_status="complete",
+        rate_increase_control_status="complete",
     )
     result = await proposals.submit_proposal(params)
     assert result["status"] == "approval_required"
@@ -205,8 +300,20 @@ async def test_one_time_prepared_action_rejects_changed_terms_before_browser(mon
         job_type="hourly",
         action_id="uwa_placeholder",
         cover_letter="Exact approved copy",
+        fee_net_text=["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        fee_net_status="complete",
+        fee_net_price_amount="63.00",
+        fee_net_source="scoped_reversible_price_preflight",
+        boost_auction_text=[],
+        boost_auction_status="unavailable",
         rate=63,
+        screening_questions_status="complete",
         duration="1 to 3 months",
+        duration_options_status="complete",
+        available_profile_highlights_status="complete",
+        base_connects=12,
+        base_connects_status="complete",
+        rate_increase_control_status="complete",
     )
     payload = proposals.proposal_submission_payload(original)
     prepared = prepare_action("proposal", payload)
@@ -234,14 +341,28 @@ async def test_legacy_withdrawal_call_requires_identity_preflight(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_legacy_digest_cannot_authorize_withdrawal(monkeypatch) -> None:
+    monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
+    params = _withdrawal_params()
+    payload = proposals.proposal_withdrawal_payload(params)
+    result = await proposals.withdraw_proposal(
+        params.model_copy(
+            update={
+                "approved": True,
+                "approval_sha256": proposals.approval_payload_digest(payload),
+            }
+        )
+    )
+
+    assert result["status"] == "approval_required"
+    assert result["legacy_authorization_rejected"] is True
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
 async def test_message_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(messages, "get_browser", _browser_must_not_open)
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
 
     prepared = await messages.send_message(params)
     assert prepared["status"] == "approval_required"
@@ -252,7 +373,8 @@ async def test_message_requires_exact_approval_before_browser(monkeypatch) -> No
     mismatch = await messages.send_message(
         params.model_copy(update={"approved": True, "approval_sha256": "0" * 64})
     )
-    assert mismatch["status"] == "approval_mismatch"
+    assert mismatch["status"] == "approval_required"
+    assert mismatch["legacy_authorization_rejected"] is True
 
 
 @pytest.mark.asyncio
@@ -274,7 +396,8 @@ async def test_decline_requires_exact_approval_before_browser(monkeypatch) -> No
     mismatch = await invitations.decline_invitation(
         params.model_copy(update={"approved": True, "approval_sha256": "0" * 64})
     )
-    assert mismatch["status"] == "approval_mismatch"
+    assert mismatch["status"] == "approval_required"
+    assert mismatch["legacy_authorization_rejected"] is True
 
 
 class _TextElement:
@@ -284,6 +407,15 @@ class _TextElement:
     async def text_content(self) -> str:
         return self.text
 
+    async def is_visible(self) -> bool:
+        return True
+
+    async def is_enabled(self) -> bool:
+        return True
+
+    async def get_attribute(self, _name: str) -> str | None:
+        return None
+
     async def query_selector(self, _selector: str):
         return None
 
@@ -292,12 +424,41 @@ class _TextElement:
 
 
 class _Button(_TextElement):
-    def __init__(self, callback: Callable[[], None], text: str = "") -> None:
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        text: str = "",
+        *,
+        attributes: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(text)
         self.callback = callback
+        self.attributes = attributes or {}
 
     async def click(self) -> None:
         self.callback()
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.attributes.get(name)
+
+
+class _MutatingSendButton(_Button):
+    """Change action identity after final resolution but before native click."""
+
+    def __init__(self, callback: Callable[[], None]) -> None:
+        super().__init__(
+            callback,
+            "Send",
+            attributes={"data-test": "send-button", "type": "submit"},
+        )
+        self.enabled_reads = 0
+
+    async def is_enabled(self) -> bool:
+        self.enabled_reads += 1
+        if self.enabled_reads == 3:
+            self.text = "Delete"
+            self.attributes = {"data-test": "delete-button", "type": "button"}
+        return True
 
 
 class _HighlightOption(_TextElement):
@@ -337,15 +498,32 @@ class _Input(_TextElement):
     def __init__(self) -> None:
         super().__init__()
         self.value = ""
+        self.corrupt_readback = False
+        self.fail_restore = False
+        self.press_count = 0
+        self.input_reads = 0
+        self.trigger_read_number: int | None = None
+        self.on_triggered_read: Callable[[], None] | None = None
 
     async def fill(self, value: str) -> None:
+        if not value and self.value and self.fail_restore:
+            raise RuntimeError("restore failed")
         self.value = value
 
     async def press(self, _key: str) -> None:
+        self.press_count += 1
         self.value = ""
 
     async def input_value(self) -> str:
-        return self.value
+        self.input_reads += 1
+        if (
+            self.trigger_read_number == self.input_reads
+            and self.on_triggered_read is not None
+        ):
+            callback = self.on_triggered_read
+            self.on_triggered_read = None
+            callback()
+        return f"{self.value} " if self.corrupt_readback and self.value else self.value
 
 
 class _MessageElement(_TextElement):
@@ -353,29 +531,266 @@ class _MessageElement(_TextElement):
         super().__init__(content)
         self.content = content
         self.is_mine = is_mine
+        self.message_id = messages._sha256_json(
+            {"content": content, "is_mine": is_mine}
+        )[:24]
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-message-id":
+            return self.message_id
+        return None
 
     async def query_selector(self, selector: str):
         if any(part in selector for part in ('[data-test="content"]', ".content", ".message-text", "p")):
             return _TextElement(self.content)
         if self.is_mine and any(part in selector for part in (".my-message", '[data-test="my-message"]', ".sent")):
             return _TextElement()
+        if not self.is_mine and any(
+            part in selector
+            for part in (
+                ".their-message",
+                '[data-test="other-message"]',
+                '[data-test="received-message"]',
+                ".received",
+                ".incoming",
+            )
+        ):
+            return _TextElement()
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == '[data-test="content"]':
+            return [_TextElement(self.content)]
+        return []
+
+
+class _HistoryBoundary(_TextElement):
+    def __init__(self, page: _MessagePage) -> None:
+        super().__init__()
+        self.page = page
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-history-complete":
+            return "true"
+        if name == "data-message-count":
+            return str(len(self.page.messages))
         return None
 
 
+class _MessageHistoryScope(_TextElement):
+    def __init__(self, page: _MessagePage) -> None:
+        super().__init__()
+        self.page = page
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-room-id":
+            return "room-1234567"
+        if name == "data-virtualized" and self.page.history_root_virtualized:
+            return "true"
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == messages._MESSAGE_RECORD_SELECTOR:
+            return self.page.messages
+        if selector == messages._HISTORY_INCOMPLETE_SELECTOR:
+            return [_TextElement()] if self.page.history_virtualized else []
+        if selector == messages._HISTORY_COMPLETE_BOUNDARY_SELECTOR:
+            return [self.page.history_boundary] if self.page.history_complete else []
+        return []
+
+
+class _Link(_TextElement):
+    def __init__(self, href: str) -> None:
+        super().__init__()
+        self.href = href
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.href if name == "href" else None
+
+
+class _ConversationListElement(_TextElement):
+    def __init__(self, href: str) -> None:
+        super().__init__()
+        self.href = href
+
+    async def query_selector(self, selector: str):
+        if "contact-name" in selector:
+            return _TextElement("Alex Client")
+        if selector == 'a[href*="/messages/"]':
+            return _Link(self.href)
+        return None
+
+
+class _MessageComposer(_TextElement):
+    def __init__(self, page: _MessagePage) -> None:
+        super().__init__()
+        self.page = page
+
+        def send() -> None:
+            self.page.send_clicks += 1
+            self.page.messages.append(_MessageElement(self.page.input.value, is_mine=True))
+            self.page.input.value = ""
+
+        self.send_button = _Button(
+            send,
+            "Send",
+            attributes={"data-test": "send-button", "type": "submit"},
+        )
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "data-room-id":
+            return "room-1234567"
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == messages._COMPOSER_INPUT_SELECTOR:
+            self.page.action_controls_queried += 1
+            return [self.page.input]
+        if selector == messages._SCOPED_SEND_CANDIDATE_SELECTOR:
+            self.page.action_controls_queried += 1
+            if self.page.on_send_resolution is not None:
+                callback = self.page.on_send_resolution
+                self.page.on_send_resolution = None
+                callback()
+            return [self.send_button] if self.page.scoped_send_available else []
+        return []
+
+
 class _MessagePage:
-    def __init__(self, *, contact_name: str = "Alex Client") -> None:
+    def __init__(
+        self,
+        *,
+        contact_name: str = "Alex Client",
+        composer_count: int = 1,
+        scoped_send_available: bool = True,
+        history_complete: bool = True,
+        history_virtualized: bool = False,
+        history_root_virtualized: bool = False,
+        page_wide_history_boundary: bool = False,
+    ) -> None:
         self.url = "https://www.upwork.com/nx/messages/room-1234567"
         self.contact_name = contact_name
         self.action_controls_queried = 0
+        self.page_wide_send_queries = 0
+        self.send_clicks = 0
         self.messages: list[_MessageElement] = []
         self.input = _Input()
+        self.scoped_send_available = scoped_send_available
+        self.history_complete = history_complete
+        self.history_virtualized = history_virtualized
+        self.history_root_virtualized = history_root_virtualized
+        self.page_wide_history_boundary = page_wide_history_boundary
+        self.on_send_resolution: Callable[[], None] | None = None
+        self.on_atomic_message_commit: Callable[[], None] | None = None
+        self.atomic_message_raise_after_dispatch = False
+        self.message_event_generation = 0
+        self.message_handler_generation = 0
+        self.message_commit_guard_snapshot: tuple[Any, ...] | None = None
+        self.composers = [_MessageComposer(self) for _ in range(composer_count)]
+        self.history_boundary = _HistoryBoundary(self)
+        self.history_scope = _MessageHistoryScope(self)
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
 
+    async def wait_for_timeout(self, _milliseconds: int) -> None:
+        return None
+
+    def _message_snapshot(self) -> tuple[Any, ...]:
+        return (
+            tuple(
+                (item.message_id, item.content, item.is_mine)
+                for item in self.messages
+            ),
+            self.input.value,
+            self.contact_name,
+            self.url,
+        )
+
+    async def evaluate(self, _script: str, args: dict[str, Any]) -> dict[str, Any]:
+        operation = args.get("operation")
+        if operation == "install_message_commit_guard":
+            if len(self.composers) != 1 or not self.history_complete:
+                return {"status": "rejected", "message": "guard scope unavailable"}
+            self.message_commit_guard_snapshot = self._message_snapshot()
+            return {
+                "status": "ready",
+                "generation": 0,
+                "eventGeneration": 0,
+                "handlerGeneration": 0,
+            }
+        if operation != "atomic_message_commit":
+            raise AssertionError(f"Unexpected page.evaluate operation: {operation}")
+        if self.on_atomic_message_commit is not None:
+            callback = self.on_atomic_message_commit
+            self.on_atomic_message_commit = None
+            callback()
+        if self.message_commit_guard_snapshot != self._message_snapshot():
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "The room history or composer mutated during final readback",
+            }
+        if self.message_event_generation != args["eventGeneration"]:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "composer input event generation changed",
+            }
+        if self.message_handler_generation != args["handlerGeneration"]:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Send event handler generation changed",
+            }
+        expected = [
+            (record["identity"].split(":", 1)[1], record["content"], record["is_mine"])
+            for record in args["expectedRecords"]
+        ]
+        actual = [(item.message_id, item.content, item.is_mine) for item in self.messages]
+        if expected != actual:
+            return {"status": "rejected", "dispatchStarted": False, "message": "history changed"}
+        if (
+            self.url.rstrip("/") != str(args["roomUrl"]).rstrip("/")
+            or self.contact_name != args["contactName"]
+            or len(self.composers) != 1
+            or self.input.value != args["message"]
+        ):
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "target or composer changed",
+            }
+        button = self.composers[0].send_button
+        data_test = button.attributes.get("data-test", "")
+        if button.text not in {"Send", "Send message"} or data_test not in {
+            "send-button",
+            "send-message-button",
+        }:
+            return {
+                "status": "rejected",
+                "dispatchStarted": False,
+                "message": "Send identity changed",
+            }
+        button.callback()
+        if self.atomic_message_raise_after_dispatch:
+            raise RuntimeError("execution context failed after dispatch")
+        return {"status": "clicked", "dispatchStarted": True}
+
     async def query_selector_all(self, selector: str) -> list[Any]:
-        if "message" in selector:
+        if selector == messages._ROOM_CONTACT_SELECTOR:
+            return [_TextElement(self.contact_name)]
+        if selector == messages._MESSAGE_RECORD_SELECTOR:
             return self.messages
+        if selector == messages._MESSAGE_HISTORY_CONTAINER_SELECTOR:
+            return [self.history_scope]
+        if selector == messages._HISTORY_INCOMPLETE_SELECTOR:
+            return [_TextElement()] if self.history_virtualized else []
+        if selector == messages._HISTORY_COMPLETE_BOUNDARY_SELECTOR:
+            return [self.history_boundary] if self.page_wide_history_boundary else []
+        if selector == messages._COMPOSER_SELECTOR:
+            self.action_controls_queried += 1
+            return self.composers
         return []
 
     async def query_selector(self, selector: str):
@@ -385,6 +800,7 @@ class _MessagePage:
             self.action_controls_queried += 1
             return self.input
         if "send-button" in selector or "Send" in selector:
+            self.page_wide_send_queries += 1
             self.action_controls_queried += 1
             def send() -> None:
                 self.messages.append(_MessageElement(self.input.value, is_mine=True))
@@ -392,6 +808,18 @@ class _MessagePage:
 
             return _Button(send)
         return None
+
+
+class _PersistedDraftMessagePage(_MessagePage):
+    def __init__(self) -> None:
+        super().__init__(scoped_send_available=False)
+        self.goto_count = 0
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.goto_count += 1
+        self.url = url
+        if self.goto_count > 1:
+            self.input.value = "Exact approved message"
 
 
 class _ProposalPage:
@@ -461,23 +889,684 @@ class _Browser:
 
 
 @pytest.mark.asyncio
-async def test_approved_message_requires_exact_owner_system_readback(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("href", "canonical"),
+    [
+        (
+            "/nx/messages/abc123456789",
+            "https://www.upwork.com/nx/messages/abc123456789",
+        ),
+        (
+            "/ab/messages/rooms/abc123456789",
+            "https://www.upwork.com/ab/messages/rooms/abc123456789",
+        ),
+    ],
+)
+async def test_conversation_list_extraction_uses_exact_room_parser(
+    href: str, canonical: str
+) -> None:
+    result = await messages._extract_conversation(_ConversationListElement(href))
+    assert result is not None
+    assert result["room_url"] == canonical
+    assert result["room_id"] == "abc123456789"
+    assert result["room_id"] != "rooms"
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_extraction_rejects_query_room_bypass() -> None:
+    result = await messages._extract_conversation(
+        _ConversationListElement(
+            "/ab/messages/rooms/abc123456789?next=/nx/messages/different123"
+        )
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_approved_message_requires_exact_owner_system_readback(monkeypatch, tmp_path) -> None:
     page = _MessagePage()
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
-    params = _approved(params, messages.message_payload(params))
+    params = _bound_message_params()
+    params = _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
 
     result = await messages.send_message(params)
     assert result["status"] == "sent"
     assert result["external_action_taken"] is True
     assert result["owner_system_readback"]["confirmed"] is True
     assert result["owner_system_readback"]["exact_visible_copy"] is True
+    assert result["owner_system_readback"]["exact_composer_copy_before_send"] is True
+    assert result["owner_system_readback"]["composer_cleared_after_send"] is True
+    assert result["owner_system_readback"]["exact_copy_is_last_visible_message"] is True
+    assert result["owner_system_readback"]["visible_history_complete"] is True
     assert result["owner_system_readback"]["conversation_identity"]["contact_name"] == "Alex Client"
+    assert page.page_wide_send_queries == 0
+    assert page.input.press_count == 0
+
+
+@pytest.mark.asyncio
+async def test_new_inbound_after_preparation_invalidates_exact_history_approval(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage()
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    prepared = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+    assert prepared["valid"] is True
+    action = prepared["prepared_action"]
+    assert action is not None
+    approve_action(
+        action["action_id"],
+        action["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    page.messages.append(_MessageElement("A new inbound after approval", is_mine=False))
+    params = messages.SendMessageParams(
+        **prepared["exact_message"],
+        action_id=action["action_id"],
+    )
+
+    result = await messages.send_message(params)
+
+    assert result["status"] == "message_history_changed_since_approval"
+    assert result["external_action_taken"] is False
+    assert page.send_clicks == 0
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+async def test_virtualized_history_cannot_create_message_approval(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(history_virtualized=True)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert result["history_approval"] is None
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_root_virtualized_history_container_fails_closed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(history_root_virtualized=True)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "virtualized" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_page_wide_complete_boundary_spoof_cannot_authorize_message(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(
+        history_complete=False,
+        page_wide_history_boundary=True,
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_history(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.messages = [
+        _MessageElement("Exact approved message", is_mine=True),
+        _MessageElement("A newer different message", is_mine=True),
+    ]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params(
+        records=[
+            ("Exact approved message", True),
+            ("A newer different message", True),
+        ]
+    )
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "duplicate_blocked"
+    assert result["owner_system_readback"]["rendered_record_count"] == 2
+    assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
+
+
+@pytest.mark.asyncio
+async def test_approved_message_does_not_treat_matching_inbound_copy_as_our_duplicate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.messages = [_MessageElement("Thanks!", is_mine=False)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params(
+        message="Thanks!",
+        records=[("Thanks!", False)],
+    )
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "sent"
+    assert result["owner_system_readback"]["matching_messages_before"] == 0
+
+
+@pytest.mark.asyncio
+async def test_approved_message_requires_byte_exact_duplicate_before_blocking(
+    monkeypatch, tmp_path
+) -> None:
+    page = _MessagePage()
+    page.messages = [_MessageElement("Exact approved message ", is_mine=True)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params(records=[("Exact approved message ", True)])
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "sent"
+    assert result["owner_system_readback"]["matching_messages_before"] == 0
+
+
+class _UnreadableMessageElement(_MessageElement):
+    async def query_selector_all(self, _selector: str) -> list[Any]:
+        raise RuntimeError("detached")
+
+
+class _AmbiguousBodyMessageElement(_MessageElement):
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == '[data-test="content"]':
+            return [_TextElement("Approved-looking body")]
+        if selector == ".message-text":
+            return [_TextElement("Different competing body")]
+        return []
+
+
+class _IdentitylessMessageElement(_MessageElement):
+    async def get_attribute(self, _name: str) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.messages = [_UnreadableMessageElement("Unreadable", is_mine=True)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params(records=[("Unreadable", True)])
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "history_unreadable"
+    assert result["visible_history_readback"]["status"] == "incomplete"
+    assert result["external_action_taken"] is False
+    assert page.action_controls_queried == 0
+
+
+@pytest.mark.asyncio
+async def test_message_history_without_owner_record_identity_fails_closed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.messages = [_IdentitylessMessageElement("No stable identity", is_mine=False)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "identity" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_owner_message_identity_fails_closed(monkeypatch, tmp_path) -> None:
+    page = _MessagePage()
+    page.messages = [
+        _MessageElement("Repeated owner record", is_mine=False),
+        _MessageElement("Repeated owner record", is_mine=False),
+    ]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "duplicate" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_competing_visible_message_bodies_fail_closed(monkeypatch, tmp_path) -> None:
+    page = _MessagePage()
+    page.messages = [_AmbiguousBodyMessageElement("Ignored", is_mine=False)]
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+
+    result = await messages.prepare_message_from_live(
+        "https://www.upwork.com/nx/messages/room-1234567",
+        "Exact approved message",
+    )
+
+    assert result["valid"] is False
+    assert result["history_readback"]["status"] == "incomplete"
+    assert "competing body" in result["history_readback"]["message"]
+    assert result["prepared_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_approved_message_never_uses_page_send_or_enter_fallback(
+    monkeypatch, tmp_path
+) -> None:
+    page = _MessagePage(scoped_send_available=False)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "send_control_unavailable"
+    assert result["external_action_taken"] is False
+    assert page.page_wide_send_queries == 0
+    assert page.input.press_count == 0
+    assert page.input.value == ""
+    assert result["composer_restored"] is True
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+async def test_exact_send_identity_is_revalidated_after_final_resolution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    wrong_clicks = 0
+
+    def wrong_action() -> None:
+        nonlocal wrong_clicks
+        wrong_clicks += 1
+
+    page.composers[0].send_button = _Button(
+        wrong_action,
+        "Send",
+        attributes={"data-test": "send-button", "type": "submit"},
+    )
+    page.on_atomic_message_commit = lambda: (
+        setattr(page.composers[0].send_button, "text", "Delete"),
+        setattr(
+            page.composers[0].send_button,
+            "attributes",
+            {"data-test": "delete-button", "type": "button"},
+        ),
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert result["draft_restoration_readback"]["persisted_composer_cleared"] is True
+    assert page.send_clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_inbound_during_atomic_send_resolution_is_rejected_before_click(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.on_atomic_message_commit = lambda: page.messages.append(
+        _MessageElement("Inbound after final history barrier", is_mine=False)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.send_clicks == 0
+    assert page.messages[-1].content == "Inbound after final history barrier"
+
+
+@pytest.mark.asyncio
+async def test_atomic_message_evaluation_failure_after_dispatch_uses_owner_readback(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.atomic_message_raise_after_dispatch = True
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "sent"
+    assert result["external_action_taken"] is True
+    assert result["owner_system_readback"]["atomic_click_acknowledged"] is False
+    assert page.send_clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_message_input_event_aba_is_rejected_even_when_dom_value_is_restored(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+
+    def event_aba() -> None:
+        page.input.value = "UNAPPROVED MESSAGE"
+        page.message_event_generation += 1
+        page.input.value = "Exact approved message"
+
+    page.on_atomic_message_commit = event_aba
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_message_listener_replacement_is_rejected_without_wrong_dispatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    wrong_clicks = 0
+
+    def replace_listener() -> None:
+        nonlocal wrong_clicks
+        page.message_handler_generation += 2
+
+        def wrong_action() -> None:
+            nonlocal wrong_clicks
+            wrong_clicks += 1
+
+        page.composers[0].send_button.callback = wrong_action
+
+    page.on_atomic_message_commit = replace_listener
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "atomic_commit_rejected"
+    assert result["external_action_taken"] is False
+    assert page.send_clicks == 0
+    assert wrong_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_locally_cleared_but_persisted_message_draft_is_terminal_unknown(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _PersistedDraftMessagePage()
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "send_control_unavailable"
+    assert result["external_action_taken"] is True
+    assert result["draft_restoration_readback"]["local_composer_cleared"] is True
+    assert result["draft_restoration_readback"]["persisted_composer_cleared"] is False
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_approved_message_requires_one_exact_visible_composer(monkeypatch, tmp_path) -> None:
+    page = _MessagePage(composer_count=2)
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "composer_unavailable"
+    assert result["external_action_taken"] is False
+    assert page.input.value == ""
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+async def test_approved_message_requires_byte_exact_composer_readback(
+    monkeypatch, tmp_path
+) -> None:
+    page = _MessagePage()
+    page.input.corrupt_readback = True
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "composer_readback_mismatch"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.input.value == ""
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("new_content", "is_mine"),
+    [
+        ("Exact approved message", False),
+        ("A different new outbound message", True),
+    ],
+    ids=["matching-inbound", "different-outbound"],
+)
+async def test_approved_message_stops_if_history_changes_during_send_resolution(
+    monkeypatch,
+    tmp_path,
+    new_content: str,
+    is_mine: bool,
+) -> None:
+    page = _MessagePage()
+    page.on_send_resolution = lambda: page.messages.append(
+        _MessageElement(new_content, is_mine=is_mine)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "message_history_changed"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.input.value == ""
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_inbound_during_final_composer_read_is_caught_by_last_history_barrier(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    page = _MessagePage()
+    page.input.trigger_read_number = 3
+    page.input.on_triggered_read = lambda: page.messages.append(
+        _MessageElement("Inbound during final composer read", is_mine=False)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    assert result["status"] == "message_history_changed"
+    assert result["external_action_taken"] is False
+    assert result["composer_restored"] is True
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_unrestorable_history_race_draft_is_terminal_and_action_remains_one_shot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage()
+    page.input.fail_restore = True
+    page.on_send_resolution = lambda: page.messages.append(
+        _MessageElement("A new inbound message", is_mine=False)
+    )
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+    payload = messages.message_payload(params)
+    prepared = prepare_action("message", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await messages.send_message(params)
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "message_history_changed"
+    assert result["external_action_taken"] is True
+    assert result["composer_restored"] is False
+    assert page.input.value == "Exact approved message"
+    assert page.send_clicks == 0
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_field", ["contact", "room"])
+async def test_approved_message_stops_if_identity_changes_during_send_resolution(
+    monkeypatch,
+    tmp_path,
+    changed_field: str,
+) -> None:
+    page = _MessagePage()
+
+    def change_identity() -> None:
+        if changed_field == "contact":
+            page.contact_name = "Different Client"
+        else:
+            page.url = "https://www.upwork.com/nx/messages/different-room-123"
+
+    page.on_send_resolution = change_identity
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+
+    result = await messages.send_message(
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
+    )
+
+    expected_status = "draft_state_unknown" if changed_field == "contact" else "live_identity_mismatch"
+    assert result["status"] == expected_status
+    if changed_field == "contact":
+        assert result["preclick_failure_status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is (changed_field == "contact")
+    assert result["composer_restored"] is (changed_field == "room")
+    assert page.input.value == ""
+    assert page.send_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_unrestorable_preclick_draft_is_terminal_and_action_remains_one_shot(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    page = _MessagePage(scoped_send_available=False)
+    page.input.fail_restore = True
+    monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
+    params = _bound_message_params()
+    payload = messages.message_payload(params)
+    prepared = prepare_action("message", payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
+    )
+    params = params.model_copy(update={"action_id": prepared["action_id"]})
+
+    result = await messages.send_message(params)
+
+    assert result["status"] == "draft_state_unknown"
+    assert result["preclick_failure_status"] == "send_control_unavailable"
+    assert result["external_action_taken"] is True
+    assert result["composer_restored"] is False
+    assert page.input.value == "Exact approved message"
+    replay = await messages.send_message(params)
+    assert replay["status"] == "approval_required"
+    assert "already been claimed" in replay["message"]
 
 
 @pytest.mark.asyncio
@@ -485,12 +1574,7 @@ async def test_approved_message_stops_if_live_recipient_changed(monkeypatch, tmp
     monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
     page = _MessagePage(contact_name="Different Client")
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
-    params = messages.SendMessageParams(
-        room_url="https://www.upwork.com/nx/messages/room-1234567",
-        room_id="room-1234567",
-        contact_name="Alex Client",
-        message="Exact approved message",
-    )
+    params = _bound_message_params()
     payload = messages.message_payload(params)
     prepared = prepare_action("message", payload)
     approve_action(
@@ -539,6 +1623,209 @@ async def test_approved_withdrawal_stops_if_live_proposal_identity_changed(
     replay = await proposals.withdraw_proposal(params)
     assert replay["status"] == "approval_required"
     assert "already been claimed" in replay["message"]
+
+
+class _WithdrawalDialog(_TextElement):
+    def __init__(
+        self,
+        *,
+        confirm_label: str = "Withdraw proposal",
+        reason: _Input | None = None,
+    ) -> None:
+        super().__init__("Withdraw proposal")
+        self.reason = reason
+        self.confirm_clicks = 0
+        self.confirm = _Button(
+            lambda: setattr(self, "confirm_clicks", self.confirm_clicks + 1),
+            confirm_label,
+        )
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if "textarea" in selector:
+            return [self.reason] if self.reason is not None else []
+        if "confirm-withdraw" in selector or "button" in selector:
+            return [self.confirm]
+        return []
+
+
+class _WithdrawalPage:
+    def __init__(self, dialogs: list[_WithdrawalDialog]) -> None:
+        self.url = "https://www.upwork.com/nx/proposals/1111111111111111111"
+        self.title = "Google Ads review"
+        self.status = "active"
+        self.dialogs = dialogs
+        self.initial_clicks = 0
+        self.change_title_on_open = False
+        self.initial = _Button(self._open_dialog, "Withdraw")
+
+    def _open_dialog(self) -> None:
+        self.initial_clicks += 1
+        if self.change_title_on_open:
+            self.title = "Different job"
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            withdrawn = any(dialog.confirm_clicks for dialog in self.dialogs)
+            return _TextElement("Proposal was withdrawn" if withdrawn else "Active proposal")
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if "withdraw-button" in selector:
+            return [self.initial]
+        if 'role="dialog"' in selector or "withdraw-proposal-dialog" in selector:
+            return self.dialogs
+        if 'data-test="job-title"' in selector:
+            return [_TextElement(self.title)]
+        if "proposal-status" in selector:
+            return [_TextElement(self.status)]
+        return []
+
+
+class _SpoofedWithdrawalPage(_WithdrawalPage):
+    """Body copy changes after click, but the scoped owner status stays active."""
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.url = url
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return await super().query_selector(selector)
+        if "job-title" in selector or "h1" in selector:
+            return _TextElement(self.title)
+        return None
+
+
+def _withdrawal_params(*, reason: str | None = None) -> proposals.WithdrawProposalParams:
+    return proposals.WithdrawProposalParams(
+        proposal_url="https://www.upwork.com/nx/proposals/1111111111111111111",
+        proposal_id="1111111111111111111",
+        job_title="Google Ads review",
+        proposal_status="active",
+        reason=reason,
+    )
+
+
+def _mock_current_withdrawal_details(monkeypatch) -> None:
+    async def details(_proposal_url: str, _page) -> dict[str, Any]:
+        return {
+            "url": "https://www.upwork.com/nx/proposals/1111111111111111111",
+            "proposal_id": "1111111111111111111",
+            "job_title": "Google Ads review",
+            "status": "active",
+        }
+
+    monkeypatch.setattr(proposals, "_get_proposal_details_on_page", details)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_never_uses_generic_confirm_control(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    dialog = _WithdrawalDialog(confirm_label="Confirm")
+    page = _WithdrawalPage([dialog])
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "error"
+    assert "exact final Withdraw" in result["message"]
+    assert result["external_action_taken"] is False
+    assert page.initial_clicks == 1
+    assert dialog.confirm_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_rejects_multiple_visible_withdrawal_dialogs(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    dialogs = [_WithdrawalDialog(), _WithdrawalDialog()]
+    page = _WithdrawalPage(dialogs)
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "error"
+    assert "one exact visible withdrawal dialog" in result["message"].casefold()
+    assert result["external_action_taken"] is False
+    assert all(dialog.confirm_clicks == 0 for dialog in dialogs)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_rechecks_target_identity_before_exact_confirm(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    dialog = _WithdrawalDialog()
+    page = _WithdrawalPage([dialog])
+    page.change_title_on_open = True
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    assert dialog.confirm_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_requires_exact_dialog_scoped_reason_readback(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    reason = _Input()
+    reason.corrupt_readback = True
+    dialog = _WithdrawalDialog(reason=reason)
+    page = _WithdrawalPage([dialog])
+
+    result = await proposals._withdraw_proposal_on_page(
+        _withdrawal_params(reason="Specific approved reason"),
+        page,
+    )
+
+    assert result["status"] == "error"
+    assert "reason" in result["message"].casefold()
+    assert result["external_action_taken"] is False
+    assert dialog.confirm_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_exact_dialog_reason_and_control_are_read_back(monkeypatch) -> None:
+    reason = _Input()
+    dialog = _WithdrawalDialog(reason=reason)
+    page = _WithdrawalPage([dialog])
+
+    async def details(_proposal_url: str, _page) -> dict[str, Any]:
+        return {
+            "url": page.url,
+            "proposal_id": "1111111111111111111",
+            "job_title": "Google Ads review",
+            "status": "withdrawn" if dialog.confirm_clicks else "active",
+        }
+
+    monkeypatch.setattr(proposals, "_get_proposal_details_on_page", details)
+    result = await proposals._withdraw_proposal_on_page(
+        _withdrawal_params(reason="Specific approved reason"),
+        page,
+    )
+
+    assert result["status"] == "withdrawn"
+    assert result["owner_system_readback"]["confirmed"] is True
+    assert result["external_action_taken"] is True
+    assert reason.value == "Specific approved reason"
+    assert dialog.confirm_clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_body_spoof_cannot_confirm_active_scoped_status(
+    monkeypatch,
+) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(proposals.asyncio, "sleep", no_sleep)
+    dialog = _WithdrawalDialog()
+    page = _SpoofedWithdrawalPage([dialog])
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "unknown"
+    assert result["owner_system_readback"]["confirmed"] is False
+    assert result["owner_system_readback"]["proposal_identity"][
+        "proposal_status"
+    ] == "active"
+    assert dialog.confirm_clicks == 1
+    assert (await page.query_selector("body")).text == "Proposal was withdrawn"
 
 
 @pytest.mark.asyncio
@@ -591,13 +1878,20 @@ class _InspectPage:
         unresolved_highlight: bool = False,
         dismiss_highlight: bool = True,
         escape_dismisses_highlight: bool = False,
+        missing_highlight_tab: str | None = None,
+        screening_answer_count: int = 1,
+        duration_options: list[str] | None = None,
+        duration_control: bool = True,
     ) -> None:
         self.url = "https://www.upwork.com/jobs/~123"
         self.form_open = False
         self.highlight_open = False
+        self.duration_open = False
         self.highlight_tab = "portfolio"
         self.dismiss_highlight = dismiss_highlight
         self.escape_dismisses_highlight = escape_dismisses_highlight
+        self.duration_control = duration_control
+        self.duration_options = duration_options or list(proposals._DURATION_OPTIONS)
         self.keyboard = _Keyboard(self._escape)
         self.body = "Google Ads audit job"
         self.highlight_options: dict[str, list[str | None]] = {
@@ -605,9 +1899,14 @@ class _InspectPage:
             "certifications": ["Google Ads Search Certification"],
             "upwork_jobs": [None if unresolved_highlight else "Google Ads Account Audit"],
         }
+        if missing_highlight_tab:
+            self.highlight_options.pop(missing_highlight_tab)
         self.payment_terms = _PaymentTerms()
+        self.cover_control = _TextElement()
+        self.answer_controls = [_TextElement() for _ in range(screening_answer_count)]
 
     def _escape(self) -> None:
+        self.duration_open = False
         if self.escape_dismisses_highlight:
             self.highlight_open = False
 
@@ -659,10 +1958,52 @@ Boost your proposal auction: top bid 8 Connects
         return None
 
     async def query_selector_all(self, selector: str) -> list[Any]:
+        if not self.form_open and "apply-button" in selector:
+            def open_form() -> None:
+                self.form_open = True
+                self.url = "https://www.upwork.com/ab/proposals/job/~123/apply/"
+                self.body = """Google Ads audit
+Fixed-price project
+By milestone
+By project
+12 Connects required to submit
+Upwork service fee $50
+You'll receive $450 net
+Less than 1 month
+1 to 3 months
+3 to 6 months
+More than 6 months
+Boost your proposal auction: top bid 8 Connects
+"""
+
+            return [_Button(open_form, "Apply Now")]
+        if self.form_open and selector == proposals._BASE_CONNECTS_CONTROL_SELECTOR:
+            return [_TextElement("12 Connects required to submit")]
+        if self.form_open and selector == proposals._BOOST_AUCTION_CONTROL_SELECTOR:
+            return [_TextElement("Boost your proposal auction: top bid 8 Connects")]
+        if self.form_open and selector == proposals._PROFILE_HIGHLIGHT_OPENER:
+            return [
+                _Button(
+                    lambda: setattr(self, "highlight_open", True),
+                    "Add a portfolio project",
+                )
+            ]
         if self.form_open and "payment-terms" in selector:
             return [self.payment_terms]
-        if "screening-question" in selector:
+        if self.form_open and selector == proposals._SCREENING_QUESTION_PROMPTS:
             return [_TextElement("What similar work have you done?")]
+        if self.form_open and selector == proposals._SCREENING_ANSWER_CONTROLS:
+            return self.answer_controls
+        if self.form_open and selector == proposals._COVER_LETTER_CONTROL:
+            return [self.cover_control]
+        if self.form_open and selector == "textarea":
+            return [self.cover_control, *self.answer_controls]
+        if self.form_open and selector == proposals._DURATION_TOGGLE:
+            return [] if not self.duration_control else [
+                _Button(lambda: setattr(self, "duration_open", True), "Select a duration")
+            ]
+        if self.duration_open and selector == proposals._DURATION_MENU_OPTIONS:
+            return [_TextElement(option) for option in self.duration_options]
         if self.highlight_open and 'role="tab"' in selector:
             return [
                 _HighlightTab(tab_id, lambda tab_id=tab_id: setattr(self, "highlight_tab", tab_id))
@@ -670,6 +2011,12 @@ Boost your proposal auction: top bid 8 Connects
             ]
         if self.highlight_open and "Select highlight" in selector:
             return [_HighlightOption(title) for title in self.highlight_options[self.highlight_tab]]
+        if self.highlight_open and "aria-label" in selector and "Close" in selector:
+            def close_highlights() -> None:
+                if self.dismiss_highlight:
+                    self.highlight_open = False
+
+            return [_Button(close_highlights, "Close")]
         return []
 
 
@@ -686,15 +2033,21 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
     assert result["job_type"] == "fixed"
     assert result["fixed_payment_structures"] == ["by_project", "by_milestone"]
     assert result["base_connects"] == 12
+    assert result["base_connects_status"] == "complete"
     assert result["screening_questions"] == ["What similar work have you done?"]
+    assert result["screening_questions_status"] == "complete"
     assert result["duration_options"] == [
         "Less than 1 month",
         "1 to 3 months",
         "3 to 6 months",
         "More than 6 months",
     ]
-    assert result["fee_net_text"]
+    assert result["duration_options_status"] == "complete"
+    assert result["fee_net_text"] == []
+    assert result["fee_net_status"] == "unavailable"
+    assert result["fee_net_price_amount"] is None
     assert result["boost_auction_text"]
+    assert result["boost_auction_status"] == "complete"
     assert result["available_profile_highlights"] == [
         "Family Law Growth",
         "Home Services Lead Generation",
@@ -702,6 +2055,7 @@ async def test_inspect_proposal_form_is_read_only_and_returns_live_fields(monkey
         "Google Ads Account Audit",
     ]
     assert result["available_profile_highlights_status"] == "complete"
+    assert result["rate_increase_control_status"] == "not_applicable"
     assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
     assert result["available_profile_highlights_details"]["tabs_inspected"] == [
         "portfolio",
@@ -751,3 +2105,596 @@ async def test_inspect_proposal_form_uses_escape_when_close_does_not_dismiss(mon
     assert result["available_profile_highlights_details"]["chooser_dismissed"] is True
     assert page.highlight_open is False
     assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_fails_closed_when_known_highlight_tab_is_missing(
+    monkeypatch,
+) -> None:
+    page = _InspectPage(missing_highlight_tab="upwork_jobs")
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["available_profile_highlights_status"] == "incomplete"
+    assert result["available_profile_highlights_details"]["missing_required_tabs"] == [
+        "upwork_jobs"
+    ]
+    assert result["available_profile_highlights_details"]["missing_inspected_tabs"] == [
+        "upwork_jobs"
+    ]
+    assert page.highlight_open is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_reports_incomplete_screening_control_enumeration(
+    monkeypatch,
+) -> None:
+    page = _InspectPage(screening_answer_count=0)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["screening_questions"] == ["What similar work have you done?"]
+    assert result["screening_questions_status"] == "incomplete"
+    assert result["screening_questions_details"]["answer_controls_seen"] == 0
+
+
+@pytest.mark.asyncio
+async def test_inspect_proposal_form_reports_duration_discovery_statuses(monkeypatch) -> None:
+    missing_option = _InspectPage(duration_options=proposals._DURATION_OPTIONS[:-1])
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(missing_option))
+    incomplete = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+    assert incomplete["duration_options_status"] == "incomplete"
+    assert incomplete["duration_options_details"]["missing_options"] == ["More than 6 months"]
+
+    no_control = _InspectPage(duration_control=False)
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(no_control))
+    unavailable = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+    assert unavailable["duration_options_status"] == "unavailable"
+
+
+class _RateSelect(_TextElement):
+    def __init__(self, options: list[str]) -> None:
+        super().__init__()
+        self.options = options
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        return [_ClosedNativeOption(option) for option in self.options] if selector == "option" else []
+
+
+class _ClosedNativeOption(_TextElement):
+    async def is_visible(self) -> bool:
+        return False
+
+
+class _RateInspectionPage:
+    def __init__(self, options: list[str] | None) -> None:
+        self.select = _RateSelect(options) if options is not None else None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == proposals._RATE_INCREASE_SELECT:
+            return [self.select] if self.select else []
+        return []
+
+
+@pytest.mark.asyncio
+async def test_rate_increase_control_status_is_explicit_and_fail_closed() -> None:
+    complete = await proposals._inspect_rate_increase_control(
+        _RateInspectionPage(["Never", "Every 3 months"]),
+        "hourly",
+    )
+    assert complete["status"] == "complete"
+
+    incomplete = await proposals._inspect_rate_increase_control(
+        _RateInspectionPage(["Every 3 months"]),
+        "hourly",
+    )
+    assert incomplete["status"] == "incomplete"
+
+    unavailable = await proposals._inspect_rate_increase_control(
+        _RateInspectionPage(None),
+        "hourly",
+    )
+    assert unavailable["status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_live_fee_and_boost_context_helpers_normalize_and_classify_exact_state() -> None:
+    fee = proposals._inspect_fee_net_context(
+        "  Upwork service fee   $6.30  \nYou'll receive $56.70 net\nUpwork service fee $6.30",
+    )
+    assert fee == {
+        "text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "status": "complete",
+        "details": {
+            "fee_lines_seen": 1,
+            "net_lines_seen": 1,
+            "message": "Both the live Upwork fee and freelancer net preview were read.",
+        },
+    }
+
+    unrelated_net_copy = proposals._inspect_fee_net_context(
+        "Upwork service fee $6.30\nWe need net new leads",
+    )
+    assert unrelated_net_copy["text"] == ["Upwork service fee $6.30"]
+    assert unrelated_net_copy["status"] == "incomplete"
+
+    generic_bid = proposals._inspect_boost_auction_context(
+        "Boost your proposal\nPlace a bid",
+    )
+    assert generic_bid["status"] == "incomplete"
+    generic_connect_amount = proposals._inspect_boost_auction_context(
+        "Boost your proposal with 8 Connects",
+    )
+    assert generic_connect_amount["status"] == "incomplete"
+    generic_top_bid = proposals._inspect_boost_auction_context(
+        "Boost your proposal\nTop bid unavailable",
+    )
+    assert generic_top_bid["status"] == "incomplete"
+    live_auction = proposals._inspect_boost_auction_context(
+        "Boost your proposal auction: top bid 8 Connects",
+    )
+    assert live_auction["status"] == "complete"
+    no_bids = proposals._inspect_boost_auction_context(
+        "Boost your proposal\nNo bids yet",
+    )
+    assert no_bids["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_commercial_and_connect_evidence_ignores_spoofed_body_copy() -> None:
+    class _ScopedPage:
+        def __init__(self, controls: dict[str, list[_TextElement]] | None = None) -> None:
+            self.controls = controls or {}
+
+        async def query_selector(self, selector: str):
+            if selector == "body":
+                return _TextElement(
+                    "Upwork service fee $6.30\nYou'll receive $56.70\n"
+                    "Boost auction: top bid 8 Connects\n12 Connects required to submit"
+                )
+            return None
+
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            return self.controls.get(selector, [])
+
+    spoofed = _ScopedPage()
+    fee = await proposals._inspect_fee_net_state(spoofed)
+    boost = await proposals._inspect_boost_auction_state(spoofed)
+    base = await proposals._inspect_base_connects_state(spoofed)
+    assert fee["status"] == "unavailable"
+    assert boost["status"] == "unavailable"
+    assert base["status"] == "unavailable"
+    assert base["value"] is None
+
+    scoped = _ScopedPage(
+        {
+            proposals._FEE_CONTROL_SELECTOR: [_TextElement("$6.30")],
+            proposals._NET_CONTROL_SELECTOR: [_TextElement("$56.70")],
+            proposals._BOOST_AUCTION_CONTROL_SELECTOR: [
+                _TextElement("Boost auction: top bid 8 Connects")
+            ],
+            proposals._BASE_CONNECTS_CONTROL_SELECTOR: [
+                _TextElement("12 Connects required to submit")
+            ],
+        }
+    )
+    assert (await proposals._inspect_fee_net_state(scoped))["status"] == "complete"
+    assert (await proposals._inspect_boost_auction_state(scoped))["status"] == "complete"
+    assert (await proposals._inspect_base_connects_state(scoped))["value"] == 12
+
+    duplicated = _ScopedPage(
+        {
+            proposals._FEE_CONTROL_SELECTOR: [_TextElement("$6.30"), _TextElement("$6.30")],
+            proposals._NET_CONTROL_SELECTOR: [_TextElement("$56.70")],
+        }
+    )
+    assert (await proposals._inspect_fee_net_state(duplicated))["status"] == "incomplete"
+
+    amount_missing = _ScopedPage(
+        {
+            proposals._FEE_CONTROL_SELECTOR: [_TextElement("Upwork service fee")],
+            proposals._NET_CONTROL_SELECTOR: [_TextElement("You'll receive")],
+        }
+    )
+    assert (await proposals._inspect_fee_net_state(amount_missing))["status"] == "incomplete"
+
+
+class _DynamicText(_TextElement):
+    def __init__(self, reader: Callable[[], str]) -> None:
+        super().__init__()
+        self.reader = reader
+
+    async def text_content(self) -> str:
+        return self.reader()
+
+
+class _CommercialPrice(_Input):
+    def __init__(self, page: _CommercialPreflightPage) -> None:
+        super().__init__()
+        self.page = page
+        self.value = "50"
+
+    async def fill(self, value: str) -> None:
+        self.value = value
+        self.page.price = Decimal(value)
+
+    async def press(self, _key: str) -> None:
+        return None
+
+
+class _CommercialPreflightPage:
+    def __init__(self) -> None:
+        self.url = "https://www.upwork.com/nx/proposals/job/~123/apply"
+        self.price = Decimal("50")
+        self.price_control = _CommercialPrice(self)
+        self.submit_queries = 0
+
+    async def goto(self, url: str, **_kwargs: Any) -> None:
+        self.url = url
+
+    async def wait_for_timeout(self, _milliseconds: int) -> None:
+        return None
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            return _TextElement("Hourly contract")
+        if '[data-test="job-title"]' in selector:
+            return _TextElement("Google Ads audit")
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == proposals._HOURLY_RATE_INPUT_SELECTOR:
+            return [self.price_control]
+        if selector == proposals._FEE_CONTROL_SELECTOR:
+            return [_DynamicText(lambda: f"${self.price * Decimal('0.10'):.2f}")]
+        if selector == proposals._NET_CONTROL_SELECTOR:
+            return [_DynamicText(lambda: f"${self.price * Decimal('0.90'):.2f}")]
+        if selector.startswith('button[data-test="submit-proposal"]'):
+            self.submit_queries += 1
+        return []
+
+
+class _HiddenCommercialPrice(_CommercialPrice):
+    async def is_visible(self) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_ignores_hidden_enabled_price_clone() -> None:
+    page = _CommercialPreflightPage()
+    hidden = _HiddenCommercialPrice(page)
+    original_query = page.query_selector_all
+
+    async def with_hidden_clone(selector: str) -> list[Any]:
+        if selector == proposals._HOURLY_RATE_INPUT_SELECTOR:
+            return [hidden, page.price_control]
+        return await original_query(selector)
+
+    page.query_selector_all = with_hidden_clone  # type: ignore[method-assign]
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "complete"
+    assert result["price_restored"] is True
+    assert hidden.value == "50"
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_rejects_fee_snapshot_stale_from_different_price() -> None:
+    class _StaleFeePage(_CommercialPreflightPage):
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._FEE_CONTROL_SELECTOR:
+                return [_TextElement("$5.00")]
+            if selector == proposals._NET_CONTROL_SELECTOR:
+                return [_TextElement("$45.00")]
+            return await super().query_selector_all(selector)
+
+    page = _StaleFeePage()
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_price_amount"] is None
+    assert result["fee_net_details"]["stale_original_price_evidence_rejected"] is True
+    assert result["price_restored"] is True
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_rejects_fee_and_net_that_do_not_equal_gross() -> None:
+    class _WrongGrossPage(_CommercialPreflightPage):
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._FEE_CONTROL_SELECTOR:
+                return [
+                    _DynamicText(
+                        lambda: "$5.00" if self.price == Decimal("50") else "$6.00"
+                    )
+                ]
+            if selector == proposals._NET_CONTROL_SELECTOR:
+                return [
+                    _DynamicText(
+                        lambda: "$45.00" if self.price == Decimal("50") else "$54.00"
+                    )
+                ]
+            return await super().query_selector_all(selector)
+
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        _WrongGrossPage(),
+    )
+
+    reconciliation = result["fee_net_details"]["gross_reconciliation"]
+    assert reconciliation["fee_amount"] == "6.00"
+    assert reconciliation["net_amount"] == "54.00"
+    assert reconciliation["fee_plus_net"] == "60.00"
+    assert reconciliation["approved_gross"] == "63.00"
+    assert reconciliation["gross_matches"] is False
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_price_amount"] is None
+    assert result["price_restored"] is True
+
+
+def test_exact_currency_amount_ignores_percent_but_rejects_multiple_prices() -> None:
+    assert proposals._exact_currency_amount("10% fee $6.30") == (Decimal("6.30"), "$")
+    assert proposals._exact_currency_amount("$6.30 or $7.00") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_evidence", ["ambiguous", "mixed_currency"])
+async def test_commercial_preflight_rejects_ambiguous_or_mixed_currency_amounts(
+    bad_evidence: str,
+) -> None:
+    class _BadCurrencyPage(_CommercialPreflightPage):
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._FEE_CONTROL_SELECTOR:
+                if bad_evidence == "ambiguous":
+                    return [
+                        _DynamicText(
+                            lambda: f"${self.price * Decimal('0.10'):.2f} or "
+                            f"${self.price * Decimal('0.11'):.2f}"
+                        )
+                    ]
+                return [_DynamicText(lambda: f"${self.price * Decimal('0.10'):.2f}")]
+            if selector == proposals._NET_CONTROL_SELECTOR:
+                symbol = "$" if bad_evidence == "ambiguous" else "£"
+                return [
+                    _DynamicText(lambda: f"{symbol}{self.price * Decimal('0.90'):.2f}")
+                ]
+            return await super().query_selector_all(selector)
+
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        _BadCurrencyPage(),
+    )
+
+    reconciliation = result["fee_net_details"]["gross_reconciliation"]
+    assert reconciliation["gross_matches"] is False
+    if bad_evidence == "ambiguous":
+        assert reconciliation["amounts_unambiguous"] is False
+    else:
+        assert reconciliation["same_currency"] is False
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_price_amount"] is None
+    assert result["price_restored"] is True
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_rejects_unstable_exact_restoration() -> None:
+    class _UnstableRestorePrice(_CommercialPrice):
+        def __init__(self, page: _CommercialPreflightPage) -> None:
+            super().__init__(page)
+            self.restoring = False
+            self.restore_reads = 0
+
+        async def fill(self, value: str) -> None:
+            if value == "50" and self.value != "50":
+                self.restoring = True
+                self.restore_reads = 0
+            await super().fill(value)
+
+        async def input_value(self) -> str:
+            if self.restoring:
+                self.restore_reads += 1
+                if self.restore_reads >= 2:
+                    return "50.00"
+            return self.value
+
+    page = _CommercialPreflightPage()
+    page.price_control = _UnstableRestorePrice(page)
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_source"] is None
+    assert result["price_restored"] is False
+    assert result["external_action_taken"] is True
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_binds_entered_price_and_restores_original() -> None:
+    page = _CommercialPreflightPage()
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "complete"
+    assert result["fee_net_price_amount"] == "63.00"
+    assert result["fee_net_source"] == "scoped_reversible_price_preflight"
+    assert result["fee_net_details"]["gross_reconciliation"]["gross_matches"] is True
+    assert result["price_restored"] is True
+    assert result["external_action_taken"] is False
+    assert page.price_control.value == "50"
+    assert page.submit_queries == 0
+
+    class _FixedRadio:
+        def __init__(self, checked: bool) -> None:
+            self.checked = checked
+
+        async def is_checked(self) -> bool:
+            return self.checked
+
+        async def is_visible(self) -> bool:
+            return True
+
+        async def is_enabled(self) -> bool:
+            return True
+
+        async def get_attribute(self, _name: str) -> None:
+            return None
+
+    class _FixedSection(_TextElement):
+        def __init__(self, fixed_page: _CommercialPreflightPage) -> None:
+            super().__init__("By project By milestone")
+            self.project = _FixedRadio(True)
+            self.milestone = _FixedRadio(False)
+            self.amount = _CommercialPrice(fixed_page)
+            self.amount.value = "400"
+            fixed_page.price = Decimal("400")
+
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._BY_PROJECT_AMOUNT_INPUT_SELECTOR:
+                return [self.amount]
+            if "By project" in selector or 'value="project"' in selector:
+                return [self.project]
+            if "By milestone" in selector or 'value="milestone"' in selector:
+                return [self.milestone]
+            return []
+
+    class _FixedPreflightPage(_CommercialPreflightPage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.section = _FixedSection(self)
+
+        async def query_selector(self, selector: str):
+            if selector == "body":
+                return _TextElement("Fixed-price project\nBy project\nBy milestone")
+            return await super().query_selector(selector)
+
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if "fieldset:has" in selector and "By project" in selector:
+                return [self.section]
+            return await super().query_selector_all(selector)
+
+    fixed_page = _FixedPreflightPage()
+    fixed = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            bid=500,
+            payment_structure="by_project",
+        ),
+        fixed_page,
+    )
+    assert fixed["job_type"] == "fixed"
+    assert fixed["fee_net_status"] == "complete"
+    assert fixed["fee_net_price_amount"] == "500.00"
+    assert fixed["price_restored"] is True
+    assert fixed_page.section.amount.value == "400"
+
+    failing_restore_page = _CommercialPreflightPage()
+    original_fill = failing_restore_page.price_control.fill
+    fill_count = 0
+
+    async def fail_second_fill(value: str) -> None:
+        nonlocal fill_count
+        fill_count += 1
+        if fill_count > 1:
+            raise RuntimeError("restore failed")
+        await original_fill(value)
+
+    failing_restore_page.price_control.fill = fail_second_fill  # type: ignore[method-assign]
+    discarded = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        failing_restore_page,
+    )
+    assert discarded["fee_net_status"] == "incomplete"
+    assert discarded["fee_net_source"] is None
+    assert discarded["fee_net_price_amount"] is None
+    assert discarded["price_restored"] is False
+    assert discarded["external_action_taken"] is True
+
+    with pytest.raises(ValidationError, match="by-project"):
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/jobs/~123",
+            bid=500,
+        )
+    with pytest.raises(ValidationError, match="greater than or equal to 50"):
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/jobs/~123",
+            rate=49,
+        )
+
+
+@pytest.mark.asyncio
+async def test_proposal_inspection_never_clicks_accept_interview(monkeypatch) -> None:
+    class _InvitePage:
+        def __init__(self) -> None:
+            self.url = "https://www.upwork.com/jobs/~123"
+            self.accept_clicks = 0
+
+        async def goto(self, url: str, **_kwargs: Any) -> None:
+            self.url = url
+
+        async def query_selector(self, selector: str):
+            if selector == "body":
+                return _TextElement("Invitation to apply\nHourly contract")
+            if "Accept Interview" in selector or (
+                'data-test="apply-button"' in selector
+                and ':text-is("Apply Now")' not in selector
+            ):
+                return _Button(
+                    lambda: setattr(self, "accept_clicks", self.accept_clicks + 1),
+                    "Accept Interview",
+                )
+            return None
+
+        async def query_selector_all(self, _selector: str) -> list[Any]:
+            return []
+
+    page = _InvitePage()
+    monkeypatch.setattr(proposals, "get_browser", lambda: _Browser(page))
+    result = await proposals.inspect_proposal_form("https://www.upwork.com/jobs/~123")
+
+    assert result["form_status"] == "unavailable"
+    assert result["external_action_taken"] is False
+    assert page.accept_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_unreadable_visibility_never_counts_as_visible() -> None:
+    class _UnreadableVisibility:
+        async def is_visible(self) -> bool:
+            raise RuntimeError("detached")
+
+    assert await proposals._element_is_visible(_UnreadableVisibility()) is False

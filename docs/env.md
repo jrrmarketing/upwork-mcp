@@ -15,12 +15,17 @@ cd ~/Projects/upwork-mcp
 uv run upwork-mcp --login
 ```
 
-Complete Upwork login in the browser window with the saved HeyLogin entry and TOTP workflow.
-Never paste, print, or store credentials in this repository. If HeyLogin needs device approval,
-approve that single unlock and resume the original login.
+Keep the Upwork sign-in page open, open `https://heylogin.app/` in a separate Chrome tab, and
+search the vault for `upwork.com` plus the intended freelancer identity. Use only the exact matched
+entry for the username, password, and TOTP; never use the extension popup or reload flow. Never
+paste, print, or store credentials in this repository. If HeyLogin needs device approval, approve
+that single unlock and resume the original login.
 
 The health check also verifies the expected freelancer profile and find-work dashboard. A valid
 client-side Upwork session or a different freelancer profile therefore fails closed.
+It opens and closes its own disposable tab and never navigates an existing proposal or message.
+All Codex, Cursor, Claude, health, login, and lifecycle operations share one crash-safe local file
+lock, so separate MCP processes cannot operate the browser concurrently.
 
 ## Check session
 
@@ -34,7 +39,9 @@ uv run upwork-mcp --check
 uv run upwork-mcp --logout
 ```
 
-Then reload the Upwork MCP in the active client.
+Logout first proves and stops the exact dedicated-profile Chrome process, removes the saved profile
+under the shared lock, and then allows launchd to restart a clean browser. It fails closed if port
+9222 belongs to any other Chrome process. Then reload the Upwork MCP in the active client.
 
 ## Background Chrome (no window to babysit)
 
@@ -62,6 +69,10 @@ Manual controls:
 ```
 
 Logs: `~/.upwork-mcp/logs/`
+
+The state, profile, lock, and log paths are owner-only. The launcher refuses to attach to an
+unrelated debug-enabled Chrome: port 9222 must be owned by the process started with
+`--user-data-dir=~/.upwork-mcp/chrome-profile`.
 
 ### Activepieces?
 

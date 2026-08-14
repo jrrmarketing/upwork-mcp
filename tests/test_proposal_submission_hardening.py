@@ -71,12 +71,28 @@ def _proposal_params(**updates: Any) -> proposals.SubmitProposalParams:
         "job_title": "Google Ads audit",
         "job_type": "hourly",
         "cover_letter": "Exact approved copy",
+        "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "fee_net_status": "complete",
+        "fee_net_price_amount": "63.00",
+        "fee_net_source": "scoped_reversible_price_preflight",
+        "boost_auction_text": [],
+        "boost_auction_status": "unavailable",
         "rate": 63,
+        "screening_questions_status": "complete",
         "duration": "1 to 3 months",
+        "duration_options_status": "complete",
+        "available_profile_highlights_status": "complete",
         "base_connects": 12,
+        "base_connects_status": "complete",
+        "rate_increase_control_status": "complete",
         "action_id": "uwa_test_action",
     }
     values.update(updates)
+    if "fee_net_price_amount" not in updates:
+        price = values["rate"] if values["rate"] is not None else values["bid"]
+        values["fee_net_price_amount"] = f"{price:.2f}"
+    if values["job_type"] == "fixed" and "rate_increase_control_status" not in updates:
+        values["rate_increase_control_status"] = "not_applicable"
     return proposals.SubmitProposalParams(**values)
 
 
@@ -101,6 +117,9 @@ def test_submission_schema_binds_route_identity_and_fixed_payment_terms() -> Non
             ],
         )
 
+    with pytest.raises(ValidationError, match="greater than or equal to 50"):
+        _proposal_params(rate=49)
+
 
 def test_identity_and_payment_structure_are_approval_bound() -> None:
     original = _proposal_params()
@@ -110,12 +129,27 @@ def test_identity_and_payment_structure_are_approval_bound() -> None:
     ) != proposals.approval_payload_digest(
         proposals.proposal_submission_payload(changed_title)
     )
+    for changed in (
+        _proposal_params(
+            fee_net_text=["Upwork service fee $7.00", "You'll receive $56.00 net"]
+        ),
+        _proposal_params(boost_auction_text=["Boost your proposal"], boost_auction_status="incomplete"),
+    ):
+        assert proposals.approval_payload_digest(
+            proposals.proposal_submission_payload(original)
+        ) != proposals.approval_payload_digest(
+            proposals.proposal_submission_payload(changed)
+        )
+
+    with pytest.raises(ValidationError, match="Hourly proposals require"):
+        _proposal_params(rate_increase_control_status="not_applicable")
 
     fixed = _proposal_params(
         job_type="fixed",
         rate=None,
         bid=500,
         payment_structure="by_project",
+        rate_increase_control_status="not_applicable",
     )
     payload = proposals.proposal_submission_payload(fixed)
     assert payload["job_id"] == "~abc123"
@@ -124,6 +158,56 @@ def test_identity_and_payment_structure_are_approval_bound() -> None:
     assert payload["job_type"] == "fixed"
     assert payload["payment_structure"] == "by_project"
     assert payload["milestones"] == []
+    assert payload["fee_net_status"] == "complete"
+    assert payload["boost_auction_status"] == "unavailable"
+    assert payload["screening_questions_status"] == "complete"
+    assert payload["duration_options_status"] == "complete"
+    assert payload["available_profile_highlights_status"] == "complete"
+    assert payload["rate_increase_control_status"] == "not_applicable"
+
+
+def test_submission_schema_requires_complete_discovery_and_auction_for_boost() -> None:
+    with pytest.raises(ValidationError, match="screening-question"):
+        _proposal_params(screening_questions_status="incomplete")
+    with pytest.raises(ValidationError, match="fee/net"):
+        _proposal_params(fee_net_status="unavailable", fee_net_text=[])
+    with pytest.raises(ValidationError, match="base Connects"):
+        _proposal_params(base_connects_status="unavailable", base_connects=None)
+    with pytest.raises(ValidationError, match="fee_net_price_amount"):
+        _proposal_params(fee_net_price_amount="64.00")
+    with pytest.raises(ValidationError, match="positive boost"):
+        _proposal_params(boost_connects=5)
+    with pytest.raises(ValidationError, match="positive boost"):
+        _proposal_params(
+            boost_connects=5,
+            boost_auction_text=["Boost auction top bid 8 Connects"],
+            boost_auction_status="complete",
+        )
+
+
+def test_submission_schema_rejects_blank_duplicate_or_multirow_prepare_drift() -> None:
+    with pytest.raises(ValidationError, match="blank"):
+        _proposal_params(answers=["  "])
+    with pytest.raises(ValidationError, match="blank"):
+        _proposal_params(profile_highlights=["  "])
+    with pytest.raises(ValidationError, match="duplicates"):
+        _proposal_params(
+            profile_highlights=[
+                "Google Ads Search Certification",
+                " google ads search certification ",
+            ]
+        )
+    with pytest.raises(ValidationError, match="at most 1 item"):
+        _proposal_params(
+            job_type="fixed",
+            rate=None,
+            bid=500,
+            payment_structure="by_milestone",
+            milestones=[
+                {"description": "Audit", "due_date": "2026-09-01", "amount": 250},
+                {"description": "Review", "due_date": "2026-09-08", "amount": 250},
+            ],
+        )
 
 
 def test_job_type_detection_prefers_form_structure_and_fails_closed_on_ambiguous_text() -> None:
@@ -164,12 +248,25 @@ def _form(**updates: Any) -> dict[str, Any]:
         "form_status": "ready",
         "existing_proposal": False,
         "screening_questions": [],
-        "duration_options": ["1 to 3 months"],
+        "screening_questions_status": "complete",
+        "duration_options": [
+            "Less than 1 month",
+            "1 to 3 months",
+            "3 to 6 months",
+            "More than 6 months",
+        ],
+        "duration_options_status": "complete",
         "base_connects": 8,
-        "fee_net_text": ["Live fee preview"],
+        "base_connects_status": "complete",
+        "fee_net_text": ["Upwork service fee $6.30", "You'll receive $56.70 net"],
+        "fee_net_status": "complete",
+        "fee_net_price_amount": "63.00",
+        "fee_net_source": "scoped_reversible_price_preflight",
         "boost_auction_text": [],
+        "boost_auction_status": "unavailable",
         "available_profile_highlights": ["Google Ads Search Certification"],
         "available_profile_highlights_status": "complete",
+        "rate_increase_control_status": "complete",
     }
     values.update(updates)
     return values
@@ -231,11 +328,40 @@ async def test_preparation_binds_explicit_live_by_project_structure(
         return _form(
             job_type="fixed",
             fixed_payment_structures=["by_project", "by_milestone"],
+            rate_increase_control_status="not_applicable",
         )
+
+    async def fake_commercial(_params):
+        return {
+            "job_url": "https://www.upwork.com/jobs/~abc123",
+            "job_id": "~abc123",
+            "form_url": "https://www.upwork.com/nx/proposals/job/~abc123/apply",
+            "job_title": "Google Ads audit",
+            "job_type": "fixed",
+            "form_status": "ready",
+            "existing_proposal": False,
+            "fee_net_text": [
+                "Upwork service fee $50.00",
+                "You'll receive $450.00 net",
+            ],
+            "fee_net_status": "complete",
+            "fee_net_price_amount": "500.00",
+            "fee_net_source": "scoped_reversible_price_preflight",
+            "fee_net_details": {"price_restored": True},
+            "price_restored": True,
+            "identity_restored": True,
+            "reversible_form_interaction": True,
+            "external_action_taken": False,
+        }
 
     monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(management, "get_job_details", fake_job)
     monkeypatch.setattr(management, "inspect_proposal_form", fake_form)
+    monkeypatch.setattr(
+        management,
+        "inspect_proposal_commercial_preflight",
+        fake_commercial,
+    )
     result = await management.prepare_proposal(
         management.PrepareProposalParams(
             job_url="https://www.upwork.com/jobs/~abc123",
@@ -254,11 +380,15 @@ async def test_preparation_binds_explicit_live_by_project_structure(
 
 
 class _Text:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, visible: bool = True) -> None:
         self.text = text
+        self.visible = visible
 
     async def text_content(self) -> str:
         return self.text
+
+    async def is_visible(self) -> bool:
+        return self.visible
 
 
 class _IdentityPage:
@@ -382,6 +512,12 @@ class _Radio:
     async def is_checked(self) -> bool:
         return self.checked
 
+    async def is_enabled(self) -> bool:
+        return True
+
+    async def is_visible(self) -> bool:
+        return True
+
     async def click(self) -> None:
         if self.changes:
             self.checked = True
@@ -397,6 +533,9 @@ class _AmountInput:
         self.value = ""
 
     async def is_enabled(self) -> bool:
+        return True
+
+    async def is_visible(self) -> bool:
         return True
 
     async def fill(self, value: str) -> None:
@@ -425,6 +564,9 @@ class _PaymentSection:
 
     async def text_content(self) -> str:
         return "Payment terms By milestone By project"
+
+    async def is_visible(self) -> bool:
+        return True
 
     async def query_selector_all(self, selector: str) -> list[Any]:
         self.selectors.append(selector)
@@ -507,6 +649,32 @@ async def test_fixed_payment_fails_closed_if_selection_or_amount_is_ambiguous() 
     assert (await proposals._configure_fixed_payment_terms(conflicting, params))[0] is False
 
 
+@pytest.mark.asyncio
+async def test_by_project_draft_snapshot_restores_original_raw_amount() -> None:
+    params = _proposal_params(
+        job_type="fixed",
+        rate=None,
+        bid=500,
+        payment_structure="by_project",
+    )
+    page = _PaymentPage()
+    page.section.project_radio.checked = True
+    page.amounts[0].value = "275.50"
+    snapshot, error = await proposals._capture_fixed_draft_state(page, params)
+    assert error is None
+    assert snapshot == {
+        "structure": "by_project",
+        "project_amount": "275.50",
+        "milestones": [],
+    }
+
+    assert await proposals._configure_fixed_payment_terms(page, params) == (True, None)
+    assert page.amounts[0].value == "500.0"
+    assert snapshot is not None
+    assert await proposals._restore_fixed_draft_state(page, snapshot) is True
+    assert page.amounts[0].value == "275.50"
+
+
 class _MilestoneRow:
     def __init__(self) -> None:
         self.description = _AmountInput()
@@ -522,6 +690,10 @@ class _MilestoneRow:
             return self.amount
         return None
 
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        control = await self.query_selector(selector)
+        return [control] if control is not None else []
+
 
 class _MilestonePage:
     def __init__(self, row_count: int) -> None:
@@ -533,31 +705,65 @@ class _MilestonePage:
 
 
 @pytest.mark.asyncio
-async def test_exact_milestones_are_selected_filled_and_read_back() -> None:
+async def test_one_exact_milestone_is_selected_filled_and_read_back() -> None:
     params = _proposal_params(
         job_type="fixed",
         rate=None,
         bid=500,
         payment_structure="by_milestone",
         milestones=[
-            {"description": "Initial audit", "due_date": "2026-09-01", "amount": 200},
-            {"description": "Implementation", "due_date": "2026-09-15", "amount": 300},
+            {"description": "Initial audit", "due_date": "2026-09-01", "amount": 500},
         ],
     )
-    page = _MilestonePage(row_count=2)
+    page = _MilestonePage(row_count=1)
     assert await proposals._configure_fixed_payment_terms(page, params) == (True, None)
     assert page.rows[0].description.value == "Initial audit"
     assert page.rows[0].due_date.value == "2026-09-01"
-    assert page.rows[0].amount.value == "200.0"
-    assert page.rows[1].amount.value == "300.0"
+    assert page.rows[0].amount.value == "500.0"
 
-    missing_row = _MilestonePage(row_count=1)
+    missing_row = _MilestonePage(row_count=0)
     assert (await proposals._configure_fixed_payment_terms(missing_row, params))[0] is False
 
 
+@pytest.mark.asyncio
+async def test_milestone_draft_snapshot_restores_every_original_field() -> None:
+    params = _proposal_params(
+        job_type="fixed",
+        rate=None,
+        bid=500,
+        payment_structure="by_milestone",
+        milestones=[
+            {"description": "Initial audit", "due_date": "2026-09-01", "amount": 500},
+        ],
+    )
+    page = _MilestonePage(row_count=1)
+    page.section.milestone_radio.checked = True
+    page.rows[0].description.value = "Original milestone"
+    page.rows[0].due_date.value = "2026-08-20"
+    page.rows[0].amount.value = "325"
+    snapshot, error = await proposals._capture_fixed_draft_state(page, params)
+    assert error is None
+    assert snapshot is not None
+
+    assert await proposals._configure_fixed_payment_terms(page, params) == (True, None)
+    assert page.rows[0].description.value == "Initial audit"
+    assert await proposals._restore_fixed_draft_state(page, snapshot) is True
+    assert page.rows[0].description.value == "Original milestone"
+    assert page.rows[0].due_date.value == "2026-08-20"
+    assert page.rows[0].amount.value == "325"
+
+
 class _WarningCheckbox:
-    def __init__(self) -> None:
+    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
         self.checked = False
+        self.visible = visible
+        self.enabled = enabled
+
+    async def is_visible(self) -> bool:
+        return self.visible
+
+    async def is_enabled(self) -> bool:
+        return self.enabled
 
     async def check(self) -> None:
         self.checked = True
@@ -567,19 +773,40 @@ class _WarningCheckbox:
 
 
 class _WarningButton:
-    def __init__(self) -> None:
+    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
         self.clicked = False
+        self.visible = visible
+        self.enabled = enabled
+
+    async def is_visible(self) -> bool:
+        return self.visible
+
+    async def is_enabled(self) -> bool:
+        return self.enabled
 
     async def click(self) -> None:
         self.clicked = True
 
 
 class _WarningDialog:
-    def __init__(self, *, checkbox: bool = True, button: bool = True, exact_text: bool = True) -> None:
-        self.checkbox = _WarningCheckbox() if checkbox else None
-        self.button = _WarningButton() if button else None
+    def __init__(
+        self,
+        *,
+        checkbox: bool = True,
+        button: bool = True,
+        exact_text: bool = True,
+        visible: bool = True,
+        checkbox_visible: bool = True,
+        button_visible: bool = True,
+    ) -> None:
+        self.checkbox = _WarningCheckbox(visible=checkbox_visible) if checkbox else None
+        self.button = _WarningButton(visible=button_visible) if button else None
         self.exact_text = exact_text
+        self.visible = visible
         self.selectors: list[str] = []
+
+    async def is_visible(self) -> bool:
+        return self.visible
 
     async def text_content(self) -> str:
         if self.exact_text:
@@ -628,6 +855,23 @@ async def test_fixed_price_warning_never_queries_a_broad_checkbox_or_continue() 
     assert await proposals._acknowledge_fixed_price_warning(split_controls) is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dialog",
+    [
+        _WarningDialog(visible=False),
+        _WarningDialog(checkbox_visible=False),
+        _WarningDialog(button_visible=False),
+    ],
+)
+async def test_fixed_price_warning_rejects_hidden_dialog_or_controls(
+    dialog: _WarningDialog,
+) -> None:
+    assert await proposals._acknowledge_fixed_price_warning(_WarningPage([dialog])) is False
+    assert dialog.checkbox is None or dialog.checkbox.checked is False
+    assert dialog.button is None or dialog.button.clicked is False
+
+
 class _ConfirmationPage:
     def __init__(self, url: str, text: str = "Proposal submitted successfully") -> None:
         self.url = url
@@ -647,8 +891,15 @@ class _Link(_Text):
 
 
 class _StoredProposalPage:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        body: str = "Submitted proposal",
+        statuses: list[_Text] | None = None,
+    ) -> None:
         self.url = "https://www.upwork.com/nx/proposals/1111111111111111111"
+        self.body = body
+        self.statuses = statuses if statuses is not None else [_Text("submitted")]
 
     async def goto(self, url: str, **_kwargs: Any) -> None:
         self.url = url
@@ -661,10 +912,14 @@ class _StoredProposalPage:
         if "proposal-status" in selector:
             return _Text("submitted")
         if selector == "body":
-            return _Text("Submitted proposal")
+            return _Text(self.body)
         return None
 
-    async def query_selector_all(self, _selector: str) -> list[Any]:
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if selector == proposals._SUBMITTED_PROPOSAL_TITLE_SELECTOR:
+            return [_Text("Google Ads audit")]
+        if selector == proposals._SUBMITTED_PROPOSAL_STATUS_SELECTOR:
+            return self.statuses
         return []
 
 
@@ -679,6 +934,30 @@ async def test_stored_proposal_readback_extracts_exact_job_identity() -> None:
     assert details["job_id"] == "~abc123"
     assert details["job_title"] == "Google Ads audit"
     assert details["status"] == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_stored_proposal_status_requires_one_exact_visible_scoped_control() -> None:
+    spoofed = await proposals._get_proposal_details_on_page(
+        "https://www.upwork.com/nx/proposals/1111111111111111111",
+        _StoredProposalPage(body="Proposal was withdrawn", statuses=[]),
+    )
+    assert "status" not in spoofed
+
+    visible_wins = await proposals._get_proposal_details_on_page(
+        "https://www.upwork.com/nx/proposals/1111111111111111111",
+        _StoredProposalPage(
+            body="Proposal was withdrawn",
+            statuses=[_Text("withdrawn", visible=False), _Text("active")],
+        ),
+    )
+    assert visible_wins["status"] == "active"
+
+    ambiguous = await proposals._get_proposal_details_on_page(
+        "https://www.upwork.com/nx/proposals/1111111111111111111",
+        _StoredProposalPage(statuses=[_Text("active"), _Text("withdrawn")]),
+    )
+    assert "status" not in ambiguous
 
 
 def _approved_identity() -> dict[str, str]:

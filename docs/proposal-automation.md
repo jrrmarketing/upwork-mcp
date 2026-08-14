@@ -43,21 +43,13 @@ make Playwright's `.click()` time out with "subtree intercepts pointer events". 
 clicks with `page.evaluate(() => el.click())` instead. Native `.fill()` on plain
 `<textarea>`/`<input>` works fine.
 
-## The apply form (`/nx/proposals/interview/<uid>/accept`)
+## Invitation accept routes (`/nx/proposals/interview/<uid>/accept`)
 
-- **3 textareas, in order:** `[0]` = Cover Letter, `[1]` = screening Question 1 answer,
-  `[2]` = screening Question 2 answer. Fill with `page.locator('textarea').nth(i).fill(...)`.
-- **Payment:** two radios, "By milestone" (default) and "By project". Click the text
-  "By project" for a one-off audit. Selecting it swaps the milestone description/date
-  inputs for a single total amount field.
-- **Amount:** `input[placeholder="$0.00"]` → fill the exact approved bid. Read the live
-  Upwork fee and net fields; never assume a fixed service-fee percentage.
-- **Duration:** a custom `.air3-dropdown-toggle` reading "Select a duration". Open it,
-  then click the `li.air3-menu-item` whose exact text is one of: "Less than 1 month",
-  "1 to 3 months", "3 to 6 months", "More than 6 months". Open + pick must happen in the
-  **same script run** (the menu closes when the script ends). Don't match a bare span,
-  the job-details sidebar also prints "Less than 1 month".
-- **Submit button:** `Submit proposal`. This is **not** the final send on many jobs.
+The MCP does not click **Accept Interview** while opening a proposal form. That route binds an
+invitation identity, not merely a public job ID, and the click can itself change invitation state.
+Invitation applications therefore fail closed until the exact invitation ID, linked job identity,
+and accept transition can be proven. The ordinary `/nx/proposals/job/~<uid>/apply` route remains
+the only automated proposal form.
 
 ## Open apply flow (`/nx/proposals/job/~<uid>/apply/`)
 
@@ -65,15 +57,20 @@ Same field map as invite accept, but:
 - Often **one textarea** (cover letter only) unless screening questions exist.
 - **By milestone is frequently the default.** Click the **By project** radio explicitly. If you
   stay on milestones, Milestone 1 needs a **description** or you get "A description is needed."
-- **Amount:** only fill the **enabled** `input[placeholder="$0.00"]`. Disabled fee-breakdown
-  inputs (10% service fee, net receive) will timeout if you try to `.fill()` them.
+- Automated preparation supports fixed `by_project` terms only. It does not create milestone rows,
+  and the reversible commercial preflight cannot prove milestone pricing, so `by_milestone`
+  proposals must fail closed rather than approving a form the commit cannot reproduce.
+- **Amount:** only fill one exact enabled rate or by-project amount control. Fee/net evidence is
+  read only from exact Upwork-owned fee and net controls, never from body text or job copy.
 - **Duration:** job sidebar may say "Less than 1 month" while **1 to 3 months** is fine for
   setup + management. Pick what fits the scope.
 
 ## Two-step send + fixed-price modal
 
-After a valid **Submit proposal** click, Upwork usually shows **Boost your proposal (optional)**.
-The real send is **"Send for X Connects"** (base cost only unless Josiah asked to boost).
+After a valid **Submit proposal** click, Upwork may show **Boost your proposal (optional)**.
+Automated commit currently supports **no boost only** because the first Submit click can store the
+proposal immediately on some flows. In a confirmed two-step flow, the final control must read
+**"Send for X Connects"**, and `X` must exactly equal the approval-bound base Connect cost.
 
 Fixed-price jobs then show **"3 things you need to know"**:
 1. Check **"Yes, I understand."**
@@ -89,6 +86,43 @@ whose job identity, normalized cover letter, price, and active/submitted status 
 target. `success=false`, an index, a mismatched/unreadable record, or any other unknown result must
 not be retried automatically.
 
+After every fill, dropdown, payment, and highlight interaction, the MCP performs one final
+non-submit pass over the exact identity, base Connect control, questions, rate/bid, fixed terms,
+cover letter, answers, duration, rate-increase state, highlights, fee/net controls, and auction
+state. Any silent reset blocks before the first Submit-control query. The result reports the
+approved Connect cost, but it does not call that amount spent unless the stored owner-system
+proposal readback explicitly exposes and verifies actual Connect usage.
+
+Preparation now treats live form discovery as evidence, not a best-effort scrape. Screening
+questions and duration choices each return `complete`, `incomplete`, or `unavailable` plus
+diagnostic details. A zero-question form is `complete` only when one cover-letter control, zero
+question controls, and the exact textarea count agree. Duration is `complete` only after the
+single live menu is opened, all four exact Upwork choices are read, and the menu is dismissed.
+Any other state blocks preparation.
+
+Read-only form inspection deliberately leaves fee/net unavailable because a preview captured
+before price entry is stale evidence. Preparation uses a reversible commercial preflight: capture
+the original rate/by-project amount, enter and read back the exact proposed price, wait for the
+preview, read one exact scoped fee control and one exact scoped net control, then restore and read
+back the original value and preview. A restoration failure discards the evidence and reports the
+unrestored live-form interaction instead of calling the preflight read-only. The exact approval
+payload and digest bind `fee_net_price_amount`,
+`fee_net_source=scoped_reversible_price_preflight`, normalized
+`fee_net_text`/`fee_net_status`, and normalized
+`boost_auction_text`/`boost_auction_status`.
+Fee/net and exact scoped base-Connect discovery must be complete. Generic “Boost your proposal
+with 8 Connects” copy is not current auction state; a top/current/competing bid, rank, slot, bidder
+count, or no-bids state is required for a complete auction inspection. The live rate-increase
+control is `complete` for hourly work or explicitly `not_applicable` only for fixed-price work.
+An absent hourly control is `unavailable`, not proof that rate increases do not apply.
+
+The automated preparation path currently requires `boost_connects=0`. A positive boost remains a
+manual exact-approved flow until the live two-stage sequence can prove that the first Submit click
+is non-consequential and that the chosen boost is applied before the final send.
+
+Invitation controls such as `Accept Interview` are not part of automated prepare/commit. A suitable
+invitation can use this workflow only when an ordinary exact job application form already exists.
+
 ## Profile highlights (the "Add profile highlights" modal)
 
 Opened by clicking the card titled **"Add a portfolio project"** (also "Add an Upwork job"
@@ -96,7 +130,8 @@ Opened by clicking the card titled **"Add a portfolio project"** (also "Add an U
 
 Read the current titles from this live modal before preparation. Do not rely on the old
 case-study digest: several historical card titles conflict with the audited public evidence.
-The read-only form inspection opens the chooser, visits every visible tab, reads each card
+The read-only form inspection opens the chooser, proves the known `portfolio`, `certifications`,
+and Upwork-jobs tabs are all present, visits every visible tab, reads each card
 beside a `Select highlight` button without clicking it, and dismisses the chooser. It returns
 `available_profile_highlights` with `available_profile_highlights_status`. Preparation is
 blocked unless that status is `complete`, and a supplied title must exactly match the live list.

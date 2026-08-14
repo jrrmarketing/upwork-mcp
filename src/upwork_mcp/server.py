@@ -45,9 +45,11 @@ from .tools.messages import (
 )
 from .tools.profile import get_connects_balance, get_my_profile, get_profile_stats
 from .tools.proposals import (
+    DiscoveryStatus,
     FixedPriceMilestone,
     InspectProposalFormParams,
     ProposalsParams,
+    RateIncreaseControlStatus,
     SubmitProposalParams,
     WithdrawProposalParams,
     get_proposal_details,
@@ -116,8 +118,8 @@ async def upwork_get_job_details(
 @mcp.tool()
 async def upwork_screen_job(
     job_url: Annotated[str, Field(description="Full Upwork job URL or job ID")],
-    profile_hourly_rate: Annotated[float, Field(gt=0)] = 63,
-    minimum_hourly_rate: Annotated[float, Field(gt=0)] = 50,
+    profile_hourly_rate: Annotated[float, Field(ge=50)] = 63,
+    minimum_hourly_rate: Annotated[float, Field(ge=50)] = 50,
     minimum_fixed_fee: Annotated[float | None, Field(gt=0)] = None,
 ) -> dict:
     """Classify one live job as strong fit, fit, price conversion, speculative, or skip."""
@@ -134,8 +136,8 @@ async def upwork_find_opportunities(
     query: Annotated[str, Field(min_length=1, description="Search keywords")],
     limit_per_view: Annotated[int, Field(ge=1, le=20)] = 5,
     include_skips: bool = False,
-    profile_hourly_rate: Annotated[float, Field(gt=0)] = 63,
-    minimum_hourly_rate: Annotated[float, Field(gt=0)] = 50,
+    profile_hourly_rate: Annotated[float, Field(ge=50)] = 63,
+    minimum_hourly_rate: Annotated[float, Field(ge=50)] = 50,
     minimum_fixed_fee: Annotated[float | None, Field(gt=0)] = None,
 ) -> dict:
     """Read Best Matches and Most Recent, hydrate each job, and rank realistic opportunities."""
@@ -235,8 +237,8 @@ async def upwork_prepare_proposal(
     ] | None = None,
     profile_highlights: list[str] | None = None,
     boost_connects: Annotated[int, Field(ge=0)] = 0,
-    profile_hourly_rate: Annotated[float, Field(gt=0)] = 63,
-    minimum_hourly_rate: Annotated[float, Field(gt=0)] = 50,
+    profile_hourly_rate: Annotated[float, Field(ge=50)] = 63,
+    minimum_hourly_rate: Annotated[float, Field(ge=50)] = 50,
     minimum_fixed_fee: Annotated[float | None, Field(gt=0)] = None,
 ) -> dict:
     """Inspect the live form and create an exact expiring proposal approval record; never submits."""
@@ -285,7 +287,18 @@ async def upwork_submit_prepared_proposal(
     job_title: str,
     job_type: Literal["hourly", "fixed"],
     cover_letter: str,
-    rate: float | None = None,
+    fee_net_text: list[str],
+    fee_net_status: DiscoveryStatus,
+    fee_net_price_amount: Annotated[str, Field(pattern=r"^[0-9]+\.[0-9]{2}$")],
+    fee_net_source: Literal["scoped_reversible_price_preflight"],
+    boost_auction_text: list[str],
+    boost_auction_status: DiscoveryStatus,
+    screening_questions_status: DiscoveryStatus,
+    duration_options_status: DiscoveryStatus,
+    available_profile_highlights_status: DiscoveryStatus,
+    base_connects_status: DiscoveryStatus,
+    rate_increase_control_status: RateIncreaseControlStatus,
+    rate: Annotated[float | None, Field(ge=50)] = None,
     bid: float | None = None,
     payment_structure: Literal["by_project", "by_milestone"] | None = None,
     milestones: list[dict[str, Any]] | None = None,
@@ -310,17 +323,28 @@ async def upwork_submit_prepared_proposal(
         job_title=job_title,
         job_type=job_type,
         cover_letter=cover_letter,
+        fee_net_text=fee_net_text,
+        fee_net_status=fee_net_status,
+        fee_net_price_amount=fee_net_price_amount,
+        fee_net_source=fee_net_source,
+        boost_auction_text=boost_auction_text,
+        boost_auction_status=boost_auction_status,
         rate=rate,
         bid=bid,
         payment_structure=payment_structure,
         milestones=[FixedPriceMilestone.model_validate(item) for item in (milestones or [])],
         answers=answers or [],
         screening_questions=screening_questions or [],
+        screening_questions_status=screening_questions_status,
         duration=duration,
+        duration_options_status=duration_options_status,
         profile_highlights=profile_highlights or [],
+        available_profile_highlights_status=available_profile_highlights_status,
         base_connects=base_connects,
+        base_connects_status=base_connects_status,
         boost_connects=boost_connects,
         rate_increase_frequency="Never",
+        rate_increase_control_status=rate_increase_control_status,
     )
     result = await submit_proposal(params)
     if result.get("status") == "submitted" and result.get("owner_system_readback", {}).get("confirmed"):
@@ -403,6 +427,13 @@ async def upwork_send_prepared_message(
     room_id: str,
     contact_name: str,
     message: str,
+    history_snapshot_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+    history_record_count: Annotated[int, Field(ge=0)],
+    history_completeness_proof: Literal["exact_owner_complete_boundary"],
+    last_message_identity_sha256: Annotated[
+        str | None,
+        Field(pattern=r"^[0-9a-f]{64}$"),
+    ] = None,
 ) -> dict:
     """Send one unexpired approved exact-copy message and consume its action after readback."""
     result = await send_message(
@@ -412,6 +443,10 @@ async def upwork_send_prepared_message(
             room_id=room_id,
             contact_name=contact_name,
             message=message,
+            history_snapshot_sha256=history_snapshot_sha256,
+            history_record_count=history_record_count,
+            last_message_identity_sha256=last_message_identity_sha256,
+            history_completeness_proof=history_completeness_proof,
         )
     )
     if result.get("status") == "sent" and result.get("owner_system_readback", {}).get("confirmed"):
@@ -529,11 +564,9 @@ async def upwork_bidding_report(
 
 @mcp.tool()
 async def upwork_check_session() -> dict:
-    """Check the attached freelancer session without exposing credentials."""
-    browser = get_browser()
+    """Check the freelancer session in a disposable serialized browser tab."""
     try:
-        await browser.start()
-        logged_in = await browser.is_logged_in()
+        logged_in = await check_session()
         return {
             "logged_in": logged_in,
             "message": "Session is valid" if logged_in else "Session expired; run the Upwork login flow.",
