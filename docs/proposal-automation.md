@@ -1,31 +1,35 @@
 # Upwork proposal automation playbook
 
-How to reliably fill and submit an Upwork invite/proposal through the daemon Chrome,
+How to reliably fill and submit an Upwork invite/proposal through an already attached owner Chrome
+window,
 learned the hard way. Pair this with the voice/content rules in
 `~/.cursor/rules/upwork-proposals.mdc`, the management policy in `docs/management.md`,
 and the audited proof manifest in `src/upwork_mcp/proof_manifest.py`.
 
-## Connect to the logged-in session
+## Connect to the existing logged-in window
 
-The live Upwork session lives in the **background daemon Chrome on CDP port 9222**, not
-the Cursor IDE browser. Always connect there:
+Browser automation is attach-only. The owner or calling browser integration must already expose a
+safe loopback CDP endpoint. The MCP never launches Chrome or creates a browser context:
 
 ```python
+import os
+
 from patchright.async_api import async_playwright
 pw = await async_playwright().start()
-browser = await pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+browser = await pw.chromium.connect_over_cdp(
+    os.environ.get("UPWORK_MCP_CDP_URL", "http://127.0.0.1:9222")
+)
 ctx = browser.contexts[0]
 page = next((p for p in ctx.pages if 'proposals/' in p.url), ctx.pages[0])
 ```
 
-If Chrome is running but has no page/tab, open one first via the CDP HTTP endpoint:
-`curl -X PUT "http://127.0.0.1:9222/json/new?https://www.upwork.com/nx/find-work/"`.
+If no existing browser context is exposed, stop. Do not create a new context or launch a separate
+Chrome instance. A new tab may be created only inside an existing attached context.
 
 ## Force a desktop viewport (critical)
 
-The daemon Chrome renders at a tiny width, so Upwork serves the **mobile layout**, where
-menus/modals are fullscreen overlays that intercept every click. Override device metrics
-once per script before doing anything:
+Override device metrics once per script before doing anything so Upwork exposes the stable desktop
+layout:
 
 ```python
 cdp = await ctx.new_cdp_session(page)

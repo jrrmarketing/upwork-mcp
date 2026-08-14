@@ -2,7 +2,8 @@
 
 Local MCP for Upwork job discovery, fit/reachability screening, price and proof decisions,
 proposal preparation, messages, invitations, maintenance, contracts, and bidding reports. It
-uses **browser automation** through the owner's Chrome session, not the Upwork GraphQL API.
+uses **attach-only browser automation** through an existing owner Chrome window, not the Upwork
+GraphQL API. It never launches Chrome or creates a separate browser window.
 
 Upstream: [vanooo/upwork-mcp](https://github.com/vanooo/upwork-mcp)
 
@@ -15,25 +16,30 @@ JRR Sales Hub needs Lovable Google auth to run in the browser. This MCP talks to
 ```bash
 cd ~/Projects/upwork-mcp
 uv sync
-uv run upwork-mcp --login    # sign in to Upwork in the opened browser
+uv run upwork-mcp --login    # opens a tab only when an existing browser endpoint is attached
 ```
 
-## Background Chrome (automatic)
+## Existing-window browser policy
 
-Two built-in layers keep Chrome available after setup:
+The MCP never starts Chrome, installs launch agents, changes window bounds, or creates a browser
+context. When an explicitly configured local CDP endpoint is already available, it may reuse an
+existing Upwork tab or open a new tab inside that existing browser context. If no safe endpoint or
+existing context is available, browser-dependent tools fail closed without opening anything.
 
-1. **Mac login** — `com.jrr.upwork-chrome` launchd agent (off-screen Chrome on port 9222)
-2. **MCP startup** — `scripts/mcp-server.sh` ensures Chrome before `upwork-mcp` starts
+`UPWORK_MCP_CDP_URL` defaults to `http://127.0.0.1:9222` and accepts loopback endpoints only. The
+owner or calling browser integration must expose that endpoint from the Chrome window already in
+use. Starting `scripts/mcp-server.sh` alone never starts a browser.
 
-Install launchd once:
+Remove the retired auto-launch agents from older installations once:
 
 ```bash
-cd ~/Projects/upwork-mcp && ./scripts/install-launchd.sh
+cd ~/Projects/upwork-mcp && ./scripts/uninstall-legacy-launchd.sh
 ```
 
-Each MCP client must be registered with `scripts/mcp-server.sh` as its command. Start from
+Each MCP client should be registered with `scripts/mcp-server.sh` as its command. Start from
 `mcp-config.example.json` and use the canonical checkout's absolute path. Registration is a local
-deployment step; repository tests do not prove that a particular client is already configured.
+deployment step; repository tests do not prove that a browser endpoint or a particular client is
+already configured.
 
 ## Use in Cursor
 

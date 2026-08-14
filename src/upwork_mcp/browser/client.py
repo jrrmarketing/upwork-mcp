@@ -4,11 +4,8 @@ import asyncio
 import fcntl
 import inspect
 import os
-import shutil
-import signal
-import subprocess
 import sys
-import time
+import urllib.request
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -18,10 +15,8 @@ from urllib.parse import urlparse
 from patchright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
 STATE_DIR = Path(os.environ.get("UPWORK_MCP_STATE_DIR", "~/.upwork-mcp")).expanduser()
-PROFILE_DIR = STATE_DIR / "chrome-profile"
-LOG_DIR = STATE_DIR / "logs"
 BROWSER_OPERATION_LOCK = STATE_DIR / "browser-operation.lock"
-CDP_PORT = 9222
+CDP_ENDPOINT = os.environ.get("UPWORK_MCP_CDP_URL", "http://127.0.0.1:9222").strip().rstrip("/")
 DESKTOP_VIEWPORT = {
     "width": 1500,
     "height": 1150,
@@ -52,16 +47,6 @@ elif "UPWORK_FREELANCER_PROFILE_SLUG" in os.environ:
 else:
     EXPECTED_FREELANCER_PROFILE_IDENTIFIERS = _DEFAULT_FREELANCER_PROFILE_IDENTIFIERS
 
-# Real Chrome paths by platform
-CHROME_PATHS = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS
-    "/usr/bin/google-chrome",  # Linux
-    "/usr/bin/chromium-browser",  # Linux Chromium
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",  # Windows
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",  # Windows x86
-]
-
-
 def _ensure_private_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
@@ -69,7 +54,7 @@ def _ensure_private_directory(path: Path) -> None:
 
 @contextmanager
 def browser_operation_file_lock():
-    """Serialize every process that can operate the dedicated Upwork browser."""
+    """Serialize every process that can operate the attached owner browser."""
     _ensure_private_directory(STATE_DIR)
     descriptor = os.open(BROWSER_OPERATION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     os.chmod(BROWSER_OPERATION_LOCK, 0o600)
@@ -101,157 +86,42 @@ async def _async_browser_operation_file_lock() -> AsyncIterator[None]:
         os.close(descriptor)
 
 
-def _listener_pids() -> list[int]:
-    result = subprocess.run(
-        ["lsof", "-nP", f"-iTCP:{CDP_PORT}", "-sTCP:LISTEN", "-t"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode not in {0, 1}:
-        return []
-    return sorted({int(value) for value in result.stdout.split() if value.isdigit()})
-
-
-def _process_command(pid: int) -> str:
-    result = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "command="],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def dedicated_chrome_pids() -> list[int]:
-    expected_argument = f"--user-data-dir={PROFILE_DIR}"
-    return [pid for pid in _listener_pids() if expected_argument in _process_command(pid)]
+def _validated_cdp_endpoint() -> str:
+    """Return a local attach-only endpoint, rejecting remote or credentialed URLs."""
+    parsed = urlparse(CDP_ENDPOINT)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or (parsed.hostname or "").lower() not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise RuntimeError(
+            "UPWORK_MCP_CDP_URL must be a credential-free loopback browser endpoint."
+        )
+    return CDP_ENDPOINT
 
 
 def chrome_debug_status() -> str:
-    """Return stopped, dedicated, or mismatched for the CDP listener."""
-    import urllib.request
-
+    """Return available, stopped, or unsafe for the configured attach-only endpoint."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=2) as response:
+        endpoint = _validated_cdp_endpoint()
+    except RuntimeError:
+        return "unsafe"
+    try:
+        with urllib.request.urlopen(f"{endpoint}/json/version", timeout=2) as response:
             if response.status != 200:
                 return "stopped"
     except Exception:
         return "stopped"
-    return "dedicated" if dedicated_chrome_pids() else "mismatched"
-
-
-def find_chrome() -> str | None:
-    """Find real Chrome/Chromium browser on system."""
-    for path in CHROME_PATHS:
-        if os.path.exists(path):
-            return path
-    return None
+    return "available"
 
 
 def is_chrome_running_with_debug() -> bool:
-    """Check that the debug port belongs to the dedicated Upwork profile."""
-    return chrome_debug_status() == "dedicated"
-
-
-def _start_chrome_with_debug_locked() -> bool:
-    """Start the dedicated browser while the cross-process lock is held."""
-    status = chrome_debug_status()
-    if status == "dedicated":
-        return True
-    if status == "mismatched":
-        return False
-
-    chrome_path = find_chrome()
-    if not chrome_path:
-        return False
-
-    _ensure_private_directory(STATE_DIR)
-    _ensure_private_directory(PROFILE_DIR)
-    _ensure_private_directory(LOG_DIR)
-
-    subprocess.Popen(
-        [
-            chrome_path,
-            f"--remote-debugging-port={CDP_PORT}",
-            f"--user-data-dir={PROFILE_DIR}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            # Chrome 151 rejects Playwright's default-context download setup
-            # unless the browser exposes its automation protocol surface.
-            # Keep navigator.webdriver false while enabling that surface.
-            "--enable-automation",
-            "--disable-blink-features=AutomationControlled",
-            "--window-size=1,1",
-            "--window-position=9999,9999",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    for _ in range(10):
-        if chrome_debug_status() == "dedicated":
-            return True
-        time.sleep(0.5)
-
-    return chrome_debug_status() == "dedicated"
-
-
-def start_chrome_with_debug() -> bool:
-    """Start Chrome with remote debugging enabled.
-
-    This function remains synchronous for the login CLI. Async callers must run it
-    in a worker thread so waiting for Chrome never blocks or nests the active event
-    loop.
-    """
-    with browser_operation_file_lock():
-        return _start_chrome_with_debug_locked()
-
-
-def _stop_dedicated_chrome_locked(timeout_seconds: float = 5.0) -> bool:
-    """Stop only the exact dedicated-profile listener while the lock is held."""
-    status = chrome_debug_status()
-    if status == "mismatched":
-        return False
-    pids = dedicated_chrome_pids()
-    if not pids:
-        return status == "stopped"
-
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        status = chrome_debug_status()
-        if status == "stopped":
-            return True
-        if status == "mismatched":
-            return False
-        time.sleep(0.1)
-    return False
-
-
-def stop_dedicated_chrome() -> bool:
-    with browser_operation_file_lock():
-        return _stop_dedicated_chrome_locked()
-
-
-def clear_saved_session() -> bool:
-    """Stop the exact dedicated Chrome, then remove its profile under one lock."""
-    with browser_operation_file_lock():
-        if chrome_debug_status() == "mismatched":
-            raise RuntimeError(
-                f"Refusing logout because port {CDP_PORT} is not owned by the dedicated Upwork profile."
-            )
-        existed = PROFILE_DIR.exists()
-        if not _stop_dedicated_chrome_locked():
-            raise RuntimeError("Dedicated Upwork Chrome did not stop; the saved session was not removed.")
-        if PROFILE_DIR.exists():
-            shutil.rmtree(PROFILE_DIR)
-        return existed
+    """Check whether an existing local browser endpoint is available to attach."""
+    return chrome_debug_status() == "available"
 
 
 def _supports_keyword(callable_obj: Callable[..., Any], keyword: str) -> bool:
@@ -313,7 +183,7 @@ def _is_expected_freelancer_snapshot(
 
 
 class UpworkBrowser:
-    """Manages browser instance for Upwork automation via CDP."""
+    """Attaches to an existing owner browser without launching a process or window."""
 
     def __init__(self, headless: bool = False, timeout: int = 30000):
         self.headless = headless  # Ignored for CDP mode
@@ -358,19 +228,15 @@ class UpworkBrowser:
             await self._stop_playwright()
 
         status = chrome_debug_status()
-        if status == "mismatched":
+        if status == "unsafe":
             raise RuntimeError(
-                f"Port {CDP_PORT} belongs to a Chrome process that is not using "
-                f"the dedicated Upwork profile at {PROFILE_DIR}."
+                "The configured Upwork browser endpoint is not a safe loopback URL."
             )
-        if status != "dedicated":
-            print("Starting dedicated Upwork Chrome...", file=sys.stderr)
-            if not await asyncio.to_thread(_start_chrome_with_debug_locked):
-                raise RuntimeError(
-                    "Could not start the dedicated Upwork Chrome profile. "
-                    "Run scripts/start-chrome-daemon.sh and inspect its error."
-                )
-            await asyncio.sleep(2)
+        if status != "available":
+            raise RuntimeError(
+                "No existing browser connection is available. Upwork MCP is attach-only and "
+                "will not launch Chrome or open a new browser window."
+            )
 
         self._playwright = await async_playwright().start()
 
@@ -386,7 +252,7 @@ class UpworkBrowser:
                 connect_options["no_defaults"] = True
 
             self._browser = await connect(
-                f"http://127.0.0.1:{CDP_PORT}",
+                _validated_cdp_endpoint(),
                 **connect_options,
             )
             self._started = True
@@ -400,7 +266,11 @@ class UpworkBrowser:
         if self._browser is None:
             raise RuntimeError("Browser is not connected")
         contexts = list(self._browser.contexts)
-        context = contexts[0] if contexts else await self._browser.new_context()
+        if not contexts:
+            raise RuntimeError(
+                "The attached browser exposes no existing window context; refusing to create a new one."
+            )
+        context = contexts[0]
         page = await context.new_page()
         self._context = context
         self._page = page
@@ -433,12 +303,11 @@ class UpworkBrowser:
                     self._page_is_owned = False
                     return page
 
-        if contexts:
-            self._context = contexts[0]
-        else:
-            # Normal Chrome CDP sessions expose their default context. Retain this
-            # fallback for compatibility with other Chromium endpoints.
-            self._context = await self._browser.new_context()
+        if not contexts:
+            raise RuntimeError(
+                "The attached browser exposes no existing window context; refusing to create a new one."
+            )
+        self._context = contexts[0]
 
         self._page = await self._context.new_page()
         self._page_is_owned = True
@@ -547,7 +416,7 @@ class UpworkBrowser:
             title = await page.title()
 
             if "moment" in title.lower():
-                print("Cloudflare challenge detected in the dedicated Upwork browser.", file=sys.stderr)
+                print("Cloudflare challenge detected in the attached Upwork browser.", file=sys.stderr)
                 return False
 
             if "login" in current_url or "ab/account-security" in current_url:

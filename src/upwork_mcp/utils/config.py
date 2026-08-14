@@ -10,14 +10,13 @@ load_dotenv()
 
 # Base directories
 DATA_DIR = Path.home() / ".upwork-mcp"
-PROFILE_DIR = DATA_DIR / "profile"
 CACHE_DIR = DATA_DIR / "cache"
 LOG_DIR = DATA_DIR / "logs"
 
 
 def ensure_dirs():
     """Create necessary directories if they don't exist."""
-    for d in [DATA_DIR, PROFILE_DIR, CACHE_DIR, LOG_DIR]:
+    for d in [DATA_DIR, CACHE_DIR, LOG_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
