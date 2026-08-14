@@ -201,6 +201,7 @@ def test_internal_software_mentions_do_not_erase_genuine_vertical_proof(
         "Recruit new family-law clients through paid search.",
         "The partners sometimes teach at the local law school.",
         "The firm uses proprietary case software internally.",
+        "The family-law firm uses proprietary case software internally.",
         "The plumbing company relies on proprietary dispatch software internally.",
     ],
 )
@@ -452,6 +453,7 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "GTM isn't needed for analytics, and GTM is required for Ads.",
         "Candidates without GTM must not apply.",
         "Applications without GTM will be rejected.",
+        "Do not apply unless you can use GTM.",
     ],
 )
 def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):

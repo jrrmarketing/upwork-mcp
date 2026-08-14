@@ -117,7 +117,6 @@ ADJACENT_PROOF_TAGS = frozenset(
 # becoming a recruiting, education, or software business.
 NON_CLIENT_TITLE_MODEL_PATTERN = re.compile(
     r"\b(?:saas|legal[- ]tech|law[- ]tech|law[- ]school|law[- ]enforcement|"
-    r"practice[- ]management\s+(?:software|platform|system|tool)|"
     r"(?:software|subscription|mobile[- ]app)\s+(?:company|product|platform|business)|"
     r"(?:recruiting|recruitment|staffing)\s+(?:agency|company|firm|marketplace|platform|software)|"
     r"(?:legal|lawyer|attorney|criminal[- ]defen[cs]e|family[- ]law)[- ]+"
@@ -127,8 +126,9 @@ NON_CLIENT_TITLE_MODEL_PATTERN = re.compile(
 NON_CLIENT_DESCRIPTION_MODEL_PATTERN = re.compile(
     r"(?:"
     r"\b(?:saas|legal[- ]tech|law[- ]tech|subscription\s+(?:product|service|business))\b|"
-    r"\b(?:attorney|lawyer|legal|law[- ]firm|criminal[- ]defen[cs]e|family[- ]law)"
-    r"[^.;!?]{0,55}\b(?:software|platform|marketplace|mobile[- ]app)\b|"
+    r"\b(?:attorney|lawyer|legal|law[- ]firm|criminal[- ]defen[cs]e|family[- ]law)\s+"
+    r"(?:(?:practice[- ]management|recruitment)\s+)?"
+    r"(?:saas|software|platform|marketplace|mobile[- ]app)\b|"
     r"\bpractice[- ]management\s+(?:software|platform|system|tool)\b"
     r"[^.;!?]{0,80}\b(?:sold|selling|serv(?:e|es|ing)|market(?:ed|ing)?|for\s+sale)\b|"
     r"\b(?:sell|sells|selling|sold|license|licenses|licensing|offer|offers|offering)\b"
@@ -315,8 +315,9 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         return True
 
     required_eligibility = (
-        r"(?:\b(?:do\s+not|don't)\s+apply\b.{0,100}(?:cannot|can't|without).{0,50}"
+        r"(?:\b(?:do\s+not|don't)\s+apply\b.{0,100}(?:cannot|can't|without|unless).{0,50}"
         r"<scope>|"
+        r"\bunless\b.{0,80}<scope>.{0,80}\b(?:do\s+not|don't)\s+apply\b|"
         r"\b(?:if|who)\b.{0,90}(?:cannot|can't|without).{0,50}<scope>.{0,90}"
         r"(?:do\s+not|don't|must\s+not|should\s+not|cannot|can't)\s+apply\b|"
         r"\b(?:applicants?|candidates?|applications?).{0,100}"
