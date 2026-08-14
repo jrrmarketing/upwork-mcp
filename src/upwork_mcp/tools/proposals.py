@@ -1292,6 +1292,7 @@ _PROFILE_HIGHLIGHT_OPENER = (
     'button:has-text("Add a portfolio project"), '
     'button:has-text("Add an Upwork job"), '
     'button:has-text("Add a certificate"), '
+    'button:has-text("Edit profile highlights"), '
     'button[data-test*="add"][data-test*="profile-highlight"]'
 )
 _PROFILE_HIGHLIGHT_CHOOSER = (
@@ -1309,6 +1310,13 @@ _PROFILE_HIGHLIGHT_SELECT_BUTTONS = (
     'button[data-test*="select-highlight"], '
     '[data-test*="profile-highlight"] button:text-is("Select")'
 )
+_PROFILE_HIGHLIGHT_ACTION_BUTTONS = (
+    f'{_PROFILE_HIGHLIGHT_SELECT_BUTTONS}, '
+    'button:text-is("Selected"), '
+    'button:text-is("Remove highlight"), '
+    'button[data-test*="selected-highlight"], '
+    '[data-test*="profile-highlight"] button[aria-pressed="true"]'
+)
 _PROFILE_HIGHLIGHT_CLOSE = (
     '[role="dialog"] button[aria-label="Close"], '
     '[role="dialog"] button[aria-label*="close" i], '
@@ -1316,7 +1324,9 @@ _PROFILE_HIGHLIGHT_CLOSE = (
     '.is-modal-fullscreen button:has-text("Cancel"), '
     '[role="dialog"] button:has-text("Cancel")'
 )
-_REQUIRED_PROFILE_HIGHLIGHT_TABS = {"portfolio", "certifications", "upwork_jobs"}
+_REQUIRED_PROFILE_HIGHLIGHT_TABS = frozenset(
+    {"portfolio", "certifications", "upwork_jobs"}
+)
 
 
 def _normalize_visible_title(value: str) -> str:
@@ -1332,6 +1342,12 @@ def _canonical_highlight_tab(identity: str) -> str | None:
     if "job" in token or "work_history" in token or "workhistory" in token:
         return "upwork_jobs"
     return None
+
+
+def _normalized_highlight_identity(value: str) -> str:
+    """Normalize only presentation differences before exact title comparison."""
+
+    return _normalize_visible_title(value).casefold()
 
 
 async def _element_is_visible(element) -> bool:
@@ -1356,12 +1372,12 @@ async def _highlight_title_for_button(button) -> str | None:
       const usable = value => {
         const text = clean(value);
         return text && text.length <= 300
-          && !/^(select highlight|selected|add to highlights|view details)$/i.test(text)
+          && !/^(select highlight|selected|remove highlight|add to highlights|view details)$/i.test(text)
           && !/^add profile highlights$/i.test(text);
       };
 
       const ariaLabel = clean(button.getAttribute('aria-label'));
-      const ariaMatch = ariaLabel.match(/^select highlight(?: for)?\s*[:\-]?\s*(.+)$/i);
+      const ariaMatch = ariaLabel.match(/^(?:select highlight|selected|remove highlight)(?: for)?\s*[:\-]?\s*(.+)$/i);
       if (ariaMatch && usable(ariaMatch[1])) return clean(ariaMatch[1]);
 
       const labelledBy = clean(button.getAttribute('aria-labelledby'));
@@ -1374,7 +1390,7 @@ async def _highlight_title_for_button(button) -> str | None:
       let card = button.parentElement;
       for (let depth = 0; depth < 12 && card; depth += 1, card = card.parentElement) {
         const selectButtons = [...card.querySelectorAll('button')].filter(candidate =>
-          /^select highlight$/i.test(clean(candidate.innerText)) && visible(candidate)
+          /^(?:select highlight|selected|remove highlight)$/i.test(clean(candidate.innerText)) && visible(candidate)
         );
         if (selectButtons.length !== 1) continue;
 
@@ -1731,55 +1747,178 @@ async def _inspect_proposal_form_on_page(params: InspectProposalFormParams, page
     }
 
 
-async def _first_enabled(page, selector: str):
-    for element in await page.query_selector_all(selector):
+async def _enabled_elements(scope, selector: str) -> list[Any]:
+    """Return only controls whose enabled state can be read as true."""
+
+    enabled: list[Any] = []
+    try:
+        candidates = await scope.query_selector_all(selector)
+    except Exception:
+        return enabled
+    for element in candidates:
         try:
             if await element.is_enabled():
-                return element
+                enabled.append(element)
         except Exception:
-            return element
-    return None
+            continue
+    return enabled
+
+
+async def _one_enabled(scope, selector: str) -> Any | None:
+    controls = await _enabled_elements(scope, selector)
+    return controls[0] if len(controls) == 1 else None
+
+
+async def _fill_and_readback_text(element, value: str) -> bool:
+    """Fill a consequential text field and require byte-for-byte readback."""
+
+    try:
+        await element.fill(value)
+        return str(await element.input_value()) == value
+    except Exception:
+        return False
+
+
+async def _selected_option_label(select) -> str | None:
+    """Read the selected option's visible label, never merely its opaque value."""
+
+    try:
+        selected = await select.evaluate(
+            "element => element.selectedOptions.length === 1 "
+            "? element.selectedOptions[0].textContent : null"
+        )
+    except Exception:
+        selected = None
+    if isinstance(selected, str):
+        return _normalise_identity_text(selected)
+    try:
+        selected_options = await select.query_selector_all("option:checked")
+    except Exception:
+        selected_options = []
+    if len(selected_options) != 1:
+        return None
+    try:
+        return _normalise_identity_text(await selected_options[0].text_content())
+    except Exception:
+        return None
+
+
+async def _dropdown_selection_readback(page, toggle, approved_label: str) -> bool:
+    """Require an exact visible label or one exact aria-selected option."""
+
+    try:
+        if _normalise_identity_text(await toggle.text_content()) == approved_label:
+            return True
+    except Exception:
+        pass
+    selected: list[Any] = []
+    try:
+        candidates = await page.query_selector_all(
+            '[role="option"][aria-selected="true"], '
+            '[role="menuitem"][aria-selected="true"], '
+            'li.air3-menu-item[aria-selected="true"]'
+        )
+    except Exception:
+        candidates = []
+    for option in candidates:
+        if await _element_is_visible(option):
+            selected.append(option)
+    if len(selected) != 1:
+        return False
+    try:
+        return _normalise_identity_text(await selected[0].text_content()) == approved_label
+    except Exception:
+        return False
+
+
+async def _select_exact_dropdown_label(page, toggle, approved_label: str) -> bool:
+    try:
+        await _click(page, toggle)
+    except Exception:
+        return False
+    matches: list[Any] = []
+    try:
+        options = await page.query_selector_all(
+            'li.air3-menu-item, [role="option"], [role="menuitem"]'
+        )
+    except Exception:
+        return False
+    for option in options:
+        try:
+            label = _normalise_identity_text(await option.text_content())
+        except Exception:
+            continue
+        if label == approved_label and await _element_is_visible(option):
+            matches.append(option)
+    if len(matches) != 1:
+        return False
+    try:
+        await _click(page, matches[0])
+    except Exception:
+        return False
+    return await _dropdown_selection_readback(page, toggle, approved_label)
 
 
 async def _select_duration(page, duration: str) -> bool:
-    toggle = await page.query_selector(
-        'button:has-text("Select a duration"), '
-        '.air3-dropdown-toggle:has-text("duration"), '
-        '[data-test*="duration"] .air3-dropdown-toggle'
+    selects = await _enabled_elements(
+        page,
+        'select[name*="duration"], [data-test*="duration"] select',
     )
-    if not toggle:
-        return False
-    await _click(page, toggle)
-    for option in await page.query_selector_all('li.air3-menu-item, [role="option"], [role="menuitem"]'):
-        if re.sub(r"\s+", " ", (await option.text_content() or "")).strip() == duration:
-            await _click(page, option)
-            return True
-    return False
-
-
-async def _select_rate_increase_never(page) -> bool:
-    select = await page.query_selector('select[name*="increase"], [data-test*="rate-increase"] select')
-    if select:
+    if selects:
+        if len(selects) != 1:
+            return False
         try:
-            await select.select_option(label="Never")
-            return True
+            await selects[0].select_option(label=duration)
         except Exception:
             return False
+        return await _selected_option_label(selects[0]) == duration
 
-    toggle = await page.query_selector(
+    toggle = await _one_enabled(
+        page,
+        'button:has-text("Select a duration"), '
+        '.air3-dropdown-toggle:has-text("duration"), '
+        '[data-test*="duration"] .air3-dropdown-toggle',
+    )
+    if toggle is None:
+        return False
+    return await _select_exact_dropdown_label(page, toggle, duration)
+
+
+async def _select_rate_increase_never(
+    page,
+    approved_control_status: str | None = None,
+) -> bool:
+    """Select Never, or accept absence only when approval bound not_applicable."""
+
+    if approved_control_status not in {None, "complete", "not_applicable"}:
+        return False
+    selects = await _enabled_elements(
+        page,
+        'select[name*="increase"], [data-test*="rate-increase"] select',
+    )
+    toggles = await _enabled_elements(
+        page,
         '[data-test*="rate-increase"] button, '
         '.air3-dropdown-toggle:has-text("rate increase"), '
-        'button:has-text("Select a frequency")'
+        'button:has-text("Select a frequency")',
     )
-    if not toggle:
-        # Not every form offers scheduled increases.
-        return True
-    await _click(page, toggle)
-    for option in await page.query_selector_all('li.air3-menu-item, [role="option"], [role="menuitem"]'):
-        if re.sub(r"\s+", " ", (await option.text_content() or "")).strip().lower() == "never":
-            await _click(page, option)
-            return True
-    return False
+    if not selects and not toggles:
+        return approved_control_status == "not_applicable"
+    if approved_control_status == "not_applicable":
+        return False
+    if selects and toggles:
+        return False
+    if selects:
+        if len(selects) != 1:
+            return False
+        try:
+            await selects[0].select_option(label="Never")
+        except Exception:
+            return False
+        return await _selected_option_label(selects[0]) == "Never"
+    if len(toggles) != 1:
+        return False
+    return await _select_exact_dropdown_label(page, toggles[0], "Never")
 
 
 async def _checked_state(element) -> bool | None:
@@ -1881,14 +2020,7 @@ async def _select_fixed_payment_structure(
 
 
 async def _fill_one_exact_input(page, selectors: str, value: str) -> bool:
-    inputs: list[Any] = []
-    for element in await page.query_selector_all(selectors):
-        try:
-            enabled = bool(await element.is_enabled())
-        except Exception:
-            enabled = True
-        if enabled:
-            inputs.append(element)
+    inputs = await _enabled_elements(page, selectors)
     if len(inputs) != 1:
         return False
     element = inputs[0]
@@ -2008,45 +2140,390 @@ async def _acknowledge_fixed_price_warning(page) -> bool:
     return True
 
 
+async def _highlight_action_selected(button) -> bool | None:
+    """Read a chooser card's explicit selected/unselected state."""
+
+    try:
+        label = _normalise_identity_text(await button.text_content()).casefold()
+    except Exception:
+        label = ""
+    if label in {"select", "select highlight"}:
+        return False
+    if label in {"selected", "remove highlight"}:
+        return True
+    for attribute in ("aria-pressed", "aria-checked", "data-selected"):
+        try:
+            value = str(await button.get_attribute(attribute) or "").casefold()
+        except Exception:
+            continue
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+    return None
+
+
+async def _exact_profile_highlight_chooser(page) -> Any | None:
+    try:
+        candidates = await page.query_selector_all(_PROFILE_HIGHLIGHT_CHOOSER)
+    except Exception:
+        return None
+    visible = [candidate for candidate in candidates if await _element_is_visible(candidate)]
+    return visible[0] if len(visible) == 1 else None
+
+
+async def _open_profile_highlight_chooser(page) -> Any | None:
+    openers = [
+        opener
+        for opener in await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER)
+        if await _element_is_visible(opener)
+    ]
+    if len(openers) != 1:
+        return None
+    try:
+        await _click(page, openers[0])
+        await _wait_for_profile_highlight_chooser(page)
+    except Exception:
+        return None
+    return await _exact_profile_highlight_chooser(page)
+
+
+async def _activate_profile_highlight_tab(page, identity: str) -> bool:
+    if identity == "current_view":
+        return not bool(await _profile_highlight_tabs(page))
+    matches = [tab for tab_identity, tab in await _profile_highlight_tabs(page) if tab_identity == identity]
+    if len(matches) != 1:
+        return False
+    try:
+        await _click(page, matches[0])
+        await _settle_profile_highlight_view(page)
+    except Exception:
+        return False
+    return True
+
+
+async def _visible_profile_highlight_records(page, tab_identity: str) -> tuple[list[dict[str, Any]], str | None]:
+    records: list[dict[str, Any]] = []
+    try:
+        buttons = await page.query_selector_all(_PROFILE_HIGHLIGHT_ACTION_BUTTONS)
+    except Exception:
+        return [], "Profile highlight controls could not be enumerated"
+    for button in buttons:
+        if not await _element_is_visible(button):
+            continue
+        title = await _highlight_title_for_button(button)
+        selected = await _highlight_action_selected(button)
+        if not title or selected is None:
+            return [], "A live profile highlight title or selected state could not be read"
+        records.append(
+            {
+                "title": title,
+                "identity": _normalized_highlight_identity(title),
+                "selected": selected,
+                "tab": tab_identity,
+                "button": button,
+            }
+        )
+    return records, None
+
+
+async def _enumerate_profile_highlight_records(
+    page,
+) -> tuple[list[dict[str, Any]], str | None]:
+    tabs = await _profile_highlight_tabs(page)
+    tab_identities = {identity for identity, _ in tabs}
+    if tab_identities != _REQUIRED_PROFILE_HIGHLIGHT_TABS:
+        return [], "The complete required profile-highlight tab set is not visible"
+    views = [identity for identity, _ in tabs] or ["current_view"]
+    records: list[dict[str, Any]] = []
+    for identity in views:
+        if not await _activate_profile_highlight_tab(page, identity):
+            return [], f"Profile highlight tab could not be inspected: {identity}"
+        visible, error = await _visible_profile_highlight_records(page, identity)
+        if error:
+            return [], error
+        records.extend(visible)
+    return records, None
+
+
+def _index_profile_highlight_records(
+    records: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    indexed: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        indexed.setdefault(str(record["identity"]), []).append(record)
+    return indexed
+
+
 async def _select_profile_highlights(page, highlights: list[str]) -> tuple[bool, str | None]:
-    if not highlights:
-        return True, None
-    open_button = await page.query_selector(
-        'button:has-text("Add profile highlights"), '
-        'button:has-text("Add a portfolio project"), '
-        '[data-test*="profile-highlight"]'
-    )
-    if not open_button:
-        return False, "Profile highlights control not found"
-    await _click(page, open_button)
+    approved_identities = [_normalized_highlight_identity(title) for title in highlights]
+    if not all(approved_identities) or len(set(approved_identities)) != len(approved_identities):
+        return False, "Approved profile highlight titles are blank or ambiguous after normalization"
 
-    script = r"""fragment => {
-      let best = null;
-      for (const element of document.querySelectorAll('*')) {
-        const text = element.innerText || '';
-        if (text.includes(fragment) && (!best || text.length < best.text.length)) {
-          best = {element, text};
-        }
-      }
-      if (!best) return 'not-found';
-      let card = best.element;
-      for (let index = 0; index < 12 && card; index += 1) {
-        const button = [...card.querySelectorAll('button')]
-          .find(item => /Select highlight/i.test(item.innerText || ''));
-        if (button) { button.click(); return 'selected'; }
-        card = card.parentElement;
-      }
-      return 'button-not-found';
-    }"""
-    for highlight in highlights:
-        if await page.evaluate(script, highlight) != "selected":
-            return False, f"Could not select approved profile highlight: {highlight}"
+    chooser = await _open_profile_highlight_chooser(page)
+    if chooser is None:
+        if not highlights and not await _enabled_elements(page, _PROFILE_HIGHLIGHT_OPENER):
+            return True, None
+        return False, "One exact profile highlights chooser could not be opened"
 
-    add_button = await page.query_selector('button:has-text("Add to highlights")')
-    if not add_button:
-        return False, "Add to highlights button not found"
-    await _click(page, add_button)
+    records, error = await _enumerate_profile_highlight_records(page)
+    if error:
+        await _dismiss_profile_highlight_chooser(page)
+        return False, error
+    indexed = _index_profile_highlight_records(records)
+    for identity in approved_identities:
+        if len(indexed.get(identity, [])) != 1:
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "An approved profile highlight did not match one exact live title"
+    selected_before = {str(record["identity"]) for record in records if record["selected"]}
+    if not selected_before.issubset(set(approved_identities)):
+        await _dismiss_profile_highlight_chooser(page)
+        return False, "The live form contains an unapproved selected profile highlight"
+
+    changed = False
+    for identity in approved_identities:
+        current = indexed[identity][0]
+        if current["selected"]:
+            continue
+        if not await _activate_profile_highlight_tab(page, str(current["tab"])):
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "An approved profile highlight tab could not be reopened"
+        visible, visible_error = await _visible_profile_highlight_records(page, str(current["tab"]))
+        if visible_error:
+            await _dismiss_profile_highlight_chooser(page)
+            return False, visible_error
+        matches = [record for record in visible if record["identity"] == identity]
+        if len(matches) != 1 or matches[0]["selected"]:
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "An approved profile highlight changed during selection"
+        try:
+            await _click(page, matches[0]["button"])
+            await _settle_profile_highlight_view(page)
+        except Exception:
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "An approved profile highlight could not be selected"
+        visible, visible_error = await _visible_profile_highlight_records(page, str(current["tab"]))
+        selected_matches = [
+            record
+            for record in visible
+            if record["identity"] == identity and record["selected"]
+        ]
+        if visible_error or len(selected_matches) != 1:
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "An approved profile highlight selection could not be read back"
+        changed = True
+
+    records, error = await _enumerate_profile_highlight_records(page)
+    selected = {str(record["identity"]) for record in records if record["selected"]}
+    if error or selected != set(approved_identities):
+        await _dismiss_profile_highlight_chooser(page)
+        return False, "The live selected profile highlight set differs from approval"
+
+    if changed:
+        add_buttons = await _enabled_elements(chooser, 'button:text-is("Add to highlights")')
+        if len(add_buttons) != 1:
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "One exact Add to highlights control was not found"
+        try:
+            await _click(page, add_buttons[0])
+            await _settle_profile_highlight_view(page)
+        except Exception:
+            return False, "The approved profile highlight set could not be saved"
+        if await _profile_highlight_chooser_visible(page):
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "The profile highlight chooser did not confirm the saved set"
+
+        chooser = await _open_profile_highlight_chooser(page)
+        if chooser is None:
+            return False, "The saved profile highlight set could not be reopened for readback"
+        records, error = await _enumerate_profile_highlight_records(page)
+        selected = {str(record["identity"]) for record in records if record["selected"]}
+        if error or selected != set(approved_identities):
+            await _dismiss_profile_highlight_chooser(page)
+            return False, "The saved profile highlight set differs from approval"
+
+    if not await _dismiss_profile_highlight_chooser(page):
+        return False, "The verified profile highlight chooser could not be dismissed"
     return True, None
+
+
+async def _reinspect_approved_commercial_state(
+    page,
+    params: SubmitProposalParams,
+) -> tuple[bool, str | None]:
+    """Exact-compare the approval-bound fee and boost auction snapshots."""
+
+    checks = (
+        ("fee_net", globals().get("_inspect_fee_net_state")),
+        ("boost_auction", globals().get("_inspect_boost_auction_state")),
+    )
+    for prefix, inspector in checks:
+        expected_text = getattr(params, f"{prefix}_text", None)
+        expected_status = getattr(params, f"{prefix}_status", None)
+        if not isinstance(expected_text, list) or not all(
+            isinstance(value, str) for value in expected_text
+        ):
+            return False, f"Approved {prefix} text was not bound"
+        if expected_status not in {"complete", "incomplete", "unavailable"}:
+            return False, f"Approved {prefix} status was not bound"
+        if not callable(inspector):
+            return False, f"Live {prefix} inspector is unavailable"
+        try:
+            live = await inspector(page)
+        except Exception:
+            return False, f"Live {prefix} state could not be read"
+        live_text = live.get("text") if isinstance(live, Mapping) else None
+        live_status = live.get("status") if isinstance(live, Mapping) else None
+        if not isinstance(live_text, list) or not all(
+            isinstance(value, str) for value in live_text
+        ):
+            return False, f"Live {prefix} text could not be read"
+        if (
+            _dedupe_text(expected_text) != _dedupe_text(live_text)
+            or live_status != expected_status
+        ):
+            return False, f"Live {prefix} state changed after approval"
+    return True, None
+
+
+async def _first_stage_submit_control(page) -> Any | None:
+    """Resolve one exact first-stage control only after every form readback."""
+
+    return await _one_enabled(
+        page,
+        'button[data-test="submit-proposal"]:text-is("Submit proposal"), '
+        '[data-test="submit-proposal"] button:text-is("Submit proposal")',
+    )
+
+
+async def _exact_boost_dialog(page) -> Any | None:
+    try:
+        dialogs = await page.query_selector_all('[role="dialog"]')
+    except Exception:
+        return None
+    matches: list[Any] = []
+    for dialog in dialogs:
+        if not await _element_is_visible(dialog):
+            continue
+        try:
+            text = _normalise_identity_text(await dialog.text_content())
+        except Exception:
+            continue
+        if re.search(r"\bboost\b.*\bproposal\b|\bproposal\b.*\bboost\b", text, re.I) and re.search(
+            r"\bconnects?\b",
+            text,
+            re.I,
+        ):
+            matches.append(dialog)
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _explicit_selection_state(element) -> bool | None:
+    try:
+        return bool(await element.is_checked())
+    except Exception:
+        pass
+    for attribute in ("aria-checked", "aria-pressed", "data-selected"):
+        try:
+            value = str(await element.get_attribute(attribute) or "").casefold()
+        except Exception:
+            continue
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+    return None
+
+
+async def _exact_final_send_control(dialog) -> Any | None:
+    """Resolve only an exact Send control inside the verified boost dialog."""
+
+    candidates = await _enabled_elements(dialog, "button")
+    matches: list[Any] = []
+    for button in candidates:
+        try:
+            label = _normalise_identity_text(await button.text_content())
+        except Exception:
+            continue
+        if label == "Send proposal" or re.fullmatch(
+            r"Send for [0-9]+ Connects?",
+            label,
+            re.I,
+        ):
+            matches.append(button)
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _configure_boost_step(
+    page,
+    boost_connects: int,
+) -> tuple[Any | None, str | None]:
+    """Read back boost/no-boost inside one exact dialog before finding Send."""
+
+    dialog = await _exact_boost_dialog(page)
+    if dialog is None:
+        return None, "One exact boost proposal dialog was not found"
+    if boost_connects > 0:
+        boost_input = await _one_enabled(
+            dialog,
+            'input[name*="boost"], input[data-test*="boost"], '
+            '[data-test*="boost"] input[type="number"]',
+        )
+        if boost_input is None:
+            return None, "One exact approved boost input was not found"
+        try:
+            await boost_input.fill(str(boost_connects))
+            live_value = str(await boost_input.input_value()).replace(",", "").strip()
+            exact = Decimal(live_value) == Decimal(boost_connects)
+        except Exception:
+            exact = False
+        if not exact:
+            return None, "The approved boost value could not be read back exactly"
+    else:
+        choices = await _enabled_elements(
+            dialog,
+            'label:text-is("Don\'t boost") input[type="radio"], '
+            'input[type="radio"][aria-label="Don\'t boost"], '
+            'label:text-is("No, thanks") input[type="radio"], '
+            'input[type="radio"][aria-label="No, thanks"], '
+            'button:text-is("Don\'t boost"), button:text-is("No, thanks")',
+        )
+        if len(choices) != 1:
+            return None, "One exact no-boost control was not found"
+        selected = await _explicit_selection_state(choices[0])
+        if selected is None:
+            return None, "The no-boost control selected state could not be read"
+        if not selected:
+            try:
+                await _click(page, choices[0])
+            except Exception:
+                return None, "The no-boost control could not be selected"
+        if await _explicit_selection_state(choices[0]) is not True:
+            return None, "The no-boost selection could not be read back"
+
+    send = await _exact_final_send_control(dialog)
+    if send is None:
+        return None, "One exact final Send control was not found in the boost dialog"
+    return send, None
+
+
+def _confirmed_submission_result(
+    *,
+    params: SubmitProposalParams,
+    readback: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Report only base Connects as spent; a boost bid is not spend proof."""
+
+    return {
+        "status": "submitted",
+        "connects_used": params.base_connects,
+        "connects_used_scope": "base proposal cost only; boost spend was not owner-system verified",
+        "boost_connects_bid": params.boost_connects,
+        "boost_spend_verified": False,
+        "message": "Proposal submitted and read back from Upwork",
+        "owner_system_readback": dict(readback),
+        "external_action_taken": True,
+    }
 
 
 def _success_query_is_true(url: str) -> bool:
@@ -2267,30 +2744,44 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
 
     # Only after exact identity readback may form controls be queried or filled.
     if params.rate is not None:
-        rate_input = await _first_enabled(page, '[data-test="hourly-rate-input"], input[name*="rate"]')
-        if not rate_input:
-            return {"status": "error", "message": "Hourly rate input not found", "external_action_taken": False}
-        await rate_input.fill(str(params.rate))
+        rate_ok = await _fill_one_exact_input(
+            page,
+            '[data-test="hourly-rate-input"], input[name="rate"], '
+            'input[name="hourlyRate"]',
+            str(params.rate),
+        )
+        if not rate_ok:
+            return {
+                "status": "live_form_mismatch",
+                "message": "One exact hourly rate could not be filled and read back.",
+                "external_action_taken": False,
+            }
 
     if params.bid is not None:
         fixed_ok, fixed_error = await _configure_fixed_payment_terms(page, params)
         if not fixed_ok:
             return {"status": "error", "message": fixed_error, "external_action_taken": False}
 
-    # Fill cover letter
-    cover_textarea = await page.query_selector('[data-test="cover-letter-input"], textarea[name*="cover"], textarea')
-    if not cover_textarea:
-        return {"status": "error", "message": "Cover letter input not found", "external_action_taken": False}
-    await cover_textarea.fill(params.cover_letter)
+    cover_textarea = await _one_enabled(
+        page,
+        'textarea[data-test="cover-letter-input"], '
+        '[data-test="cover-letter-input"] textarea, textarea[name="coverLetter"]',
+    )
+    if cover_textarea is None or not await _fill_and_readback_text(
+        cover_textarea,
+        params.cover_letter,
+    ):
+        return {
+            "status": "live_form_mismatch",
+            "message": "One exact cover letter could not be filled and read back.",
+            "external_action_taken": False,
+        }
 
     # Answer screening questions only when the live field count still matches.
     answers = params.answers or []
     question_inputs = await page.query_selector_all(
         '[data-test="question-input"], .question-answer textarea, .screening-question textarea'
     )
-    if len(question_inputs) != len(answers):
-        all_textareas = await page.query_selector_all("textarea")
-        question_inputs = all_textareas[1:]
     if len(question_inputs) != len(answers):
         return {
             "status": "live_form_mismatch",
@@ -2307,22 +2798,51 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
                     "message": "An approved screening answer is blank.",
                     "external_action_taken": False,
                 }
-            await question_inputs[i].fill(answer)
+            if not await _fill_and_readback_text(question_inputs[i], answer):
+                return {
+                    "status": "live_form_mismatch",
+                    "message": "An approved screening answer could not be read back exactly.",
+                    "answer_index": i,
+                    "external_action_taken": False,
+                }
 
     if not await _select_duration(page, params.duration):
         return {"status": "error", "message": "Approved duration option could not be selected", "external_action_taken": False}
-    if not await _select_rate_increase_never(page):
-        return {"status": "error", "message": 'Rate increase frequency could not be set to "Never"', "external_action_taken": False}
+    if not await _select_rate_increase_never(
+        page,
+        getattr(params, "rate_increase_control_status", None),
+    ):
+        return {
+            "status": "live_form_mismatch",
+            "message": 'Rate increase frequency/status could not be verified as "Never".',
+            "external_action_taken": False,
+        }
+    highlight_status = getattr(params, "available_profile_highlights_status", None)
+    if params.profile_highlights and highlight_status not in {None, "complete"}:
+        return {
+            "status": "live_form_mismatch",
+            "message": "Approved profile-highlight enumeration was not complete.",
+            "external_action_taken": False,
+        }
     highlights_ok, highlights_error = await _select_profile_highlights(page, params.profile_highlights)
     if not highlights_ok:
-        return {"status": "error", "message": highlights_error, "external_action_taken": False}
+        return {
+            "status": "live_form_mismatch",
+            "message": highlights_error,
+            "external_action_taken": False,
+        }
 
-    # Submit the proposal
-    submit_btn = await page.query_selector(
-        '[data-test="submit-proposal"], button[type="submit"]:has-text("Submit proposal"), '
-        'button:has-text("Submit proposal")'
-    )
-    if not submit_btn:
+    commercial_ok, commercial_error = await _reinspect_approved_commercial_state(page, params)
+    if not commercial_ok:
+        return {
+            "status": "live_form_mismatch",
+            "message": commercial_error,
+            "external_action_taken": False,
+        }
+
+    # This is intentionally the first query for a first-stage submit control.
+    submit_btn = await _first_stage_submit_control(page)
+    if submit_btn is None:
         return {"status": "error", "message": "Submit proposal button not found", "external_action_taken": False}
 
     await _click(page, submit_btn)
@@ -2334,39 +2854,28 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
         timeout_seconds=2,
     )
     if immediate_confirmation["confirmed"]:
-        return {
-            "status": "submitted",
-            "connects_used": params.base_connects + params.boost_connects,
-            "message": "Proposal submitted and read back from Upwork",
-            "owner_system_readback": immediate_confirmation,
-            "external_action_taken": True,
-        }
-
-    if params.boost_connects:
-        boost_input = await _first_enabled(
-            page,
-            'input[name*="boost"], input[data-test*="boost"], [data-test*="boost"] input[type="number"]',
-        )
-        if not boost_input:
+        if params.boost_connects > 0:
             return {
                 "status": "unknown",
-                "message": "Approved boost control was not found after the first submission step.",
-                "external_action_taken": consequential_click_taken,
+                "message": (
+                    "Upwork stored the proposal before the approved boost step could be verified; "
+                    "do not retry automatically and do not treat the boost bid as spent."
+                ),
+                "owner_system_readback": immediate_confirmation,
+                "boost_spend_verified": False,
+                "external_action_taken": True,
             }
-        await boost_input.fill(str(params.boost_connects))
-    else:
-        no_boost = await page.query_selector(
-            'label:has-text("Don\'t boost"), button:has-text("Don\'t boost"), '
-            'label:has-text("No, thanks"), button:has-text("No, thanks")'
-        )
-        if no_boost:
-            await _click(page, no_boost)
+        return _confirmed_submission_result(params=params, readback=immediate_confirmation)
 
-    send_btn = await page.query_selector(
-        '[data-test="send-proposal"], button:has-text("Send for"), button:has-text("Send proposal")'
-    )
-    if send_btn:
-        await _click(page, send_btn)
+    send_btn, boost_error = await _configure_boost_step(page, params.boost_connects)
+    if send_btn is None:
+        return {
+            "status": "unknown",
+            "message": boost_error,
+            "boost_spend_verified": False,
+            "external_action_taken": consequential_click_taken,
+        }
+    await _click(page, send_btn)
 
     if params.bid is not None:
         await _acknowledge_fixed_price_warning(page)
@@ -2376,13 +2885,7 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
         approved_proposal_target,
     )
     if readback["confirmed"]:
-        return {
-            "status": "submitted",
-            "connects_used": params.base_connects + params.boost_connects,
-            "message": "Proposal submitted and read back from Upwork",
-            "owner_system_readback": readback,
-            "external_action_taken": True,
-        }
+        return _confirmed_submission_result(params=params, readback=readback)
     error_el = await page.query_selector('[data-test="error-message"], .error, .alert-danger')
     if error_el:
         error_text = (await error_el.text_content() or "").strip()
