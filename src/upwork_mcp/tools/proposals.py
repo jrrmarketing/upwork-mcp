@@ -991,6 +991,56 @@ async def _scoped_control_lines(
     return _dedupe_text(lines), visible_count
 
 
+_CURRENCY_MARKER = re.compile(
+    r"(?<![A-Za-z])(?:US\$|A\$|C\$|USD|GBP|EUR|AUD|CAD|\$|£|€)(?![A-Za-z])",
+    re.I,
+)
+_CURRENCY_AMOUNT = re.compile(
+    r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?(?![\w.,])"
+)
+
+
+def _normalize_currency_marker(value: str) -> str:
+    marker = value.upper()
+    return {
+        "US$": "USD",
+        "A$": "AUD",
+        "C$": "CAD",
+        "£": "GBP",
+        "€": "EUR",
+    }.get(marker, marker)
+
+
+def _exact_currency_amount(value: str) -> tuple[Decimal, str] | None:
+    """Parse exactly one adjacent currency marker and amount from scoped text."""
+
+    currencies = list(_CURRENCY_MARKER.finditer(value))
+    amounts = [
+        match
+        for match in _CURRENCY_AMOUNT.finditer(value)
+        if not value[match.end() :].lstrip().startswith("%")
+    ]
+    if len(currencies) != 1 or len(amounts) != 1:
+        return None
+    currency_match = currencies[0]
+    amount_match = amounts[0]
+    if currency_match.end() <= amount_match.start():
+        adjacent = not value[currency_match.end() : amount_match.start()].strip()
+    elif amount_match.end() <= currency_match.start():
+        adjacent = not value[amount_match.end() : currency_match.start()].strip()
+    else:
+        adjacent = False
+    if not adjacent:
+        return None
+    try:
+        amount = Decimal(amount_match.group(0).replace(",", ""))
+    except ArithmeticError:
+        return None
+    if not amount.is_finite() or amount < 0 or amount != amount.quantize(Decimal("0.01")):
+        return None
+    return amount.quantize(Decimal("0.01")), _normalize_currency_marker(currency_match.group(0))
+
+
 async def _inspect_fee_net_state(page) -> dict[str, Any]:
     """Read fee/net evidence only from exact scoped Upwork commercial controls."""
 
@@ -1005,21 +1055,21 @@ async def _inspect_fee_net_state(page) -> dict[str, Any]:
         semantic_label="You'll receive",
     )
     parsed = _inspect_fee_net_context("\n".join([*fee_lines, *net_lines]))
-    exact_amount = re.compile(
-        r"(?:[$£€]\s*\d[\d,.]*|\d[\d,]*\.\d{2}\b|\d[\d,.]*\s*(?:USD|GBP|EUR)\b)",
-        re.I,
-    )
+    fee_amount = _exact_currency_amount(fee_lines[0]) if len(fee_lines) == 1 else None
+    net_amount = _exact_currency_amount(net_lines[0]) if len(net_lines) == 1 else None
+    same_currency = bool(fee_amount and net_amount and fee_amount[1] == net_amount[1])
     if (
         fee_controls == 1
         and net_controls == 1
         and len(fee_lines) == 1
         and len(net_lines) == 1
-        and exact_amount.search(fee_lines[0])
-        and exact_amount.search(net_lines[0])
+        and fee_amount is not None
+        and net_amount is not None
+        and same_currency
     ):
         parsed["status"] = "complete"
         parsed["details"]["message"] = (
-            "Both exact scoped Upwork fee and freelancer net controls were read."
+            "Exact same-currency fee and freelancer net amounts were read from scoped controls."
         )
     elif fee_controls or net_controls:
         parsed["status"] = "incomplete"
@@ -1040,6 +1090,12 @@ async def _inspect_fee_net_state(page) -> dict[str, Any]:
         {
             "fee_controls_seen": fee_controls,
             "net_controls_seen": net_controls,
+            "fee_amount": format(fee_amount[0], ".2f") if fee_amount else None,
+            "net_amount": format(net_amount[0], ".2f") if net_amount else None,
+            "fee_currency": fee_amount[1] if fee_amount else None,
+            "net_currency": net_amount[1] if net_amount else None,
+            "amounts_unambiguous": fee_amount is not None and net_amount is not None,
+            "same_currency": same_currency,
             "evidence_scope": "exact_upwork_controls",
         }
     )
@@ -2341,10 +2397,9 @@ async def _select_fixed_payment_structure(
 
 
 async def _fill_one_exact_input(page, selectors: str, value: str) -> bool:
-    inputs = await _enabled_elements(page, selectors)
-    if len(inputs) != 1:
+    element = await _one_consequential_control(page, selectors)
+    if element is None:
         return False
-    element = inputs[0]
     try:
         await element.fill(value)
         live_value = str(await element.input_value()).replace(",", "").replace("$", "").strip()
@@ -2433,6 +2488,51 @@ def _fee_net_signature(snapshot: Mapping[str, Any]) -> tuple[str, tuple[str, ...
     if not isinstance(text, list) or not all(isinstance(value, str) for value in text):
         return None
     return str(status), tuple(_dedupe_text(text))
+
+
+def _fee_net_gross_reconciliation(
+    snapshot: Mapping[str, Any],
+    approved_gross: Decimal,
+) -> dict[str, Any]:
+    """Prove exact same-currency fee + net equals the approved gross."""
+
+    raw_details = snapshot.get("details")
+    details = dict(raw_details) if isinstance(raw_details, Mapping) else {}
+    try:
+        fee_amount = Decimal(str(details["fee_amount"]))
+        net_amount = Decimal(str(details["net_amount"]))
+    except (ArithmeticError, KeyError, ValueError):
+        fee_amount = None
+        net_amount = None
+    fee_currency = details.get("fee_currency")
+    net_currency = details.get("net_currency")
+    amounts_unambiguous = bool(
+        details.get("amounts_unambiguous") is True
+        and fee_amount is not None
+        and net_amount is not None
+    )
+    same_currency = bool(
+        details.get("same_currency") is True
+        and isinstance(fee_currency, str)
+        and fee_currency
+        and fee_currency == net_currency
+    )
+    total = (
+        (fee_amount + net_amount).quantize(Decimal("0.01"))
+        if amounts_unambiguous and fee_amount is not None and net_amount is not None
+        else None
+    )
+    approved = approved_gross.quantize(Decimal("0.01"))
+    return {
+        "amounts_unambiguous": amounts_unambiguous,
+        "same_currency": same_currency,
+        "currency": fee_currency if same_currency else None,
+        "fee_amount": format(fee_amount, ".2f") if fee_amount is not None else None,
+        "net_amount": format(net_amount, ".2f") if net_amount is not None else None,
+        "fee_plus_net": format(total, ".2f") if total is not None else None,
+        "approved_gross": format(approved, ".2f"),
+        "gross_matches": bool(amounts_unambiguous and same_currency and total == approved),
+    }
 
 
 async def _stable_scoped_fee_net_snapshot(page) -> tuple[dict[str, Any], bool]:
@@ -2575,6 +2675,13 @@ async def _inspect_proposal_commercial_preflight_on_page(
                     original_amount != approved_amount
                     and _fee_net_signature(inspection) == _fee_net_signature(original_fee_net)
                 )
+                gross_reconciliation = _fee_net_gross_reconciliation(
+                    inspection,
+                    approved_amount,
+                )
+                inspection.setdefault("details", {})["gross_reconciliation"] = (
+                    gross_reconciliation
+                )
                 if not approved_snapshot_stable:
                     inspection["status"] = "incomplete"
                     inspection.setdefault("details", {})["message"] = (
@@ -2584,6 +2691,12 @@ async def _inspect_proposal_commercial_preflight_on_page(
                     inspection["status"] = "incomplete"
                     inspection.setdefault("details", {})["message"] = (
                         "The approved price changed while fee/net evidence was read."
+                    )
+                elif gross_reconciliation["gross_matches"] is not True:
+                    inspection["status"] = "incomplete"
+                    inspection.setdefault("details", {})["message"] = (
+                        "The exact scoped fee and net amounts did not reconcile to the "
+                        "approved same-currency gross price."
                     )
                 elif stale_price_evidence:
                     inspection["status"] = "incomplete"
@@ -2685,13 +2798,16 @@ async def _configure_fixed_payment_terms(page, params: SubmitProposalParams) -> 
     if len(rows) != len(params.milestones):
         return False, "Live milestone rows differ from the exact approved milestones"
     for row, milestone in zip(rows, params.milestones, strict=True):
-        description = await row.query_selector(
+        description = await _one_consequential_control(
+            row,
             'input[name*="description"], textarea[name*="description"], [data-test*="description"] input'
         )
-        due_date = await row.query_selector(
+        due_date = await _one_consequential_control(
+            row,
             'input[name*="due"], input[name*="date"], [data-test*="due-date"] input'
         )
-        amount = await row.query_selector(
+        amount = await _one_consequential_control(
+            row,
             'input[name*="amount"], input[data-test*="amount"]'
         )
         if not description or not due_date or not amount:
@@ -3001,7 +3117,7 @@ async def _readback_profile_highlights(
 
 
 async def _readback_decimal_input(scope, selector: str, expected: Decimal) -> bool:
-    control = await _one_enabled(scope, selector)
+    control = await _one_consequential_control(scope, selector)
     if control is None:
         return False
     try:
@@ -3012,7 +3128,7 @@ async def _readback_decimal_input(scope, selector: str, expected: Decimal) -> bo
 
 
 async def _readback_text_input(scope, selector: str, expected: str) -> bool:
-    control = await _one_enabled(scope, selector)
+    control = await _one_consequential_control(scope, selector)
     if control is None:
         return False
     try:
@@ -3098,14 +3214,17 @@ async def _readback_fixed_payment_terms(page, params: SubmitProposalParams) -> b
         return False
     for row, milestone in zip(rows, params.milestones, strict=True):
         try:
-            description = await row.query_selector(
+            description = await _one_consequential_control(
+                row,
                 'input[name*="description"], textarea[name*="description"], '
                 '[data-test*="description"] input'
             )
-            due_date = await row.query_selector(
+            due_date = await _one_consequential_control(
+                row,
                 'input[name*="due"], input[name*="date"], [data-test*="due-date"] input'
             )
-            amount = await row.query_selector(
+            amount = await _one_consequential_control(
+                row,
                 'input[name*="amount"], input[data-test*="amount"]'
             )
             if not description or not due_date or not amount:
@@ -3212,7 +3331,7 @@ async def _reinspect_every_approved_live_state(
 
     answers = params.answers or []
     try:
-        answer_controls = await page.query_selector_all(_SCREENING_ANSWER_CONTROLS)
+        answer_controls = await _visible_enabled_elements(page, _SCREENING_ANSWER_CONTROLS)
     except Exception:
         return False, "The screening answer controls could not be re-read before submission"
     if len(answer_controls) != len(answers):
@@ -3634,7 +3753,7 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
         if not fixed_ok:
             return {"status": "error", "message": fixed_error, "external_action_taken": False}
 
-    cover_textarea = await _one_enabled(
+    cover_textarea = await _one_consequential_control(
         page,
         'textarea[data-test="cover-letter-input"], '
         '[data-test="cover-letter-input"] textarea, textarea[name="coverLetter"]',
@@ -3651,9 +3770,7 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
 
     # Answer screening questions only when the live field count still matches.
     answers = params.answers or []
-    question_inputs = await page.query_selector_all(
-        '[data-test="question-input"], .question-answer textarea, .screening-question textarea'
-    )
+    question_inputs = await _visible_enabled_elements(page, _SCREENING_ANSWER_CONTROLS)
     if len(question_inputs) != len(answers):
         return {
             "status": "live_form_mismatch",

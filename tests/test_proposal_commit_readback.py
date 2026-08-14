@@ -22,15 +22,16 @@ class _Text:
 
 
 class _Field:
-    def __init__(self, *, wrong_readback: str | None = None) -> None:
+    def __init__(self, *, wrong_readback: str | None = None, visible: bool = True) -> None:
         self.value = ""
         self.wrong_readback = wrong_readback
+        self.visible = visible
 
     async def is_enabled(self) -> bool:
         return True
 
     async def is_visible(self) -> bool:
-        return True
+        return self.visible
 
     async def fill(self, value: str) -> None:
         self.value = value
@@ -223,6 +224,46 @@ async def test_pre_submit_mismatch_never_queries_submit(
     result = await proposals._submit_proposal_on_page(_params(), page)
 
     assert result["status"] in {"error", "live_form_mismatch"}
+    assert result["external_action_taken"] is False
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden_control", ["rate", "cover", "answer"])
+async def test_hidden_enabled_proposal_input_never_queries_submit(
+    monkeypatch,
+    hidden_control: str,
+) -> None:
+    page = _CommitPage()
+    getattr(page, hidden_control).visible = False
+    _commercial_inspectors(monkeypatch)
+
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "live_form_mismatch"
+    assert result["external_action_taken"] is False
+    assert page.submit_queries == 0
+    assert page.submit_clicks == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hidden_control", ["rate", "cover", "answer"])
+async def test_control_hidden_before_final_readback_never_queries_submit(
+    monkeypatch,
+    hidden_control: str,
+) -> None:
+    page = _CommitPage()
+    _commercial_inspectors(monkeypatch)
+
+    async def hide_control(_page, _highlights):
+        getattr(page, hidden_control).visible = False
+        return True, None
+
+    monkeypatch.setattr(proposals, "_select_profile_highlights", hide_control)
+    result = await proposals._submit_proposal_on_page(_params(), page)
+
+    assert result["status"] == "live_form_mismatch"
     assert result["external_action_taken"] is False
     assert page.submit_queries == 0
     assert page.submit_clicks == 0

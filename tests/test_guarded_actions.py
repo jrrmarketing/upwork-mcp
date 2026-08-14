@@ -1817,6 +1817,90 @@ async def test_commercial_preflight_rejects_fee_snapshot_stale_from_different_pr
 
 
 @pytest.mark.asyncio
+async def test_commercial_preflight_rejects_fee_and_net_that_do_not_equal_gross() -> None:
+    class _WrongGrossPage(_CommercialPreflightPage):
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._FEE_CONTROL_SELECTOR:
+                return [
+                    _DynamicText(
+                        lambda: "$5.00" if self.price == Decimal("50") else "$6.00"
+                    )
+                ]
+            if selector == proposals._NET_CONTROL_SELECTOR:
+                return [
+                    _DynamicText(
+                        lambda: "$45.00" if self.price == Decimal("50") else "$54.00"
+                    )
+                ]
+            return await super().query_selector_all(selector)
+
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        _WrongGrossPage(),
+    )
+
+    reconciliation = result["fee_net_details"]["gross_reconciliation"]
+    assert reconciliation["fee_amount"] == "6.00"
+    assert reconciliation["net_amount"] == "54.00"
+    assert reconciliation["fee_plus_net"] == "60.00"
+    assert reconciliation["approved_gross"] == "63.00"
+    assert reconciliation["gross_matches"] is False
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_price_amount"] is None
+    assert result["price_restored"] is True
+
+
+def test_exact_currency_amount_ignores_percent_but_rejects_multiple_prices() -> None:
+    assert proposals._exact_currency_amount("10% fee $6.30") == (Decimal("6.30"), "$")
+    assert proposals._exact_currency_amount("$6.30 or $7.00") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_evidence", ["ambiguous", "mixed_currency"])
+async def test_commercial_preflight_rejects_ambiguous_or_mixed_currency_amounts(
+    bad_evidence: str,
+) -> None:
+    class _BadCurrencyPage(_CommercialPreflightPage):
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._FEE_CONTROL_SELECTOR:
+                if bad_evidence == "ambiguous":
+                    return [
+                        _DynamicText(
+                            lambda: f"${self.price * Decimal('0.10'):.2f} or "
+                            f"${self.price * Decimal('0.11'):.2f}"
+                        )
+                    ]
+                return [_DynamicText(lambda: f"${self.price * Decimal('0.10'):.2f}")]
+            if selector == proposals._NET_CONTROL_SELECTOR:
+                symbol = "$" if bad_evidence == "ambiguous" else "£"
+                return [
+                    _DynamicText(lambda: f"{symbol}{self.price * Decimal('0.90'):.2f}")
+                ]
+            return await super().query_selector_all(selector)
+
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        _BadCurrencyPage(),
+    )
+
+    reconciliation = result["fee_net_details"]["gross_reconciliation"]
+    assert reconciliation["gross_matches"] is False
+    if bad_evidence == "ambiguous":
+        assert reconciliation["amounts_unambiguous"] is False
+    else:
+        assert reconciliation["same_currency"] is False
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_price_amount"] is None
+    assert result["price_restored"] is True
+
+
+@pytest.mark.asyncio
 async def test_commercial_preflight_rejects_unstable_exact_restoration() -> None:
     class _UnstableRestorePrice(_CommercialPrice):
         def __init__(self, page: _CommercialPreflightPage) -> None:
@@ -1867,6 +1951,7 @@ async def test_commercial_preflight_binds_entered_price_and_restores_original() 
     assert result["fee_net_status"] == "complete"
     assert result["fee_net_price_amount"] == "63.00"
     assert result["fee_net_source"] == "scoped_reversible_price_preflight"
+    assert result["fee_net_details"]["gross_reconciliation"]["gross_matches"] is True
     assert result["price_restored"] is True
     assert result["external_action_taken"] is False
     assert page.price_control.value == "50"

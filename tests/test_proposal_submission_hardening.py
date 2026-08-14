@@ -525,6 +525,9 @@ class _AmountInput:
     async def is_enabled(self) -> bool:
         return True
 
+    async def is_visible(self) -> bool:
+        return True
+
     async def fill(self, value: str) -> None:
         self.value = value
 
@@ -647,6 +650,10 @@ class _MilestoneRow:
         if "amount" in selector:
             return self.amount
         return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        control = await self.query_selector(selector)
+        return [control] if control is not None else []
 
 
 class _MilestonePage:
