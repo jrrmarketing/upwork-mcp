@@ -163,7 +163,7 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         and job_title
         and form_title == job_title
         and form.get("job_type") == expected_job_type
-        and analysis["recommendation"] != "skip"
+        and analysis["recommendation"] not in {"skip", "scope_review"}
         and not errors
         and params.duration in (form.get("duration_options") or [])
         and form.get("duration_options_status") == "complete"
@@ -283,8 +283,10 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         if params.payment_structure not in available_structures:
             errors.append("The approved fixed-price payment structure is not available in the live form")
 
-    if analysis["recommendation"] == "skip":
-        errors.append("The JRR screening policy classifies this job as skip")
+    if analysis["recommendation"] in {"skip", "scope_review"}:
+        errors.append(
+            "The JRR screening policy requires skip or manual scope review before this job can be prepared"
+        )
     if params.rate is not None and params.bid is not None:
         errors.append("Choose either an hourly rate or a fixed bid, not both")
     if params.rate is None and params.bid is None:
@@ -459,7 +461,14 @@ async def find_opportunities(
         if include_skips or analysis["recommendation"] != "skip":
             ranked.append({"job": details, "analysis": analysis, "local_ledger": ledger})
 
-    order = {"strong_fit": 0, "price_conversion": 1, "fit": 2, "speculative": 3, "skip": 4}
+    order = {
+        "strong_fit": 0,
+        "price_conversion": 1,
+        "fit": 2,
+        "speculative": 3,
+        "scope_review": 4,
+        "skip": 5,
+    }
     ranked.sort(
         key=lambda item: (
             order.get(item["analysis"]["recommendation"], 9),

@@ -9,7 +9,7 @@ client, spends Connects, or changes an Upwork record is prepared and approved se
 2. Hydrate the full job before judging it. Record scope, hours, duration, price, proposals,
    interviews, invitations, Connect cost, client spend, hires, hire rate, average paid rate,
    rating, and payment verification.
-3. Classify it as `strong_fit`, `fit`, `price_conversion`, `speculative`, or `skip` with
+3. Classify it as `strong_fit`, `fit`, `price_conversion`, `speculative`, `scope_review`, or `skip` with
    separate reasons for service fit, client quality, reachability, pricing, and proof.
 4. Inspect one exact `/jobs/~<job-id>` posting and its matching canonical
    `/nx/proposals/job/~<job-id>/apply` form. Bind the job ID, live title, job type, form URL,
@@ -142,6 +142,8 @@ partial duration menu is never treated as complete.
 Default to no boost. Consider a boost only when all of these are true:
 
 - `strong_fit`
+- `scope_review` when unsupported-scope wording is not explicit enough to classify safely; this
+  state cannot prepare a proposal or recommend a boost until the scope is manually resolved
 - strong client economics
 - exact audited proof match
 - fewer than 20 proposals or similarly favourable reachability

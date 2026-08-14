@@ -261,6 +261,20 @@ def test_internal_software_use_does_not_hide_a_separate_licensed_product_model()
         "Our app helps criminal defense lawyers.",
         "We sell an AI tool to criminal defense attorneys.",
         "Our CRM helps family law firms.",
+        "We market a case management solution to family law firms.",
+        "We offer an AI assistant to family law firms.",
+        "We run an app that connects criminal defense attorneys with leads.",
+        "We help lawyers manage cases through our web application.",
+        "Our online application helps family law firms.",
+        "We are a legal technology provider for family law firms.",
+        "We created a portal for criminal defense attorneys.",
+        "We provide an AI assistant for plumbers.",
+        "We make workflow automation for family law firms.",
+        "Our family law CRM solution is sold by subscription.",
+        "We developed a case-management solution for criminal defense firms.",
+        "We're a software vendor helping plumbers.",
+        "Our cloud service helps family law practices manage matters.",
+        "We offer an online product to criminal defense lawyers.",
     ],
 )
 def test_marketed_software_models_never_borrow_law_firm_proof(description: str):
@@ -305,16 +319,40 @@ def test_legal_practice_software_used_internally_does_not_erase_law_firm_proof()
         "We license legal software for internal use.",
         "We implemented legal practice management software in-house.",
         "Our ServiceTitan platform is used by our technicians internally.",
+        "We subscribe to legal software internally.",
+        "Our legal practice-management platform is for internal operations.",
+        "We integrate with a legal software platform for tracking.",
+        "We are migrating to legal practice management software.",
+        "Our attorneys work in legal practice management software.",
+        "We purchase legal practice management software for our team.",
+        "We adopted legal practice management software internally.",
+        "We run our cases through legal practice management software.",
+        "Legal software powers our internal casework.",
+        "We have legal practice management software for internal operations.",
+        "Our internal CRM helps our family law team.",
+        "We use an internal CRM that helps our family law team.",
+        "Our internal software helps our family law team.",
+        "The software we use internally helps our criminal defense attorneys.",
+        "We built an internal app for our attorneys.",
+        "We license legal software to our staff for internal use.",
+        "We provide legal software to our internal team.",
+        "We operate legal software internally.",
+        "We developed legal software for our own firm.",
     ],
 )
 def test_explicit_internal_product_language_preserves_real_service_proof(description: str):
     plumbing = "servicetitan" in description.casefold()
+    family = "family law" in description.casefold() and "criminal defense" not in description.casefold()
     result = analyze_job(
         {
             "title": (
                 "Google Ads for a plumbing company"
                 if plumbing
-                else "Google Ads for a criminal defense law firm"
+                else (
+                    "Google Ads for a family law firm"
+                    if family
+                    else "Google Ads for a criminal defense law firm"
+                )
             ),
             "description": description,
             "job_type": "hourly",
@@ -325,10 +363,44 @@ def test_explicit_internal_product_language_preserves_real_service_proof(descrip
         }
     )
 
-    expected_key = "priority-one-plumbing" if plumbing else "drd-criminal-law"
+    expected_key = (
+        "priority-one-plumbing"
+        if plumbing
+        else ("cage-and-miles-family-law" if family else "drd-criminal-law")
+    )
     assert result.case_studies[0]["key"] == expected_key
     assert result.case_studies[0]["match_strength"] == "exact"
     assert result.boost["recommendation"] == "inspect_live_auction"
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "We built the platform for our internal team and now offer it to family law firms.",
+        "We use the platform internally and provide access to criminal defense law firms.",
+        "We license software internally and offer subscriptions to family law firms.",
+        "Our staff use the software internally and family law clients subscribe to it.",
+        "The app is used by our team and offered commercially to criminal defense firms.",
+        "We use our CRM internally and charge family law firms to access it.",
+    ],
+)
+def test_mixed_internal_and_marketed_product_models_never_borrow_service_proof(
+    description: str,
+):
+    result = analyze_job(
+        {
+            "title": "Google Ads specialist",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert not any(study["match_strength"] == "exact" for study in result.case_studies)
+    assert result.boost["recommendation"] == "no_boost"
 
 
 def test_specific_plumbing_proof_outranks_generic_home_services_proof():
@@ -450,6 +522,32 @@ def test_unknown_competition_never_recommends_a_boost():
     assert result.boost["max_extra_connects"] == 0
 
 
+def test_ambiguous_unsupported_scope_requires_manual_review_and_never_boosts():
+    result = analyze_job(
+        {
+            "title": "Google Ads audit for family law firm",
+            "description": (
+                "Paid search lead generation. Familiarity with GTM would be useful."
+            ),
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.recommendation == "scope_review"
+    assert result.blockers == []
+    assert result.proposal_plan["requires_scope_review"] is True
+    assert any(
+        "Manual scope review required" in boundary
+        for boundary in result.scope_boundaries
+    )
+    assert result.boost["recommendation"] == "no_boost"
+    assert result.boost["max_extra_connects"] == 0
+
+
 def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
     for description in (
         "Do not use GTM; use WhatConverts for offline conversion outcomes.",
@@ -519,6 +617,40 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "GTM doesn't need to be used.",
         "GTM is preferred, but we're open to WhatConverts.",
         "Applicants need not know GTM.",
+        "GTM may be omitted.",
+        "GTM can be skipped.",
+        "GTM is not part of this job.",
+        "GTM is prohibited.",
+        "GTM is forbidden.",
+        "GTM is a nice-to-have, not a must-have.",
+        "Do not touch GTM.",
+        "Don't make any GTM changes.",
+        "You are not responsible for GTM.",
+        "GTM isn't your responsibility.",
+        "Either GTM or WhatConverts works for us.",
+        "GTM or WhatConverts, your choice.",
+        "You can choose between GTM and WhatConverts.",
+        "WhatConverts is an acceptable substitute for GTM.",
+        "WhatConverts can replace GTM.",
+        "We are open to GTM or WhatConverts.",
+        "We don't mind whether you use GTM or WhatConverts.",
+        "GTM experience isn't a dealbreaker.",
+        "Lack of GTM experience won't disqualify applicants.",
+        "Candidates are welcome without GTM.",
+        "Anyone can apply, with or without GTM.",
+        "We accept applicants regardless of GTM experience.",
+        "GTM knowledge does not affect eligibility.",
+        "No GTM experience? You can still apply.",
+        "GTM experience is a bonus.",
+        "This role is freelance, not full-time.",
+        "Contract basis, not full-time.",
+        "Part-time only; no full-time work.",
+        "No full-time requirement.",
+        "There is no expectation of full-time availability.",
+        "Full-time isn't the only option; part-time works too.",
+        "Full-time is off the table.",
+        "This will never become full-time.",
+        "We cannot offer full-time.",
         "This ecommerce account does not need purchase tracking; Google Ads management only.",
     ):
         result = analyze_job(
@@ -575,6 +707,26 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "GTM is not out of scope.",
         "GTM is non-optional.",
         "We don't want candidates who can't use GTM.",
+        "We don't need someone who can't use GTM.",
+        "We don't use GTM yet because we need it implemented.",
+        "We aren't using GTM now; this needs to be configured.",
+        "We don't use GTM and expect you to install it.",
+        "We're not using GTM yet. Please add it.",
+        "We don't use GTM, so add it.",
+        "We aren't using GTM because you will implement it.",
+        "We are not using GTM yet and would like you to configure it.",
+        "We aren't using GTM until you configure it.",
+        "GTM is not excluded.",
+        "GTM is never optional.",
+        "GTM is by no means optional.",
+        "GTM is hardly optional.",
+        "GTM is anything but optional.",
+        "GTM isn't merely optional.",
+        "GTM is no longer optional.",
+        "GTM is not just optional.",
+        "GTM cannot be considered optional.",
+        "GTM is compulsory rather than optional.",
+        "GTM is a must, not optional.",
     ],
 )
 def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):

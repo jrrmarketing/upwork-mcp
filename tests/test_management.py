@@ -468,6 +468,42 @@ async def test_prepare_proposal_requires_complete_live_auction_for_nonzero_boost
 
 
 @pytest.mark.asyncio
+async def test_prepare_proposal_refuses_ambiguous_scope_until_manual_review(
+    monkeypatch,
+    tmp_path,
+    live_read_stubs,
+) -> None:
+    async def ambiguous_job(_params):
+        return {
+            **_job(),
+            "description": (
+                "Paid search lead generation. Familiarity with GTM would be useful."
+            ),
+        }
+
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(management, "get_job_details", ambiguous_job)
+    result = await management.prepare_proposal(
+        management.PrepareProposalParams(
+            job_url="https://www.upwork.com/jobs/~law123",
+            cover_letter=(
+                "Hey, more than happy to take a look at this for you.\n\n"
+                "I'd rather inspect the account before forming an opinion."
+            ),
+            rate=63,
+            duration="1 to 3 months",
+            profile_highlights=["Google Ads Search Certification"],
+        )
+    )
+
+    assert result["analysis"]["recommendation"] == "scope_review"
+    assert result["analysis"]["boost"]["recommendation"] == "no_boost"
+    assert result["ready_for_owner_approval"] is False
+    assert result["prepared_action"] is None
+    assert any("manual scope review" in error for error in result["errors"])
+
+
+@pytest.mark.asyncio
 async def test_find_opportunities_canonicalizes_tracking_variants_before_hydration(monkeypatch) -> None:
     detail_calls: list[str] = []
 
