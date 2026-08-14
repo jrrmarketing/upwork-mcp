@@ -14,9 +14,8 @@ import upwork_mcp.browser.client as client
 @pytest.fixture(autouse=True)
 def private_browser_state(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(client, "PROFILE_DIR", tmp_path / "chrome-profile")
-    monkeypatch.setattr(client, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(client, "BROWSER_OPERATION_LOCK", tmp_path / "browser-operation.lock")
+    monkeypatch.setattr(client, "CDP_ENDPOINT", "http://127.0.0.1:9222")
 
 
 class FakeCDPSession:
@@ -105,11 +104,13 @@ class FakeContext:
 class FakeBrowser:
     def __init__(self, contexts: list[FakeContext]):
         self.contexts = contexts
+        self.created_contexts = 0
 
     def is_connected(self) -> bool:
         return True
 
     async def new_context(self) -> FakeContext:
+        self.created_contexts += 1
         context = FakeContext([])
         self.contexts.append(context)
         return context
@@ -175,7 +176,7 @@ def install_fake_playwright(monkeypatch, chromium) -> FakePlaywright:
         "async_playwright",
         lambda: FakePlaywrightStarter(playwright),
     )
-    monkeypatch.setattr(client, "chrome_debug_status", lambda: "dedicated")
+    monkeypatch.setattr(client, "chrome_debug_status", lambda: "available")
     return playwright
 
 
@@ -223,34 +224,19 @@ def test_freelancer_context_fails_closed(
     assert client._is_expected_freelancer_snapshot(url, body, hrefs) is expected
 
 
-@pytest.mark.asyncio
-async def test_sync_chrome_wait_does_not_nest_running_event_loop(monkeypatch, tmp_path):
-    states = iter(["stopped", "stopped", "dedicated"])
-    command = []
-    sleeps = []
+def test_attach_endpoint_must_be_local_and_credential_free(monkeypatch) -> None:
+    for unsafe in (
+        "https://example.com:9222",
+        "http://user:pass@127.0.0.1:9222",
+        "http://127.0.0.1:9222/devtools",
+        "file:///tmp/browser",
+    ):
+        monkeypatch.setattr(client, "CDP_ENDPOINT", unsafe)
+        with pytest.raises(RuntimeError, match="credential-free loopback"):
+            client._validated_cdp_endpoint()
 
-    monkeypatch.setattr(client, "PROFILE_DIR", tmp_path / "profile")
-    monkeypatch.setattr(client, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(client, "LOG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(client, "BROWSER_OPERATION_LOCK", tmp_path / "browser.lock")
-    monkeypatch.setattr(client, "find_chrome", lambda: "/fake/chrome")
-    monkeypatch.setattr(
-        client.subprocess,
-        "Popen",
-        lambda args, **_kwargs: command.extend(args),
-    )
-    monkeypatch.setattr(
-        client,
-        "chrome_debug_status",
-        lambda: next(states),
-    )
-    monkeypatch.setattr(client.time, "sleep", sleeps.append)
-
-    assert client.start_chrome_with_debug() is True
-    assert sleeps == [0.5]
-    assert "--enable-automation" in command
-    assert "--disable-blink-features=AutomationControlled" in command
-    assert "--window-size=1,1" in command
+    monkeypatch.setattr(client, "CDP_ENDPOINT", "http://localhost:9222")
+    assert client._validated_cdp_endpoint() == "http://localhost:9222"
 
 
 @pytest.mark.asyncio
@@ -289,6 +275,7 @@ async def test_start_creates_owned_tab_instead_of_reusing_unrelated_page(monkeyp
     assert page is not unrelated
     assert page.url == "about:blank"
     assert context.created_pages == 1
+    assert browser.created_contexts == 0
     assert upwork._page_is_owned is True
 
 
@@ -307,32 +294,22 @@ async def test_start_uses_no_defaults_when_patchright_supports_it(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_async_start_runs_sync_chrome_launcher_in_worker(monkeypatch):
-    context = FakeContext([])
-    browser = FakeBrowser([context])
-    chromium = FakeChromium(browser)
-    playwright = FakePlaywright(chromium)
-    launcher_calls = []
+async def test_start_fails_closed_without_browser_and_never_launches(monkeypatch):
     monkeypatch.setattr(client, "chrome_debug_status", lambda: "stopped")
 
-    def fake_launcher():
-        launcher_calls.append(True)
-        return True
+    with pytest.raises(RuntimeError, match="attach-only"):
+        await client.UpworkBrowser().start()
 
-    async def no_wait(_seconds):
-        return None
 
-    monkeypatch.setattr(client, "_start_chrome_with_debug_locked", fake_launcher)
-    monkeypatch.setattr(client.asyncio, "sleep", no_wait)
-    monkeypatch.setattr(
-        client,
-        "async_playwright",
-        lambda: FakePlaywrightStarter(playwright),
-    )
+@pytest.mark.asyncio
+async def test_start_never_creates_a_browser_context(monkeypatch):
+    browser = FakeBrowser([])
+    install_fake_playwright(monkeypatch, FakeChromium(browser))
 
-    await client.UpworkBrowser().start()
+    with pytest.raises(RuntimeError, match="refusing to create a new one"):
+        await client.UpworkBrowser().start()
 
-    assert launcher_calls == [True]
+    assert browser.created_contexts == 0
 
 
 @pytest.mark.asyncio
@@ -391,23 +368,6 @@ async def test_close_disconnects_patchright_without_closing_owner_page(monkeypat
     assert upwork._context is None
     assert upwork._page is None
     assert upwork._started is False
-
-
-def test_listener_must_use_exact_dedicated_profile(monkeypatch):
-    monkeypatch.setattr(client, "_listener_pids", lambda: [123])
-    monkeypatch.setattr(
-        client,
-        "_process_command",
-        lambda _pid: f"Google Chrome --remote-debugging-port=9222 --user-data-dir={client.PROFILE_DIR}",
-    )
-    assert client.dedicated_chrome_pids() == [123]
-
-    monkeypatch.setattr(
-        client,
-        "_process_command",
-        lambda _pid: "Google Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/other-profile",
-    )
-    assert client.dedicated_chrome_pids() == []
 
 
 def test_file_lock_and_state_are_owner_only():
@@ -481,32 +441,10 @@ async def test_browser_diagnostics_never_write_stdout(capsys):
 
 
 @pytest.mark.asyncio
-async def test_browser_refuses_mismatched_debug_listener(monkeypatch, capsys):
-    monkeypatch.setattr(client, "chrome_debug_status", lambda: "mismatched")
+async def test_browser_refuses_unsafe_debug_endpoint(monkeypatch, capsys):
+    monkeypatch.setattr(client, "chrome_debug_status", lambda: "unsafe")
 
-    with pytest.raises(RuntimeError, match="not using the dedicated Upwork profile"):
+    with pytest.raises(RuntimeError, match="not a safe loopback URL"):
         await client.UpworkBrowser().start()
 
     assert capsys.readouterr().out == ""
-
-
-def test_clear_saved_session_stops_browser_before_removing_profile(monkeypatch):
-    client.PROFILE_DIR.mkdir(parents=True)
-    (client.PROFILE_DIR / "Cookies").write_text("private", encoding="utf-8")
-    calls = []
-    monkeypatch.setattr(client, "chrome_debug_status", lambda: "dedicated")
-    monkeypatch.setattr(client, "_stop_dedicated_chrome_locked", lambda: calls.append("stop") or True)
-
-    assert client.clear_saved_session() is True
-    assert calls == ["stop"]
-    assert not client.PROFILE_DIR.exists()
-
-
-def test_clear_saved_session_refuses_mismatched_listener(monkeypatch):
-    client.PROFILE_DIR.mkdir(parents=True)
-    monkeypatch.setattr(client, "chrome_debug_status", lambda: "mismatched")
-
-    with pytest.raises(RuntimeError, match="Refusing logout"):
-        client.clear_saved_session()
-
-    assert client.PROFILE_DIR.exists()

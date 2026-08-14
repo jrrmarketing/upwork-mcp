@@ -1,9 +1,8 @@
 #!/bin/bash
-# Cursor MCP entrypoint: ensure background Chrome is up, then start upwork-mcp.
+# MCP entrypoint. Browser access is attach-only and never launches Chrome.
 set -euo pipefail
 umask 077
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-"${ROOT}/scripts/start-chrome-daemon.sh"
 cd "$ROOT"
 exec uv run upwork-mcp "$@"

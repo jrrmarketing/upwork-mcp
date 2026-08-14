@@ -11,19 +11,19 @@ live_readonly = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_profile_dir_exists():
-    """Test that profile directory can be created."""
-    from upwork_mcp.browser.client import PROFILE_DIR
+async def test_private_state_dir_exists():
+    """Test that the private operation state directory can be created."""
+    from upwork_mcp.browser.client import STATE_DIR
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    assert PROFILE_DIR.exists()
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    assert STATE_DIR.exists()
 
 
 @pytest.mark.asyncio
 @pytest.mark.upwork_live_readonly
 @live_readonly
-async def test_browser_launch(browser):
-    """Test that browser can launch."""
+async def test_browser_attach(browser):
+    """Test that the client can attach without launching a browser."""
     page = await browser.start()
     assert page is not None
 

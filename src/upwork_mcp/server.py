@@ -584,10 +584,18 @@ async def upwork_close_session() -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="JRR Upwork MCP")
-    parser.add_argument("--login", action="store_true", help="Open the owner login flow")
-    parser.add_argument("--check", action="store_true", help="Check the saved Upwork session")
-    parser.add_argument("--logout", action="store_true", help="Clear the saved Upwork session")
-    parser.add_argument("--no-headless", action="store_true", help="Compatibility option; CDP uses owner Chrome")
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="Open a login tab in an already attached owner Chrome window",
+    )
+    parser.add_argument("--check", action="store_true", help="Check the attached Upwork session")
+    parser.add_argument(
+        "--logout",
+        action="store_true",
+        help="Disconnect automation without closing Chrome or deleting browser data",
+    )
+    parser.add_argument("--no-headless", action="store_true", help="Compatibility option; browser is attach-only")
     parser.add_argument("--timeout", type=int, default=30000)
     parser.add_argument("--transport", choices=["stdio"], default="stdio")
     args = parser.parse_args()

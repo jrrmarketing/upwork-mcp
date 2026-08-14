@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path for local testing
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from upwork_mcp.browser.client import UpworkBrowser, PROFILE_DIR
+from upwork_mcp.browser.client import STATE_DIR, UpworkBrowser
 
 
 async def run_tests():
@@ -21,28 +21,28 @@ async def run_tests():
     print("=" * 60)
     print()
 
-    # Test 1: Profile directory
-    print("Test 1: Profile Directory...")
+    # Test 1: Private local state
+    print("Test 1: Private State Directory...")
     try:
-        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        if PROFILE_DIR.exists():
-            results.append(("Profile Directory", "PASS", f"Path: {PROFILE_DIR}"))
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if STATE_DIR.exists():
+            results.append(("State Directory", "PASS", f"Path: {STATE_DIR}"))
         else:
-            results.append(("Profile Directory", "FAIL", "Could not create directory"))
+            results.append(("State Directory", "FAIL", "Could not create directory"))
     except Exception as e:
-        results.append(("Profile Directory", "FAIL", str(e)))
+        results.append(("State Directory", "FAIL", str(e)))
 
-    # Test 2: Browser Launch
-    print("Test 2: Browser Launch...")
+    # Test 2: Existing browser attachment
+    print("Test 2: Browser Attachment...")
     try:
         browser = UpworkBrowser(headless=True, timeout=30000)
         page = await browser.start()
         if page:
-            results.append(("Browser Launch", "PASS", "Page object returned"))
+            results.append(("Browser Attachment", "PASS", "Page object returned"))
         else:
-            results.append(("Browser Launch", "FAIL", "No page returned"))
+            results.append(("Browser Attachment", "FAIL", "No page returned"))
     except Exception as e:
-        results.append(("Browser Launch", "FAIL", str(e)))
+        results.append(("Browser Attachment", "FAIL", str(e)))
         print_results(results)
         return results
 
