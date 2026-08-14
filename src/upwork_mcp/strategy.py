@@ -264,16 +264,24 @@ def _contains_bounded_term(text: str, term: str) -> bool:
 def _match_is_negated(text: str, start: int, end: int) -> bool:
     """Recognize explicit same-clause exclusions around a scope phrase."""
 
+    # Curly and straight apostrophes have the same code-point width, so this
+    # normalization preserves the match offsets supplied by ``re.finditer``.
+    text = text.replace("’", "'")
     clause_boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
     prefix = re.split(clause_boundary, text[max(0, start - 120) : start], flags=re.I)[-1]
     suffix = re.split(clause_boundary, text[end : end + 120], flags=re.I)[0]
     excluded_actions = r"(?:using|requiring|needing|including|implementing|managing|running|supporting)"
+    excluded_verbs = r"(?:use|require|need|include|implement|manage|run|support)"
     negated_prefix = re.search(
         r"(?:"
         r"\b(?:no\s+need\s+for|not\s+looking\s+for|without|rather\s+than)"
         r"|\b(?:no|not)(?:\s+(?:a|an|the))?"
         r"|\b(?:is|are|was|were)\s+not(?:\s+(?:a|an|the))?"
+        r"|\b(?:isn't|aren't|wasn't|weren't)(?:\s+(?:a|an|the))?"
         rf"|\b(?:am|is|are|was|were)\s+not\s+{excluded_actions}(?:\s+(?:a|an|the))?"
+        rf"|\b(?:isn't|aren't|wasn't|weren't)\s+{excluded_actions}(?:\s+(?:a|an|the))?"
+        rf"|\b(?:am|is|are|was|were)\s+not\s+(?:planning|going|intending)\s+to\s+{excluded_verbs}"
+        rf"|\b(?:isn't|aren't|wasn't|weren't)\s+(?:planning|going|intending)\s+to\s+{excluded_verbs}"
         rf"|\b(?:will|would|should)\s+not\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
         rf"|\b(?:won't|wouldn't|shouldn't)\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
         rf"|\bnot\s+{excluded_actions}(?:\s+(?:a|an|the))?"
@@ -289,9 +297,12 @@ def _match_is_negated(text: str, start: int, end: int) -> bool:
         return True
     return bool(
         re.match(
-            r"^\s*(?:not|(?:is|are|was|were)\s+not|isn't|aren't|wasn't|weren't|"
+            r"^\s*,?\s*(?:which\s+)?(?:"
+            r"(?:not|(?:is|are|was|were)\s+not|isn't|aren't|wasn't|weren't|"
             r"will\s+not\s+be|won't\s+be|would\s+not\s+be|wouldn't\s+be)\s+"
-            r"(?:required|needed|included|used|managed|implemented|part of|in scope)\b",
+            r"(?:required|needed|included|used|managed|implemented|part of|in scope)"
+            r"|(?:is|are|was|were)\s+(?:unnecessary|optional|excluded|out of scope)"
+            r")\b",
             suffix,
             re.I,
         )
