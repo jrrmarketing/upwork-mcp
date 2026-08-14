@@ -1,5 +1,6 @@
 """Offline integration tests for proposal preparation."""
 import pytest
+from pydantic import ValidationError
 
 from upwork_mcp.tools import management, proposals
 
@@ -58,6 +59,76 @@ def _form():
         "rate_increase_control_status": "complete",
         "external_action_taken": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("updates", "error_fragment"),
+    [
+        ({"answers": ["  "]}, "answers"),
+        ({"profile_highlights": ["  "]}, "highlights"),
+        (
+            {
+                "profile_highlights": [
+                    "Google Ads Search Certification",
+                    " google ads search certification ",
+                ]
+            },
+            "duplicates",
+        ),
+        ({"duration": "Whatever Upwork selected"}, "duration"),
+    ],
+)
+def test_prepare_schema_rejects_blank_duplicate_or_commit_incompatible_lists(
+    updates,
+    error_fragment,
+) -> None:
+    values = {
+        "job_url": "https://www.upwork.com/jobs/~law123",
+        "cover_letter": "Exact approved copy",
+        "rate": 63,
+        "duration": "1 to 3 months",
+        "profile_highlights": ["Google Ads Search Certification"],
+    }
+    values.update(updates)
+    with pytest.raises(ValidationError, match=error_fragment):
+        management.PrepareProposalParams(**values)
+
+
+def test_prepare_schema_rejects_unsafe_price_configuration_and_multiple_milestones() -> None:
+    common = {
+        "job_url": "https://www.upwork.com/jobs/~law123",
+        "cover_letter": "Exact approved copy",
+        "duration": "1 to 3 months",
+        "profile_highlights": ["Google Ads Search Certification"],
+    }
+    with pytest.raises(ValidationError, match="approved hourly rate"):
+        management.PrepareProposalParams(**common, rate=49, minimum_hourly_rate=50)
+    with pytest.raises(ValidationError, match="profile_hourly_rate"):
+        management.PrepareProposalParams(
+            **common,
+            rate=50,
+            profile_hourly_rate=49,
+            minimum_hourly_rate=50,
+        )
+    with pytest.raises(ValidationError, match="at most 1 item"):
+        management.PrepareProposalParams(
+            **common,
+            bid=500,
+            payment_structure="by_milestone",
+            milestones=[
+                {"description": "Audit", "due_date": "2026-09-01", "amount": 250},
+                {"description": "Review", "due_date": "2026-09-08", "amount": 250},
+            ],
+        )
+    with pytest.raises(ValidationError, match="by_project terms only"):
+        management.PrepareProposalParams(
+            **common,
+            bid=500,
+            payment_structure="by_milestone",
+            milestones=[
+                {"description": "Audit", "due_date": "2026-09-01", "amount": 500},
+            ],
+        )
 
 
 @pytest.fixture
@@ -284,3 +355,39 @@ async def test_prepare_proposal_requires_complete_live_auction_for_nonzero_boost
     assert result["ready_for_owner_approval"] is False
     assert result["prepared_action"] is None
     assert any("complete live boost-auction" in error for error in result["errors"])
+    assert (
+        "Positive-boost proposal preparation is disabled until the live Upwork flow can prove that the first Submit click is non-consequential."
+        in result["errors"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_opportunities_canonicalizes_tracking_variants_before_hydration(monkeypatch) -> None:
+    detail_calls: list[str] = []
+
+    async def fake_search(params):
+        return [
+            {
+                "url": f"https://www.upwork.com/jobs/~law123?source={params.search_mode}",
+                "search_mode": params.search_mode,
+            }
+        ]
+
+    async def fake_details(params):
+        detail_calls.append(params.job_url)
+        return _job()
+
+    monkeypatch.setattr(management, "search_jobs", fake_search)
+    monkeypatch.setattr(management, "get_job_details", fake_details)
+    monkeypatch.setattr(
+        management,
+        "record_screening",
+        lambda *_args, **_kwargs: {"recorded": True},
+    )
+
+    result = await management.find_opportunities("google ads", include_skips=True)
+
+    assert result["unique_jobs_reviewed"] == 1
+    assert result["invalid_job_urls_skipped"] == 0
+    assert detail_calls == ["https://www.upwork.com/jobs/~law123"]
+    assert result["opportunities"][0]["job"]["url"] == "https://www.upwork.com/jobs/~law123"

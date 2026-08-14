@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from upwork_mcp.strategy import (
     PricingContext,
     analyze_job,
@@ -68,6 +70,21 @@ def test_service_overlap_alone_does_not_expose_an_unrelated_case_study():
     assert result.case_studies == []
 
 
+def test_proof_matcher_uses_phrase_boundaries_for_law_and_spa_terms():
+    result = analyze_job(
+        {
+            "title": "Flawless paid search for a Spanish aerospace brand",
+            "description": "Audit the paid search account and report findings",
+            "job_type": "hourly",
+            "hourly_rate_max": 80,
+            "proposal_count": 4,
+            "client": _client(),
+        }
+    )
+
+    assert result.case_studies == []
+
+
 def test_whatconverts_offline_conversion_scope_is_allowed_with_boundary():
     result = analyze_job(
         {
@@ -123,6 +140,73 @@ def test_invites_are_not_boosted_and_strong_open_jobs_may_be_considered():
         assert open_job.boost["max_extra_connects"] <= 12
 
 
+def test_zero_client_metrics_are_observed_and_cannot_create_a_strong_fit():
+    result = analyze_job(
+        {
+            "title": "Google Ads audit for criminal defense law firm",
+            "description": "Paid search lead generation and account review",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 0,
+            "connects_required": 8,
+            "client": {
+                "payment_verified": True,
+                "total_spent": 0,
+                "total_hires": 0,
+                "hire_rate": 0,
+                "rating": 4.9,
+                "avg_hourly_rate_paid": 0,
+            },
+        }
+    )
+    components = {component.name: component.points for component in result.components}
+
+    assert components["client_spend"] == -2
+    assert components["hire_rate"] == -5
+    assert components["low_average_rate"] == -6
+    assert components["competition"] == 12
+    assert "client total spend" not in result.missing_evidence
+    assert "client hire rate" not in result.missing_evidence
+    assert result.recommendation != "strong_fit"
+    assert result.boost["recommendation"] == "no_boost"
+
+
+def test_unknown_competition_never_recommends_a_boost():
+    result = analyze_job(
+        {
+            "title": "Google Ads audit for criminal defense law firm",
+            "description": "Paid search lead generation and account review",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert "live proposal count" in result.missing_evidence
+    assert result.boost["recommendation"] == "no_boost"
+    assert result.boost["max_extra_connects"] == 0
+
+
+def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
+    for description in (
+        "Do not use GTM; use WhatConverts for offline conversion outcomes.",
+        "This is not a full-time role; the consultant will work five hours a week.",
+        "This ecommerce account does not need purchase tracking; Google Ads management only.",
+    ):
+        result = analyze_job(
+            {
+                "title": "Google Ads consultant for family law firm",
+                "description": description,
+                "job_type": "hourly",
+                "hourly_rate_max": 80,
+                "proposal_count": 5,
+                "client": _client(),
+            }
+        )
+        assert not result.blockers, description
+
+
 def test_low_rate_is_a_price_conversion_not_an_automatic_discount():
     result = analyze_job(
         {
@@ -171,6 +255,11 @@ def test_high_client_range_does_not_trigger_an_unnecessary_low_bid():
     assert result.pricing["defensible_range"] == [120, 175]
 
 
+def test_pricing_context_rejects_a_profile_rate_below_the_floor():
+    with pytest.raises(ValueError, match="profile_hourly_rate"):
+        PricingContext(profile_hourly_rate=49, minimum_hourly_rate=50)
+
+
 def test_unaudited_aggregate_claims_are_quarantined():
     result = validate_proof_claims(
         "We've helped clients generate over $100M through Google Ads.",
@@ -210,6 +299,34 @@ def test_proposal_safe_proof_lines_are_claim_local_and_period_bound():
     assert validate_proof_claims(lines[0]["line_with_period"], selected)["valid"] is True
     full_copy = f"Hey, more than happy to take a look at this.\n\n{lines[0]['line']}"
     assert validate_upwork_copy(full_copy, invited=False)["valid"] is True
+
+
+def test_proposal_plan_and_validators_never_encourage_external_case_study_urls():
+    analysis = analyze_job(
+        {
+            "title": "Google Ads audit for family law firm",
+            "description": "Paid search lead generation",
+            "job_type": "hourly",
+            "hourly_rate_max": 90,
+            "proposal_count": 5,
+            "client": _client(),
+        }
+    )
+    assert "case_study_link" not in analysis.proposal_plan
+    assert analysis.proposal_plan["external_case_study_links_allowed"] is False
+
+    external_url = _priority_proof()["url"]
+    copy_result = validate_upwork_copy(
+        f"Hey, more than happy to take a look at this.\n\nSee {external_url}",
+        invited=False,
+    )
+    assert copy_result["valid"] is False
+    assert any("external URLs" in error for error in copy_result["errors"])
+
+    safe_line = proposal_safe_proof_lines(_priority_proof())[0]["line"]
+    proof_result = validate_proof_claims(f"{safe_line}\n{external_url}", [_priority_proof()])
+    assert proof_result["valid"] is False
+    assert any("external URLs" in error for error in proof_result["errors"])
 
 
 def test_proof_line_tampering_and_global_attribution_are_rejected():

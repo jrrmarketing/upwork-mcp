@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..ledger import POLICY_VERSION, record_screening
 from ..prepared_actions import prepare_action
@@ -33,19 +34,41 @@ class PrepareProposalParams(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     job_url: str = Field(min_length=2, max_length=500)
-    cover_letter: str = Field(min_length=1, max_length=8_000)
+    cover_letter: str = Field(min_length=1, max_length=10_000)
     rate: float | None = Field(default=None, gt=0)
     bid: float | None = Field(default=None, gt=0)
     payment_structure: Literal["by_project", "by_milestone"] | None = None
-    milestones: list[FixedPriceMilestone] = Field(default_factory=list, max_length=20)
+    milestones: list[FixedPriceMilestone] = Field(default_factory=list, max_length=1)
     answers: list[str] = Field(default_factory=list, max_length=20)
-    duration: str | None = Field(default=None, max_length=100)
+    duration: Literal[
+        "Less than 1 month",
+        "1 to 3 months",
+        "3 to 6 months",
+        "More than 6 months",
+    ] | None = None
     profile_highlights: list[str] = Field(default_factory=list, max_length=4)
     boost_connects: int = Field(default=0, ge=0)
-    rate_increase_frequency: str = "Never"
+    rate_increase_frequency: Literal["Never"] = "Never"
     profile_hourly_rate: float = Field(default=63, gt=0)
     minimum_hourly_rate: float = Field(default=50, gt=0)
     minimum_fixed_fee: float | None = Field(default=None, gt=0)
+
+    @field_validator("answers")
+    @classmethod
+    def _answers_must_not_be_blank(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() for value in values):
+            raise ValueError("Screening answers cannot be blank")
+        return values
+
+    @field_validator("profile_highlights")
+    @classmethod
+    def _profile_highlights_must_be_distinct(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() for value in values):
+            raise ValueError("Profile highlights cannot be blank")
+        identities = [re.sub(r"\s+", " ", value).strip().casefold() for value in values]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Profile highlights cannot contain duplicates")
+        return values
 
     @model_validator(mode="after")
     def validate_terms(self) -> PrepareProposalParams:
@@ -56,8 +79,12 @@ class PrepareProposalParams(BaseModel):
             payment_structure=self.payment_structure,
             milestones=self.milestones,
         )
-        if self.rate_increase_frequency != "Never":
-            raise ValueError('rate_increase_frequency must be "Never"')
+        if self.payment_structure == "by_milestone":
+            raise ValueError("Automated proposal preparation supports fixed by_project terms only")
+        if self.profile_hourly_rate < self.minimum_hourly_rate:
+            raise ValueError("profile_hourly_rate cannot be below minimum_hourly_rate")
+        if self.rate is not None and self.rate < self.minimum_hourly_rate:
+            raise ValueError("The approved hourly rate cannot be below minimum_hourly_rate")
         return self
 
 
@@ -232,6 +259,10 @@ async def prepare_proposal(params: PrepareProposalParams) -> dict[str, Any]:
         errors.append("This job does not meet the selective-boost policy")
     if params.boost_connects > analysis["boost"]["max_extra_connects"]:
         errors.append("Boost exceeds the policy cap for this job")
+    if params.boost_connects:
+        errors.append(
+            "Positive-boost proposal preparation is disabled until the live Upwork flow can prove that the first Submit click is non-consequential."
+        )
     boost_auction_status = form.get("boost_auction_status")
     if params.boost_connects and boost_auction_status != "complete":
         errors.append("A nonzero boost requires a complete live boost-auction inspection")
@@ -271,13 +302,25 @@ async def find_opportunities(
         jobs = await search_jobs(JobSearchParams(query=query, search_mode=mode, limit=limit_per_view))
         found.extend(jobs)
 
-    unique: dict[str, dict[str, Any]] = {}
+    unique: dict[str, tuple[str, dict[str, Any]]] = {}
+    invalid_job_urls = 0
     for job in found:
-        unique.setdefault(str(job.get("url")), job)
+        raw_url = str(job.get("url") or "").strip()
+        if raw_url.startswith("~"):
+            raw_url = f"https://www.upwork.com/jobs/{raw_url}"
+        elif raw_url.startswith("/jobs/"):
+            raw_url = f"https://www.upwork.com{raw_url}"
+        try:
+            canonical_url, job_id = parse_job_url(raw_url)
+        except ValueError:
+            invalid_job_urls += 1
+            continue
+        unique.setdefault(job_id, (canonical_url, job))
 
     ranked: list[dict[str, Any]] = []
-    for summary in unique.values():
-        details = await get_job_details(JobDetailsParams(job_url=str(summary["url"])))
+    for canonical_url, summary in unique.values():
+        details = await get_job_details(JobDetailsParams(job_url=canonical_url))
+        details["url"] = canonical_url
         details["discovered_in"] = summary.get("search_mode")
         analysis = analyze_job(
             details,
@@ -302,6 +345,7 @@ async def find_opportunities(
         "query": query,
         "views_scanned": ["best_matches", "most_recent"],
         "unique_jobs_reviewed": len(unique),
+        "invalid_job_urls_skipped": invalid_job_urls,
         "opportunities": ranked,
         "external_action_taken": False,
         "policy_version": POLICY_VERSION,

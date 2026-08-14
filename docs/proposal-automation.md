@@ -65,6 +65,9 @@ Same field map as invite accept, but:
 - Often **one textarea** (cover letter only) unless screening questions exist.
 - **By milestone is frequently the default.** Click the **By project** radio explicitly. If you
   stay on milestones, Milestone 1 needs a **description** or you get "A description is needed."
+- Automated preparation supports fixed `by_project` terms only. It does not create milestone rows,
+  and the reversible commercial preflight cannot prove milestone pricing, so `by_milestone`
+  proposals must fail closed rather than approving a form the commit cannot reproduce.
 - **Amount:** only fill the **enabled** `input[placeholder="$0.00"]`. Disabled fee-breakdown
   inputs (10% service fee, net receive) will timeout if you try to `.fill()` them.
 - **Duration:** job sidebar may say "Less than 1 month" while **1 to 3 months** is fine for
@@ -103,6 +106,13 @@ state; generic “Place a bid” copy is insufficient without numeric/top/no-bid
 The live rate-increase control is also bound as `complete` or explicitly `not_applicable` (fixed
 price, or an hourly form with no such control). `incomplete` and `unavailable` states cannot be
 prepared for approval.
+
+The automated preparation path currently requires `boost_connects=0`. A positive boost remains a
+manual exact-approved flow until the live two-stage sequence can prove that the first Submit click
+is non-consequential and that the chosen boost is applied before the final send.
+
+Invitation controls such as `Accept Interview` are not part of automated prepare/commit. A suitable
+invitation can use this workflow only when an ordinary exact job application form already exists.
 
 ## Profile highlights (the "Add profile highlights" modal)
 

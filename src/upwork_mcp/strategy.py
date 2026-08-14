@@ -15,11 +15,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from .proof_manifest import PROOF_MANIFEST, EvidenceStatus, ProofRecord
-
-CASE_STUDY_INDEX = "https://josiahroche.co/digital-marketing-case-studies"
-
 
 SEARCH_CERTIFICATION = "Google Ads Search Certification"
 
@@ -152,6 +150,16 @@ class PricingContext:
     founder_advisory_benchmark: float = 175.0
     source_version: str = "upwork-profile-owner-approved-63-usd; jrr-pricing-2026-08-13"
 
+    def __post_init__(self) -> None:
+        if self.minimum_hourly_rate <= 0 or self.profile_hourly_rate <= 0:
+            raise ValueError("Hourly pricing values must be positive")
+        if self.profile_hourly_rate < self.minimum_hourly_rate:
+            raise ValueError("profile_hourly_rate cannot be below minimum_hourly_rate")
+        if self.founder_advisory_benchmark < self.minimum_hourly_rate:
+            raise ValueError("founder_advisory_benchmark cannot be below minimum_hourly_rate")
+        if self.minimum_fixed_fee is not None and self.minimum_fixed_fee <= 0:
+            raise ValueError("minimum_fixed_fee must be positive when configured")
+
 
 @dataclass
 class ScoreComponent:
@@ -204,8 +212,58 @@ def _client(job: Mapping[str, Any]) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _first_not_none(*values: Any) -> Any:
+    """Return the first observed value without treating a legitimate zero as absent."""
+
+    return next((value for value in values if value is not None), None)
+
+
 def _contains_any(text: str, terms: Iterable[str]) -> bool:
     return any(term in text for term in terms)
+
+
+def _contains_bounded_term(text: str, term: str) -> bool:
+    """Match a proof-routing term only as a complete token or phrase."""
+
+    normalized = term.strip().casefold()
+    if not normalized:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", text.casefold()) is not None
+
+
+def _match_is_negated(text: str, start: int, end: int) -> bool:
+    """Recognize explicit same-clause exclusions around a scope phrase."""
+
+    prefix = re.split(r"[.;!?\n]", text[max(0, start - 100) : start])[-1]
+    suffix = re.split(r"[.;!?\n]", text[end : end + 100])[0]
+    if re.search(
+        r"\b(?:(?:do|does|did)\s+not|don't|doesn't|didn't)\b[^.;!?\n]{0,60}"
+        r"\b(?:want|need|require|use|include|implement|manage|run|support)\s+$",
+        prefix,
+        re.I,
+    ):
+        return True
+    if re.search(r"\b(?:no|not)\s+(?:(?:a|an|the)\s+)?$|\bwithout\s+$", prefix, re.I):
+        return True
+    return bool(
+        re.match(
+            r"^\s*(?:is|are|was|were|will be|would be)?\s*(?:not|never)\s+"
+            r"(?:required|needed|included|used|managed|implemented|part of|in scope)\b",
+            suffix,
+            re.I,
+        )
+    )
+
+
+def _has_unnegated_pattern(text: str, pattern: str) -> bool:
+    return any(not _match_is_negated(text, match.start(), match.end()) for match in re.finditer(pattern, text, re.I))
+
+
+def _contains_unnegated_terms(text: str, terms: Iterable[str]) -> bool:
+    return any(
+        _has_unnegated_pattern(text, rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])")
+        for term in terms
+    )
 
 
 def _proof_terms(values: Iterable[str], mapping: Mapping[str, tuple[str, ...]]) -> list[str]:
@@ -261,9 +319,9 @@ def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str
         allowed_terms = _proof_terms(routing_tags, TAG_TERMS)
         service_terms = _proof_terms(study.services, SERVICE_TERMS)
         blocked_terms = _proof_terms(study.blocked_job_tags, TAG_TERMS)
-        vertical_hits = [term for term in allowed_terms if term in text]
-        service_hits = [term for term in service_terms if term in text]
-        blocked_hits = [term for term in blocked_terms if term in text]
+        vertical_hits = [term for term in allowed_terms if _contains_bounded_term(text, term)]
+        service_hits = [term for term in service_terms if _contains_bounded_term(text, term)]
+        blocked_hits = [term for term in blocked_terms if _contains_bounded_term(text, term)]
         # Service overlap alone is not case-study relevance. Require an audited
         # vertical/business-model tag before exposing any permitted claim.
         if not vertical_hits:
@@ -329,7 +387,9 @@ def recommended_highlights(job: Mapping[str, Any], case_studies: list[dict[str, 
 
 
 def _proposal_count(job: Mapping[str, Any]) -> int | None:
-    value = job.get("proposal_count") or job.get("proposals") or job.get("applicants_count")
+    value = _first_not_none(job.get("proposal_count"), job.get("proposals"), job.get("applicants_count"))
+    if isinstance(value, bool):
+        return None
     if isinstance(value, int):
         return value
     if value is None:
@@ -340,10 +400,10 @@ def _proposal_count(job: Mapping[str, Any]) -> int | None:
 
 def _recommend_price(job: Mapping[str, Any], context: PricingContext, service_fit: int) -> dict[str, Any]:
     job_type = str(job.get("job_type") or "").lower()
-    rate_min = _number(job.get("hourly_rate_min") or job.get("rate_min"))
-    rate_max = _number(job.get("hourly_rate_max") or job.get("rate_max"))
+    rate_min = _number(_first_not_none(job.get("hourly_rate_min"), job.get("rate_min")))
+    rate_max = _number(_first_not_none(job.get("hourly_rate_max"), job.get("rate_max")))
     budget_min = _number(job.get("budget_min"))
-    budget_max = _number(job.get("budget_max") or job.get("budget"))
+    budget_max = _number(_first_not_none(job.get("budget_max"), job.get("budget")))
     assumptions: list[str] = []
 
     if "hour" in job_type or rate_min is not None or rate_max is not None:
@@ -436,7 +496,7 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     ecommerce = _contains_any(
         text, ("ecommerce", "e-commerce", "shopify", "woocommerce", "merchant center", "shopping")
     )
-    tracking = _contains_any(
+    tracking = _contains_unnegated_terms(
         text, ("conversion tracking", "offline conversion", "attribution", "tracking setup", "purchase tracking")
     )
     invited = bool(job.get("invited"))
@@ -458,17 +518,25 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         blockers.append("The role does not contain a core Google Ads or SEO scope")
 
     for pattern, reason in HARD_SCOPE_PATTERNS:
-        if re.search(pattern, text, re.I):
+        if _has_unnegated_pattern(text, pattern):
             blockers.append(reason)
 
-    if (
-        ecommerce
-        and tracking
-        and _contains_any(text, ("purchase", "checkout", "pixel", "ga4 ecommerce", "ecommerce tracking"))
-    ):
+    ecommerce_tracking = _contains_unnegated_terms(
+        text,
+        (
+            "purchase tracking",
+            "checkout tracking",
+            "ecommerce tracking",
+            "ga4 ecommerce",
+            "ecommerce pixel",
+        ),
+    )
+    if ecommerce and ecommerce_tracking:
         blockers.append("Ecommerce purchase-tracking implementation is outside JRR's WhatConverts lead-tracking scope")
 
-    unsupported = [channel for channel, terms in UNSUPPORTED_CHANNELS.items() if _contains_any(text, terms)]
+    unsupported = [
+        channel for channel, terms in UNSUPPORTED_CHANNELS.items() if _contains_unnegated_terms(text, terms)
+    ]
     if unsupported:
         if google_ads or seo:
             boundaries.append(
@@ -477,7 +545,7 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         else:
             blockers.append(f"The required work is on unsupported channels: {', '.join(unsupported)}")
 
-    employee_style = _contains_any(
+    employee_style = _contains_unnegated_terms(
         text,
         (
             "full-time",
@@ -504,12 +572,16 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         boundaries.append("Confirm the client is open to WhatConverts for lead and offline-conversion attribution")
 
     client = _client(job)
-    payment_verified = bool(client.get("payment_verified") or job.get("client_payment_verified"))
-    spent = _number(client.get("total_spent") or job.get("client_total_spent"))
-    hires = _number(client.get("total_hires") or job.get("client_total_hires"))
-    hire_rate = _number(client.get("hire_rate") or job.get("client_hire_rate"))
-    rating = _number(client.get("rating") or job.get("client_feedback_rating"))
-    average_paid = _number(client.get("avg_hourly_rate_paid") or job.get("client_avg_hourly_rate_paid"))
+    payment_verified = bool(
+        _first_not_none(client.get("payment_verified"), job.get("client_payment_verified"))
+    )
+    spent = _number(_first_not_none(client.get("total_spent"), job.get("client_total_spent")))
+    hires = _number(_first_not_none(client.get("total_hires"), job.get("client_total_hires")))
+    hire_rate = _number(_first_not_none(client.get("hire_rate"), job.get("client_hire_rate")))
+    rating = _number(_first_not_none(client.get("rating"), job.get("client_feedback_rating")))
+    average_paid = _number(
+        _first_not_none(client.get("avg_hourly_rate_paid"), job.get("client_avg_hourly_rate_paid"))
+    )
 
     if payment_verified:
         components.append(ScoreComponent("payment_verified", 7, "Client payment method is verified"))
@@ -528,7 +600,7 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         missing.append("client hire rate")
     if rating is not None and rating >= 4.7:
         components.append(ScoreComponent("client_rating", 4, f"Client rating is {rating:g}"))
-    if hires and spent is not None and hires > 0:
+    if hires is not None and spent is not None and hires > 0:
         spend_per_hire = spent / hires
         if spend_per_hire < 100:
             components.append(
@@ -577,11 +649,17 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         components.append(ScoreComponent("price_fit", -12, "The client range is below the configured minimum"))
 
     score = max(0, min(100, sum(component.points for component in components)))
+    client_quality = sum(
+        component.points
+        for component in components
+        if component.name
+        in {"payment_verified", "client_spend", "hire_rate", "client_rating", "low_spend_per_hire", "low_average_rate"}
+    )
     if blockers:
         recommendation = "skip"
     elif price["position"] == "price_conversion_opportunity" and score >= 45:
         recommendation = "price_conversion"
-    elif score >= 70 and not boundaries:
+    elif score >= 70 and client_quality >= 8 and not boundaries:
         recommendation = "strong_fit"
     elif score >= 55:
         recommendation = "fit"
@@ -590,21 +668,17 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     else:
         recommendation = "skip"
 
-    client_quality = sum(
-        component.points
-        for component in components
-        if component.name
-        in {"payment_verified", "client_spend", "hire_rate", "client_rating", "low_spend_per_hire", "low_average_rate"}
-    )
     exact_proof = bool(studies and studies[0]["match_strength"] == "exact")
     should_consider_boost = (
         recommendation == "strong_fit"
         and client_quality >= 12
         and exact_proof
         and not invited
-        and (count is None or count < 20)
+        and count is not None
+        and count < 20
     )
-    max_extra = min(12, int(connects or 8)) if should_consider_boost else 0
+    connect_cap = int(connects) if connects is not None else 8
+    max_extra = min(12, connect_cap) if should_consider_boost else 0
     boost = {
         "recommendation": "inspect_live_auction" if should_consider_boost else "no_boost",
         "max_extra_connects": max_extra,
@@ -619,9 +693,8 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     plan = {
         "opening": "Hey, thanks for the invite." if invited else "Hey, more than happy to take a look at this for you.",
         "proof_order": [study["name"] for study in studies],
-        "case_study_link": studies[0]["url"]
-        if studies and studies[0]["match_strength"] == "exact"
-        else CASE_STUDY_INDEX,
+        "proof_source": "proposal_safe_proof_lines",
+        "external_case_study_links_allowed": False,
         "mention_whatconverts": tracking and not any("Tag Manager" in blocker for blocker in blockers),
         "diagnose_before_access": False,
         "plain_text_only": True,
@@ -666,6 +739,8 @@ def validate_upwork_copy(message: str, *, invited: bool | None = None) -> dict[s
         errors.append("Routine Upwork copy cannot contain em dashes or en dashes")
     if re.search(r"\bcalendly\b|mailto:|\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", lowered):
         errors.append("Pre-contract Upwork copy cannot include booking links or email addresses")
+    if _external_urls(message):
+        errors.append("Pre-contract Upwork copy cannot include external URLs")
     if re.search(r"(?:\+?\d[\d\s().-]{8,}\d)", message):
         errors.append("Pre-contract Upwork copy appears to include a phone number")
     for phrase in SALESY_PHRASES:
@@ -698,17 +773,15 @@ def validate_proof_claims(message: str, selected_studies: Iterable[Mapping[str, 
         if re.search(pattern, normalized_message, re.I):
             errors.append(reason)
 
+    if _external_urls(message):
+        errors.append("Pre-contract Upwork proof cannot include external URLs; use a verified live profile highlight")
+
     for record in PROOF_MANIFEST:
         referenced = (
             _normalise_claim_text(record.current_url) in lowered or _normalise_claim_text(record.name) in lowered
         )
         if referenced and record.key not in selected:
             errors.append(f"{record.name} was referenced but was not selected by the proof matcher")
-
-    if _normalise_claim_text(CASE_STUDY_INDEX) in lowered and selected:
-        exact = [study for study in selected.values() if study.get("match_strength") == "exact"]
-        if exact and not any(_normalise_claim_text(str(study.get("url", ""))) in lowered for study in exact):
-            errors.append("Use the closest verified individual case-study URL instead of only the general index")
 
     allowed_lines: list[tuple[Mapping[str, Any], str]] = []
     proof_fragments: list[tuple[Mapping[str, Any], str]] = []
@@ -777,6 +850,26 @@ def _contains_exact_claim(sentence: str, claim: str) -> bool:
 
 def _strip_invisible_formatting(value: str) -> str:
     return "".join(character for character in value if unicodedata.category(character) != "Cf")
+
+
+_URL_CANDIDATE = re.compile(
+    r"(?ix)(?<![@\w])((?:https?://|www\.)[^\s<>()]+|"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:com|co|org|net|io|ai|uk|au)(?:/[^\s<>()]*)?)"
+)
+
+
+def _external_urls(value: str) -> list[str]:
+    """Return URL candidates hosted outside Upwork without echoing them in errors."""
+
+    external: list[str] = []
+    for raw in _URL_CANDIDATE.findall(value):
+        candidate = raw.rstrip(".,;:!?)]}")
+        parsed = urlsplit(candidate if "://" in candidate else f"https://{candidate}")
+        host = (parsed.hostname or "").casefold()
+        if host and host != "upwork.com" and not host.endswith(".upwork.com"):
+            external.append(candidate)
+    return list(dict.fromkeys(external))
 
 
 def _ordinary_nonproof_remainder(value: str) -> bool:

@@ -170,6 +170,31 @@ def test_submission_schema_requires_complete_discovery_and_auction_for_boost() -
     assert boosted.boost_connects == 5
 
 
+def test_submission_schema_rejects_blank_duplicate_or_multirow_prepare_drift() -> None:
+    with pytest.raises(ValidationError, match="blank"):
+        _proposal_params(answers=["  "])
+    with pytest.raises(ValidationError, match="blank"):
+        _proposal_params(profile_highlights=["  "])
+    with pytest.raises(ValidationError, match="duplicates"):
+        _proposal_params(
+            profile_highlights=[
+                "Google Ads Search Certification",
+                " google ads search certification ",
+            ]
+        )
+    with pytest.raises(ValidationError, match="at most 1 item"):
+        _proposal_params(
+            job_type="fixed",
+            rate=None,
+            bid=500,
+            payment_structure="by_milestone",
+            milestones=[
+                {"description": "Audit", "due_date": "2026-09-01", "amount": 250},
+                {"description": "Review", "due_date": "2026-09-08", "amount": 250},
+            ],
+        )
+
+
 def test_job_type_detection_prefers_form_structure_and_fails_closed_on_ambiguous_text() -> None:
     assert proposals._detect_job_type("By project\nProfile rate $63/hr") == "fixed"
     assert proposals._detect_job_type("Rate increase frequency\nFixed-price work in description") == "hourly"
@@ -588,25 +613,23 @@ class _MilestonePage:
 
 
 @pytest.mark.asyncio
-async def test_exact_milestones_are_selected_filled_and_read_back() -> None:
+async def test_one_exact_milestone_is_selected_filled_and_read_back() -> None:
     params = _proposal_params(
         job_type="fixed",
         rate=None,
         bid=500,
         payment_structure="by_milestone",
         milestones=[
-            {"description": "Initial audit", "due_date": "2026-09-01", "amount": 200},
-            {"description": "Implementation", "due_date": "2026-09-15", "amount": 300},
+            {"description": "Initial audit", "due_date": "2026-09-01", "amount": 500},
         ],
     )
-    page = _MilestonePage(row_count=2)
+    page = _MilestonePage(row_count=1)
     assert await proposals._configure_fixed_payment_terms(page, params) == (True, None)
     assert page.rows[0].description.value == "Initial audit"
     assert page.rows[0].due_date.value == "2026-09-01"
-    assert page.rows[0].amount.value == "200.0"
-    assert page.rows[1].amount.value == "300.0"
+    assert page.rows[0].amount.value == "500.0"
 
-    missing_row = _MilestonePage(row_count=1)
+    missing_row = _MilestonePage(row_count=0)
     assert (await proposals._configure_fixed_payment_terms(missing_row, params))[0] is False
 
 

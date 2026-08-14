@@ -296,7 +296,7 @@ class SubmitProposalParams(StrictToolModel):
         default=None,
         description="Required explicit structure for fixed-price proposals",
     )
-    milestones: list[FixedPriceMilestone] = Field(default_factory=list, max_length=20)
+    milestones: list[FixedPriceMilestone] = Field(default_factory=list, max_length=1)
     answers: list[str] | None = Field(default=None, max_length=20, description="Exact screening answers")
     screening_questions: list[str] = Field(
         default_factory=list,
@@ -354,6 +354,14 @@ class SubmitProposalParams(StrictToolModel):
     def _list_items_must_not_be_blank(cls, values: list[str] | None) -> list[str] | None:
         if values is not None and any(not value.strip() for value in values):
             raise ValueError("List items cannot be blank")
+        return values
+
+    @field_validator("profile_highlights")
+    @classmethod
+    def _profile_highlights_must_be_distinct(cls, values: list[str]) -> list[str]:
+        identities = [re.sub(r"\s+", " ", value).strip().casefold() for value in values]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Profile highlights cannot contain duplicates")
         return values
 
     @field_validator("fee_net_text", "boost_auction_text")

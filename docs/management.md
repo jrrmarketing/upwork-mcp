@@ -29,10 +29,15 @@ canonical communication rule.
 
 Proposal commit navigates directly to the approved application form and reads back the same job
 ID, canonical job/form URLs, title, and job type before querying any rate, bid, cover-letter,
-screening, duration, highlight, payment, boost, or submit control. A fixed-price proposal must
-bind either `by_project` with no milestones or `by_milestone` with an ordered list of exact
-description, ISO due date, and amount values whose total equals the bid. The live selection and
-filled values must be readable after entry. Upwork defaults are never accepted implicitly.
+screening, duration, highlight, payment, boost, or submit control. Automated fixed-price
+preparation supports `by_project` with no milestones. Milestone rows are not created reliably and
+the reversible commercial preflight supports by-project terms only, so `by_milestone` automation
+fails closed. The live selection and filled values must be readable after entry. Upwork defaults
+are never accepted implicitly.
+
+A suitable invitation is not automatically accepted or converted into an application. Automated
+prepare/commit is supported only when Upwork already exposes the ordinary exact job application
+form; never treat an `Accept Interview` control as part of this workflow.
 
 A success query or banner is only supporting context. Submission succeeds only when Upwork opens
 one exact stored `/nx/proposals/<19-digit-id>` record whose job ID, URL, title, normalized cover
@@ -105,6 +110,10 @@ copy can remain natural on separate lines. The MCP does not claim to prove arbit
 no implied result; draft and exact owner approval remain required, and audited client evidence may
 only enter the auto-submittable copy through the generated line.
 
+Public case-study routes remain evidence metadata, not proposal content. Pre-contract proposals
+must not include an external case-study URL; use the exact generated proof line and a verified live
+Upwork profile highlight instead.
+
 Current portfolio-highlight titles must be read from the live owner system. Several old titles
 conflict with audited case-study evidence, so the old digest is not an automatic selection list.
 Proposal preparation requires a `complete` live chooser enumeration and rejects any requested
@@ -133,6 +142,10 @@ approval. It never spends from a recommendation alone. Capture the submitted boo
 outcome so the report can compare boosted and unboosted performance after enough observations.
 The auction status must be `complete` before any nonzero boost can enter an approval record;
 generic boost prompts without current numeric/top/no-bids/rank/slot state fail closed.
+
+At present, automated proposal preparation accepts `boost_connects=0` only. A positive boost must
+remain a manual exact-approved flow until the live two-stage Upwork sequence proves that its first
+Submit click is non-consequential and the chosen bid is applied before the final send.
 
 ## Maintenance
 
