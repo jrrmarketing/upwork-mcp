@@ -189,6 +189,18 @@ def install_fake_playwright(monkeypatch, chromium) -> FakePlaywright:
             True,
         ),
         (
+            "https://www.upwork.com/nx/find-work/best-matches",
+            "Jobs you might like",
+            ["https://www.upwork.com/freelancers/~013f04c55c6aac7ab5"],
+            True,
+        ),
+        (
+            "https://www.upwork.com/nx/find-work/best-matches",
+            "Jobs you might like",
+            ["https://www.upwork.com/freelancers/josiahroche2-other"],
+            False,
+        ),
+        (
             "https://www.upwork.com/nx/client/dashboard",
             "Jobs you might like",
             ["https://www.upwork.com/freelancers/josiahroche2"],

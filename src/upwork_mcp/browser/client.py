@@ -32,6 +32,25 @@ EXPECTED_FREELANCER_SLUG = os.getenv(
     "UPWORK_FREELANCER_PROFILE_SLUG",
     "josiahroche2",
 ).strip().lower()
+_DEFAULT_FREELANCER_PROFILE_IDENTIFIERS = (
+    "josiahroche2",
+    "~013f04c55c6aac7ab5",
+)
+_configured_profile_identifiers = os.getenv("UPWORK_FREELANCER_PROFILE_IDENTIFIERS")
+if _configured_profile_identifiers is not None:
+    EXPECTED_FREELANCER_PROFILE_IDENTIFIERS = tuple(
+        dict.fromkeys(
+            identifier.strip().lower()
+            for identifier in _configured_profile_identifiers.split(",")
+            if identifier.strip()
+        )
+    )
+elif "UPWORK_FREELANCER_PROFILE_SLUG" in os.environ:
+    EXPECTED_FREELANCER_PROFILE_IDENTIFIERS = (
+        (EXPECTED_FREELANCER_SLUG,) if EXPECTED_FREELANCER_SLUG else ()
+    )
+else:
+    EXPECTED_FREELANCER_PROFILE_IDENTIFIERS = _DEFAULT_FREELANCER_PROFILE_IDENTIFIERS
 
 # Real Chrome paths by platform
 CHROME_PATHS = [
@@ -280,10 +299,17 @@ def _is_expected_freelancer_snapshot(
         return False
     if "jobs you might like" not in body_text.lower():
         return False
-    if not EXPECTED_FREELANCER_SLUG:
+    if not EXPECTED_FREELANCER_PROFILE_IDENTIFIERS:
         return True
-    expected_path = f"/freelancers/{EXPECTED_FREELANCER_SLUG}"
-    return any(expected_path in href.lower() for href in profile_hrefs)
+    expected_paths = {
+        f"/freelancers/{identifier}" for identifier in EXPECTED_FREELANCER_PROFILE_IDENTIFIERS
+    }
+    observed_paths = {
+        urlparse(href).path.rstrip("/").lower()
+        for href in profile_hrefs
+        if href
+    }
+    return not expected_paths.isdisjoint(observed_paths)
 
 
 class UpworkBrowser:
