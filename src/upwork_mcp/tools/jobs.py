@@ -110,6 +110,14 @@ def _parse_money(value: str | None) -> float | None:
     return number
 
 
+def _aggregate_description_paragraphs(values: list[str], *, limit: int = 12_000) -> str:
+    """Preserve every visible job-description paragraph, including short requirements."""
+
+    normalized = [re.sub(r"\s+", " ", value).strip() for value in values]
+    unique = list(dict.fromkeys(value for value in normalized if value))
+    return "\n".join(unique)[:limit]
+
+
 def parse_job_page_text(text: str) -> dict[str, Any]:
     """Parse stable job/client facts from the visible page text.
 
@@ -283,9 +291,9 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
                 }
                 paragraphs = await section.query_selector_all("p")
                 descriptions = [(await item.text_content() or "").strip() for item in paragraphs]
-                descriptions = [item for item in descriptions if item]
-                if descriptions:
-                    job["description"] = max(descriptions, key=len)[:1_000]
+                description = _aggregate_description_paragraphs(descriptions, limit=2_000)
+                if description:
+                    job["description"] = description
                 job.update(parse_job_page_text(card_text))
                 if _passes_budget_filter(job, params):
                     jobs.append(job)
@@ -316,9 +324,9 @@ async def get_job_details(params: JobDetailsParams) -> dict:
 
         paragraphs = await page.query_selector_all("main p")
         paragraph_texts = [(await item.text_content() or "").strip() for item in paragraphs]
-        paragraph_texts = [item for item in paragraph_texts if len(item) >= 80]
-        if paragraph_texts:
-            job["description"] = max(paragraph_texts, key=len)
+        description = _aggregate_description_paragraphs(paragraph_texts)
+        if description:
+            job["description"] = description
 
         skill_els = await page.query_selector_all('main a[href*="ontology_skill_uid"]')
         skills = [(await item.text_content() or "").strip() for item in skill_els]

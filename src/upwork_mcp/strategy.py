@@ -163,7 +163,7 @@ PRODUCT_MODEL_PATTERN = re.compile(
 EXTERNAL_PRODUCT_AUDIENCE_PATTERN = re.compile(
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law(?:\s+firms?|\s+practices?)?|"
     r"criminal[- ]defen[cs]e(?:\s+firms?|\s+lawyers?|\s+attorneys?)?|plumbers?|"
-    r"plumbing[- ]companies|clinics?|dentists?|customers?)\b",
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|clinics?|dentists?|customers?)\b",
     re.I,
 )
 EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN = re.compile(
@@ -174,9 +174,9 @@ EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN = re.compile(
     r"saas|software|platform|app|application|portal|system|suite|dashboard|tool|product)\b"
     r"[^.;!?]{0,60}\b(?:to|for|by)\b[^.;!?]{0,45}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b|"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b|"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,65}"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b[^.;!?]{0,65}"
     r"\b(?:subscribe|subscribes|subscribed|buy|buys|purchase|purchases|pay|pays|rent|rents)\b"
     r"[^.;!?]{0,45}\b(?:it|access|subscriptions?|licenses?|software|platform|app|application|"
     r"portal|system|suite|dashboard|tool|product)\b|"
@@ -184,11 +184,11 @@ EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN = re.compile(
     r"product)\b[^.;!?]{0,45}\bavailable\s+for\s+purchase\b[^.;!?]{0,45}"
     r"\b(?:by|to|for)\b[^.;!?]{0,35}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b|"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b|"
     r"\b(?:monetize|monetizes|monetized)\b[^.;!?]{0,45}\baccess\b[^.;!?]{0,45}"
     r"\b(?:for|to)\b[^.;!?]{0,35}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b|"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b|"
     r"\b(?:it|access|software|platform|app|application|portal|system|suite|dashboard|tool|"
     r"product)\b[^.;!?]{0,55}\b(?:offered|available)\s+(?:commercially|for\s+purchase)\b"
     r"[^.;!?]{0,45}\b(?:to|for|by)\b[^.;!?]{0,35}"
@@ -196,10 +196,10 @@ EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN = re.compile(
     r"plumbing[- ]companies|customers?)\b|"
     r"\b(?:charge|charges|charged)\b[^.;!?]{0,45}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,45}\bto\s+access\b"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b[^.;!?]{0,45}\bto\s+access\b"
     r"[^.;!?]{0,25}\b(?:it|this|software|platform|app|system|tool)\b|"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,35}"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b[^.;!?]{0,35}"
     r"\b(?:can|may|could)\s+(?:buy|purchase|rent)\b(?:[^.;!?]{0,25}"
     r"\b(?:it|this|access|software|platform|app|system|tool)\b)?"
     r")",
@@ -212,9 +212,9 @@ EXTERNAL_COMMERCIAL_RELATION_PATTERN = re.compile(
     r"rented|monetize|monetizes|monetized)\b[^.;!?]{0,95}"
     r"\b(?:to|for|by)\b[^.;!?]{0,45}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b|"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b|"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,60}"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|customers?)\b[^.;!?]{0,60}"
     r"\b(?:pay|pays|paid|subscribe|subscribes|subscribed|buy|buys|purchase|purchases|"
     r"rent|rents)\b(?:[^.;!?]{0,35}\b(?:monthly|access|it|this|software|platform|app|"
     r"system|tool|product)\b)?"
@@ -268,23 +268,68 @@ SERVICE_INTERNAL_PRODUCT_PATTERN = re.compile(
     r"servicetitan)\b|"
     r"\b(?:saas|software|platform|app|portal|system|suite|dashboard|crm|clio|servicetitan)\b"
     r"[^.;!?]{0,55}\b(?:stores?|tracks?|holds?|records?)\b[^.;!?]{0,35}\b(?:leads?|cases?)\b"
+    r"|\b(?:our|the)\s+(?:family[- ]law|criminal[- ]defen[cs]e|plumbing)\s+"
+    r"(?:firm|company|team)\b[^.;!?]{0,55}"
+    r"\b(?:develops?|developing|builds?|building|commissioned|maintains?|maintaining)\b"
+    r"[^.;!?]{0,55}\b(?:software|platform|app|portal|system|suite|dashboard|crm|tool)\b"
+    r"[^.;!?]{0,45}\bfor\s+(?:its|our|their)\s+(?:lawyers?|attorneys?|plumbers?|staff|team)\b"
+    r"|\b(?:we|our\s+(?:team|staff))\b[^.;!?]{0,35}\buse\b[^.;!?]{0,35}"
+    r"\b(?:software|platform|app|portal|system|suite|dashboard|crm|tool)\b"
+    r"[^.;!?]{0,45}\bto\s+support\s+our\s+(?:family[- ]law|criminal[- ]defen[cs]e|plumbing)\s+"
+    r"(?:firm|company|team)\b"
     r")",
     re.I,
 )
 MARKETED_SERVICE_AUDIENCE_PATTERN = re.compile(
     r"(?:"
-    r"\b(?:marketing\s+agency|outsourced\s+bookkeeping|bookkeeping\s+service|consultancy|"
-    r"call[- ]answering\s+service|coaching\s+program|newsletter|directory|training\s+course|"
-    r"education\s+program|membership\s+community)\b[^.;!?]{0,80}"
+    r"\b(?:(?:ppc|seo|lead[- ]generation|website|web[- ]design|accounting|bookkeeping|"
+    r"managed[- ]it|digital[- ]marketing|marketing)\s+(?:agency|service)|"
+    r"outsourced\s+bookkeeping|bookkeeping\s+service|consultancy|"
+    r"call[- ]answering\s+service|(?:ai[- ]voice\s+)?receptionist\s+service|"
+    r"coaching\s+program|newsletter|directory|training\s+course|education\s+program|"
+    r"membership\s+community)\b[^.;!?]{0,80}"
     r"\b(?:serves?|serving|supports?|supporting|for|to)\b[^.;!?]{0,50}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|clinics?|dentists?)\b|"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|clinics?|dentists?)\b|"
     r"\b(?:sell|sells|selling|provide|provides|offering|offer)\b[^.;!?]{0,45}"
-    r"\b(?:outsourced\s+bookkeeping|bookkeeping|call[- ]answering\s+services?|coaching\s+programs?|"
-    r"training\s+courses?|newsletters?|directories|consulting|consultancy)\b[^.;!?]{0,55}"
+    r"\b(?:outsourced\s+bookkeeping|bookkeeping|accounting|managed[- ]it|website\s+services?|"
+    r"call[- ]answering\s+services?|(?:ai[- ]voice\s+)?receptionist\s+services?|"
+    r"coaching\s+programs?|training\s+courses?|newsletters?|directories|consulting|"
+    r"consultancy)\b[^.;!?]{0,55}"
     r"\b(?:to|for)\b[^.;!?]{0,40}"
     r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
-    r"plumbing[- ]companies|clinics?|dentists?)\b"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?|clinics?|dentists?)\b"
+    r")",
+    re.I,
+)
+MARKETED_COMMERCE_AUDIENCE_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:online[- ]store|online[- ]shop|shopify[- ]store|dtc[- ]brand|direct[- ]to[- ]consumer[- ]brand)\b"
+    r"[^.;!?]{0,90}\b(?:for|to|sell|sells|selling|serves?|serving)\b[^.;!?]{0,55}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?)\b|"
+    r"\b(?:sell|sells|selling)\b[^.;!?]{0,45}\b(?:products?|goods?|tools?|uniforms?|"
+    r"equipment|supplies)\b[^.;!?]{0,55}\b(?:to|for)\b[^.;!?]{0,35}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ](?:companies|businesses)|cabinet[- ]makers?)\b[^.;!?]{0,35}\bonline\b"
+    r")",
+    re.I,
+)
+CONSUMED_VENDOR_OR_RESOURCE_PATTERN = re.compile(
+    r"\b(?:hired|hire|managed\s+by|uses?|using|subscribes?\s+to|listed\s+in|"
+    r"attends?|attending|joined|joins?|buys?|purchases?)\b[^.;!?]{0,65}"
+    r"\b(?:(?:ppc|seo|lead[- ]generation|website|web[- ]design|accounting|bookkeeping|"
+    r"managed[- ]it|digital[- ]marketing|marketing)\s+(?:agency|service)|"
+    r"outsourced\s+bookkeeping|call[- ]answering\s+service|receptionist\s+service|"
+    r"coaching\s+program|newsletter|directory|training\s+course|consultancy)\b",
+    re.I,
+)
+HIRING_APPLICATION_CONTEXT_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:submit|send|complete|fill\s+out|use)\b[^.;!?]{0,45}"
+    r"\b(?:online|web)\s+application(?:\s+portal)?\b|"
+    r"\b(?:online|web)\s+application(?:\s+portal)?\b[^.;!?]{0,70}"
+    r"\b(?:candidates?|applying|apply|opening|vacancy|role|job)\b"
     r")",
     re.I,
 )
@@ -295,15 +340,35 @@ HARD_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
         r"\b(?:google tag manager|gtm|server[- ]side tag(?:ging)?)\b",
         "Google Tag Manager implementation is outside JRR scope",
     ),
-    (r"\b(?:local services ads?|google lsa|lsa management)\b", "Local Services Ads management is outside JRR scope"),
-    (r"\b(?:appsflyer|mobile app campaign|app install campaign)\b", "App campaign tracking is outside JRR scope"),
+    (
+        r"\b(?:local services? ads?|local services? advertising|local services? campaigns?|"
+        r"google local services?|google lsa|google guaranteed campaigns?|lsa campaigns?|"
+        r"lsa management|lsa expertise|lsas?)\b",
+        "Local Services Ads management is outside JRR scope",
+    ),
+    (
+        r"\b(?:appsflyer|app campaigns?|uac management|universal app campaigns?|"
+        r"mobile app campaigns?|mobile app installs?|app install campaigns?|"
+        r"app promotion campaigns?|ios app|android app|firebase|adjust|branch)\b",
+        "App campaign tracking is outside JRR scope",
+    ),
 )
 
 UNSUPPORTED_CHANNELS = {
-    "meta": ("meta ads", "facebook ads", "instagram ads"),
-    "linkedin": ("linkedin ads", "linkedin campaign manager"),
-    "reddit": ("reddit ads",),
-    "tiktok": ("tiktok ads",),
+    "meta": (
+        "meta ads",
+        "meta advertising",
+        "facebook ads",
+        "fb ads",
+        "facebook advertising",
+        "instagram ads",
+        "instagram advertising",
+        "paid social",
+        "social media advertising",
+    ),
+    "linkedin": ("linkedin ads", "linkedin ppc", "linkedin campaign manager"),
+    "reddit": ("reddit ads", "reddit advertising"),
+    "tiktok": ("tiktok ads", "tiktok advertising"),
     "capterra": ("capterra",),
 }
 
@@ -388,7 +453,9 @@ class JobAnalysis:
 def _text(job: Mapping[str, Any]) -> str:
     parts: list[str] = [str(job.get("title") or ""), str(job.get("description") or "")]
     parts.extend(str(item) for item in (job.get("skills") or []))
-    return " ".join(parts).lower()
+    # Keep owner-system fields clause-separated so a description negation
+    # cannot leak backwards onto a positive title or skill.
+    return ". ".join(parts).lower()
 
 
 def _number(value: Any) -> float | None:
@@ -430,6 +497,36 @@ def _contains_bounded_term(text: str, term: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", text.casefold()) is not None
 
 
+def _term_is_explicitly_excluded(text: str, term: str) -> bool:
+    """Return true only for clear target-local service exclusions."""
+
+    normalized = text.casefold().replace("’", "'")
+    pattern = rf"(?<![a-z0-9]){re.escape(term.casefold())}(?![a-z0-9])"
+    for match in re.finditer(pattern, normalized):
+        left = re.split(r"[.;!?\n]", normalized[max(0, match.start() - 120) : match.start()])[-1]
+        right = re.split(r"[.;!?\n]", normalized[match.end() : match.end() + 120])[0]
+        clause = re.sub(r"\s+", " ", f"{left} <term> {right}").strip()
+        if re.search(
+            r"\b(?:no|neither)\b[^.;!?]{0,75}<term>|"
+            r"\b(?:exclude|excludes|excluded|excluding|omit|omits|omitted|avoid|avoids|"
+            r"do\s+not\s+use|don't\s+use)\b[^.;!?]{0,55}<term>|"
+            r"<term>[^.;!?]{0,55}\b(?:is|are)?\s*(?:outside|out\s+of)\s+(?:the\s+)?scope\b|"
+            r"<term>[^.;!?]{0,55}\b(?:only\s+)?(?:is|are)?\s*not\s+"
+            r"(?:in\s+scope|required|needed|part\s+of\s+the\s+scope|the\s+scope)\b",
+            clause,
+        ):
+            return True
+    return False
+
+
+def _contains_positive_terms(text: str, terms: Iterable[str]) -> bool:
+    return any(
+        _contains_bounded_term(text, term)
+        and not _term_is_explicitly_excluded(text, term)
+        for term in terms
+    )
+
+
 def _proof_term_is_explicitly_excluded(text: str, term: str) -> bool:
     """Reject a vertical only when the job explicitly says not to use that proof.
 
@@ -454,6 +551,20 @@ def _proof_term_is_explicitly_excluded(text: str, term: str) -> bool:
             r"<proof>[^.;!?]{0,45}(?:case\s+stud(?:y|ies)|proof|example|vertical)?"
             r"[^.;!?]{0,30}\b(?:is|are|seems?|remain)?\s*"
             r"(?:irrelevant|unrelated|inapplicable|not\s+applicable|not\s+relevant)\b",
+            clause,
+        ) or re.search(
+            r"\b(?:not\s+an?|no|without)\b[^.;!?]{0,30}<proof>"
+            r"(?:[^.;!?]{0,25}\b(?:firm|company|clients?|customers?|market|business)\b)?|"
+            r"\b(?:nothing\s+to\s+do\s+with|unlike|except|other\s+than|rather\s+than)\b"
+            r"[^.;!?]{0,30}<proof>|"
+            r"<proof>[^.;!?]{0,45}\b(?:outside\s+our\s+market|not\s+our\s+field|"
+            r"former\s+market|old\s+niche|not\s+our\s+current\s+(?:market|niche|vertical))\b",
+            clause,
+        ) or re.search(
+            r"\b(?:no\s+longer\s+(?:serve|work\s+with)|stopped\s+working\s+with|"
+            r"previously\s+served)\b[^.;!?]{0,40}<proof>|"
+            r"<proof>[^.;!?]{0,40}\b(?:was|is)\b[^.;!?]{0,20}"
+            r"\b(?:former|previous|old)\b[^.;!?]{0,20}\b(?:market|niche|vertical)\b",
             clause,
         ):
             return True
@@ -503,6 +614,24 @@ def _classify_scope_match(
         sentence = sentence.replace(contraction, expanded)
         context = context.replace(contraction, expanded)
 
+    cross_clause_requirement_patterns = (
+        r"<scope>[^.!?]{0,120}[.!?;][^.!?]{0,100}"
+        r"\b(?:it|this|implementation|deployment|setup|phase\s+(?:two|2)|after\s+launch)\b"
+        r"[^.!?]{0,45}(?:(?:\bis|becomes?|remains?|will\s+be)\b[^.!?]{0,20}"
+        r"\b(?:mandatory|required|compulsory|indispensable|essential|a\s+core\s+deliverable)\b|"
+        r"\b(?:requires?|needs?|own|owns|configure|configures|implement|implements)\b"
+        r"[^.!?]{0,20}\b(?:it|this)?\b)",
+        r"<scope>[^.!?]{0,120}[.!?;][^.!?]{0,90}"
+        r"\b(?:we|you|the\s+(?:role|project|position|implementation))\b[^.!?]{0,45}"
+        r"\b(?:need|needs|require|requires|own|owns|configure|implement|transition|transitions)\b"
+        r"[^.!?]{0,35}\b(?:it|this|to\s+it)\b",
+        r"<scope>[^.!?]{0,100}[;,:][^.!?]{0,75}"
+        r"\b(?:implementation|deployment|setup)\b[^.!?]{0,30}"
+        r"\b(?:is\s+)?(?:required|mandatory|compulsory|essential|indispensable)\b",
+    )
+    if any(re.search(pattern, context) for pattern in cross_clause_requirement_patterns):
+        return "required"
+
     decisive_exclusion_patterns = (
         r"\bnon[- ]+\s*<scope>\s+(?:approach|solution|tracking|implementation)\b",
         r"\b(?:ask|require|need)\b[^.;!?]{0,45}\byou\s+not\s+(?:to\s+)?"
@@ -515,6 +644,16 @@ def _classify_scope_match(
         r"\b(?:freelancer|consultant|contractor)\b[^.;!?]{0,35}\bwill\s+not\s+"
         r"(?:handle|manage|touch|use|configure)\b[^.;!?]{0,20}<scope>",
         r"<scope>\s+must\s+not\s+be\s+(?:touched|handled|managed|configured|installed|used)\b",
+        r"\b(?:bypass|bypasses|bypassing|steer\s+clear\s+of)\b[^.;!?]{0,30}<scope>|"
+        r"\b(?:independent|agnostic)\b[^.;!?]{0,15}\b(?:of|to)\b[^.;!?]{0,15}<scope>",
+        r"<scope>\s*[- ]\s*(?:free|independent|less)\b|"
+        r"\b(?:independent|agnostic)\s+(?:of|to)\s+<scope>|"
+        r"\boutside\s+<scope>",
+        r"<scope>[^.;!?]{0,35}\bcannot\s+be\s+involved\b|"
+        r"\bleaves?\b[^.;!?]{0,25}<scope>[^.;!?]{0,20}\buntouched\b",
+        r"\bdo\s+not\s+apply\b[^.;!?]{0,60}\bif\b[^.;!?]{0,45}"
+        r"\b(?:plan|intend|expect)\b[^.;!?]{0,25}\b(?:install|configure|use|touch)\b"
+        r"[^.;!?]{0,20}<scope>",
     )
     if any(re.search(pattern, sentence) for pattern in decisive_exclusion_patterns):
         return "excluded"
@@ -554,6 +693,8 @@ def _classify_scope_match(
         r"\b(?:applicants?|candidates?)\b[^.;!?]{0,25}\bwill\s+be\s+considered\b",
         r"\b(?:applicants?|candidates?)\b[^.;!?]{0,30}\bmust\s+possess\b"
         r"[^.;!?]{0,20}<scope>\s+(?:expertise|knowledge|proficiency|experience)\b",
+        r"(?:\band\b|\bplus\b|,)\s*<scope>\s*$",
+        r"\bgoogle\s+ads\s+acquisition\b[^.;!?]{0,45}\bfor\b[^.;!?]{0,30}<scope>",
         r"<scope>[^.;!?]{0,75}\b(?:optional|not\s+needed)\b[^.;!?]{0,55}"
         r"[,;]\s*(?:(?:it|this)\s+(?:is\s+)?)?(?:required|mandatory)\b",
         r"<scope>[^.;!?]{0,70}\b(?:initially|currently|for\s+now)\b[^.;!?]{0,45}"
@@ -871,9 +1012,17 @@ def _has_non_client_service_business_model(job: Mapping[str, Any]) -> bool:
     if NON_CLIENT_TITLE_MODEL_PATTERN.search(title):
         return True
     description = str(job.get("description") or "")
-    description_has_product = PRODUCT_MODEL_PATTERN.search(description) is not None
-    for sentence in re.split(r"[.;!?\n]+", description):
-        if MARKETED_SERVICE_AUDIENCE_PATTERN.search(sentence):
+    content = f"{title}. {description}"
+    description_has_product = PRODUCT_MODEL_PATTERN.search(content) is not None
+    for sentence in re.split(r"[.;!?\n]+", content):
+        if HIRING_APPLICATION_CONTEXT_PATTERN.search(sentence):
+            continue
+        if MARKETED_COMMERCE_AUDIENCE_PATTERN.search(sentence):
+            return True
+        if (
+            MARKETED_SERVICE_AUDIENCE_PATTERN.search(sentence)
+            and not CONSUMED_VENDOR_OR_RESOURCE_PATTERN.search(sentence)
+        ):
             return True
         internal = bool(
             INTERNAL_BUSINESS_TOOL_PATTERN.search(sentence)
@@ -924,7 +1073,12 @@ def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str
         adjacent_tag_hits = [tag for tag in tag_hits if tag in ADJACENT_PROOF_TAGS]
         vertical_hits = [term for terms in tag_hits.values() for term in terms]
         service_hits = [term for term in service_terms if _contains_bounded_term(text, term)]
-        blocked_hits = [term for term in blocked_terms if _contains_bounded_term(text, term)]
+        blocked_hits = [
+            term
+            for term in blocked_terms
+            if _contains_bounded_term(text, term)
+            and not _term_is_explicitly_excluded(text, term)
+        ]
         # Service overlap alone is not case-study relevance. Require an audited
         # vertical/business-model tag before exposing any permitted claim.
         if not tag_hits:
@@ -996,7 +1150,10 @@ def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str
 def recommended_highlights(job: Mapping[str, Any], case_studies: list[dict[str, Any]] | None = None) -> list[str]:
     studies = case_studies if case_studies is not None else select_case_studies(job, limit=3)
     highlights = [study["highlight"] for study in studies if study.get("highlight")]
-    if _contains_any(_text(job), ("google ads", "adwords", "paid search", "ppc", "pmax", "performance max")):
+    if _contains_positive_terms(
+        _text(job),
+        ("google ads", "adwords", "paid search", "ppc", "pmax", "performance max"),
+    ):
         highlights.append(SEARCH_CERTIFICATION)
     return list(dict.fromkeys(highlights))[:4]
 
@@ -1022,7 +1179,11 @@ def _recommend_price(job: Mapping[str, Any], context: PricingContext, service_fi
     assumptions: list[str] = []
 
     if "hour" in job_type or rate_min is not None or rate_max is not None:
-        if rate_min is not None and rate_max is not None and rate_min > rate_max:
+        if (
+            (rate_min is not None and rate_min < 0)
+            or (rate_max is not None and rate_max < 0)
+            or (rate_min is not None and rate_max is not None and rate_min > rate_max)
+        ):
             assumptions.append(
                 "The observed client hourly minimum exceeded its maximum, so owner review is required"
             )
@@ -1110,6 +1271,53 @@ def _recommend_price(job: Mapping[str, Any], context: PricingContext, service_fi
             "assumptions": assumptions,
         }
 
+    if (
+        (budget_min is not None and budget_min < 0)
+        or (budget_max is not None and budget_max < 0)
+        or (budget_min is not None and budget_max is not None and budget_min > budget_max)
+    ):
+        assumptions.append(
+            "The observed client fixed-price range is negative or internally inconsistent"
+        )
+        return {
+            "type": "fixed",
+            "recommended_bid": None,
+            "defensible_range": None,
+            "minimum_fixed_fee": context.minimum_fixed_fee,
+            "founder_advisory_benchmark": context.founder_advisory_benchmark,
+            "pricing_source_version": context.source_version,
+            "client_budget": [budget_min, budget_max],
+            "position": "invalid_client_budget",
+            "requires_owner_approval": True,
+            "below_floor_exception": False,
+            "live_fee_preview_required": True,
+            "expected_net": None,
+            "assumptions": assumptions,
+        }
+    if budget_min is not None and budget_max is None:
+        assumptions.append(
+            "Only the client fixed-price minimum was observed, so the upper bound must be reviewed"
+        )
+        recommended_partial = (
+            max(budget_min, context.minimum_fixed_fee)
+            if context.minimum_fixed_fee is not None
+            else None
+        )
+        return {
+            "type": "fixed",
+            "recommended_bid": recommended_partial,
+            "defensible_range": None,
+            "minimum_fixed_fee": context.minimum_fixed_fee,
+            "founder_advisory_benchmark": context.founder_advisory_benchmark,
+            "pricing_source_version": context.source_version,
+            "client_budget": [budget_min, None],
+            "position": "partial_client_budget",
+            "requires_owner_approval": True,
+            "below_floor_exception": False,
+            "live_fee_preview_required": True,
+            "expected_net": None,
+            "assumptions": assumptions,
+        }
     if context.minimum_fixed_fee is None:
         assumptions.append("No current minimum fixed fee is configured, so the owner must choose the fixed bid")
         recommended_fixed: float | None = None
@@ -1148,12 +1356,30 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     missing: list[str] = []
     requires_scope_review = False
 
-    google_ads = _contains_any(
-        text, ("google ads", "google adwords", "adwords", "paid search", "ppc", "pmax", "performance max", "shopping")
+    google_ads = _contains_positive_terms(
+        text,
+        (
+            "google ads",
+            "google adwords",
+            "adwords",
+            "paid search",
+            "ppc",
+            "pmax",
+            "performance max",
+            "shopping",
+            "google search ads",
+            "sem",
+            "search advertising",
+            "google advertising",
+            "google search campaign",
+            "google search",
+            "search engine marketing",
+            "paid media",
+        ),
     )
-    seo = _contains_any(text, ("seo", "search engine optimization", "organic search", "technical seo"))
-    audit = _contains_any(text, ("audit", "review", "account analysis", "second opinion"))
-    lead_gen = _contains_any(
+    seo = _contains_positive_terms(text, ("seo", "search engine optimization", "organic search", "technical seo"))
+    audit = _contains_positive_terms(text, ("audit", "review", "account analysis", "second opinion"))
+    lead_gen = _contains_positive_terms(
         text, ("lead generation", "lead gen", "bookings", "phone calls", "form leads", "qualified leads")
     )
     ecommerce = _contains_any(
@@ -1226,23 +1452,35 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
     hours_per_week = str(job.get("hours_per_week") or "").casefold()
     structured_high_hours = bool(
         re.search(
-            r"\b(?:more\s+than\s+30|3[1-9]|[4-9]\d)\s*(?:\+\s*)?(?:hrs?|hours?)\b",
+            r"\b(?:more\s+than\s+30|30\s*\+|3[1-9]|[4-9]\d)\s*(?:hrs?|hours?)\b",
             hours_per_week,
         )
     )
     described_high_hours = bool(
         re.search(
-            r"\b(?:more\s+than\s+30|3[1-9]|[4-9]\d)\s*(?:\+\s*)?(?:hrs?|hours?)"
+            r"\b(?:more\s+than\s+30|at\s+least\s+30|30\s*\+|3[1-9]|[4-9]\d)"
+            r"\s*(?:hrs?|hours?)"
             r"(?:\s*/\s*(?:week|wk))?\b",
             text,
         )
     )
     contract_to_hire = job.get("contract_to_hire") is True
+    employee_commitment = bool(
+        re.search(
+            r"\b(?:permanent\s+(?:employee\s+role|employment|salaried\s+position|position)|"
+            r"salaried\s+position|join\s+our\s+team\s+as\s+an?\s+employee|"
+            r"transitions?\s+to\s+permanent\s+(?:employment|employee\s+status)|"
+            r"contract[- ]to[- ]hire|temp[- ]to[- ]perm|"
+            r"becomes?\s+(?:an?\s+)?staff\s+role|transitions?\s+to\s+(?:it|full[- ]time))\b",
+            text,
+        )
+    )
     employee_style = bool(
         "required" in employee_states
         or structured_high_hours
         or described_high_hours
         or contract_to_hire
+        or employee_commitment
     )
     if employee_style:
         blockers.append("The role is employee-style or requires 35+ hours rather than consultancy support")
@@ -1338,7 +1576,12 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         components.append(ScoreComponent("price_fit", -3, "The posted price needs a consultative conversion"))
     elif price["position"] in {"above_client_range", "above_client_budget"}:
         components.append(ScoreComponent("price_fit", -12, "The client range is below the configured minimum"))
-    elif price["position"] in {"invalid_client_range", "partial_client_range"}:
+    elif price["position"] in {
+        "invalid_client_range",
+        "partial_client_range",
+        "invalid_client_budget",
+        "partial_client_budget",
+    }:
         components.append(
             ScoreComponent(
                 "price_evidence_invalid",

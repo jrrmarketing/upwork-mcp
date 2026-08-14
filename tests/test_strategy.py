@@ -1593,6 +1593,34 @@ def test_inverted_hourly_range_requires_manual_review_and_never_boosts():
     assert partial.boost["recommendation"] == "no_boost"
 
 
+@pytest.mark.parametrize(
+    ("budget_update", "expected_position"),
+    [
+        ({"budget_min": 2000, "budget_max": 1000}, "invalid_client_budget"),
+        ({"budget_min": -100, "budget_max": 1000}, "invalid_client_budget"),
+        ({"budget_min": 1000}, "partial_client_budget"),
+    ],
+)
+def test_invalid_or_partial_fixed_budget_requires_manual_review_and_never_boosts(
+    budget_update,
+    expected_position: str,
+):
+    job = {
+        "title": "Google Ads for a family law firm",
+        "description": "Google Ads lead generation.",
+        "job_type": "fixed",
+        "proposal_count": 3,
+        "connects_required": 8,
+        "client": _client(),
+        **budget_update,
+    }
+    result = analyze_job(job, PricingContext(minimum_fixed_fee=500))
+
+    assert result.pricing["position"] == expected_position
+    assert result.recommendation == "scope_review"
+    assert result.boost["recommendation"] == "no_boost"
+
+
 def test_explicitly_rejected_vertical_proof_is_not_selected():
     result = analyze_job(
         {
@@ -1621,3 +1649,403 @@ def test_explicitly_rejected_vertical_proof_is_not_selected():
         }
     )
     assert all(study["key"] != "cage-and-miles-family-law" for study in rejected.case_studies)
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Do not apply if you plan to install GTM.",
+        "We need a solution that bypasses GTM.",
+        "We require tracking independent of GTM.",
+        "We need an implementation agnostic to GTM.",
+        "We need WhatConverts alone; GTM cannot be involved.",
+        "We need a GTM-free tracking solution.",
+        "We need a GTM-independent implementation.",
+        "We require GTM-less attribution.",
+        "We need tracking outside GTM.",
+        "We need to bypass GTM.",
+        "We need to steer clear of GTM.",
+        "We require an approach that leaves GTM untouched.",
+        "We need Google Ads, independent of GTM.",
+    ],
+)
+def test_gtm_free_scope_language_is_never_misread_as_required(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert not any("Tag Manager" in blocker for blocker in result.blockers), description
+    assert result.recommendation != "skip", description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "GTM is optional? No, it is mandatory.",
+        "GTM used to be optional. It is now required.",
+        "GTM was optional during discovery. It becomes mandatory at implementation.",
+        "GTM isn't required for phase one. Phase two requires it.",
+        "GTM is optional today. We need it tomorrow.",
+        "GTM is optional only during discovery; implementation is compulsory.",
+        "GTM can be skipped until launch; after launch you own it.",
+    ],
+)
+def test_later_gtm_requirement_overrides_earlier_phase_exclusion(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert result.recommendation == "skip", description
+    assert any("Tag Manager" in blocker for blocker in result.blockers), description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "This is freelance at first, then a permanent employee role.",
+        "This is a permanent salaried position.",
+        "You will join our team as an employee.",
+        "The successful freelancer transitions to permanent employment.",
+        "This is a 30+ hours/week role.",
+        "We require at least 30 hours per week.",
+        "This is a contract to hire position.",
+        "This is a temp-to-perm opportunity.",
+        "This starts part-time and becomes a staff role after onboarding.",
+        "Full-time is not expected initially. The position transitions to it after launch.",
+    ],
+)
+def test_employee_commitment_aliases_are_never_bid_or_boosted(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert result.recommendation == "skip", description
+    assert any("employee-style" in blocker for blocker in result.blockers), description
+    assert result.boost["recommendation"] == "no_boost", description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Google Ads and LSA campaigns.",
+        "Google Ads and LSAs.",
+        "Google Ads and Local Service Ads.",
+        "Google Ads and Google Local Services.",
+        "Google Ads and Google Guaranteed campaigns.",
+        "Google Ads and LSA expertise.",
+        "Google Ads and Local Services advertising.",
+        "Google Ads and Local Services campaigns.",
+        "Google Ads and App campaigns.",
+        "Google Ads and UAC management.",
+        "Google Ads and mobile app installs.",
+        "Google Ads and app promotion campaigns.",
+        "Google Ads and Universal App Campaigns.",
+        "Google Ads acquisition for our iOS app.",
+    ],
+)
+def test_lsa_and_app_aliases_are_hard_scope_blocks(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "client": _client(),
+        }
+    )
+    assert result.recommendation == "skip", description
+    assert result.blockers, description
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "paid social",
+        "FB Ads",
+        "Meta advertising",
+        "Facebook advertising",
+        "Instagram advertising",
+        "LinkedIn PPC",
+        "TikTok advertising",
+        "Reddit advertising",
+        "social media advertising",
+    ],
+)
+def test_unsupported_channel_aliases_add_boundary_and_disable_boost(alias: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": f"Manage Google Ads and {alias}.",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert any("unsupported channels" in boundary for boundary in result.scope_boundaries), alias
+    assert result.boost["recommendation"] == "no_boost", alias
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Google Ads for AI copilot for family law firms", "Paid search."),
+        ("AI agent serving criminal defense attorneys", "Google Ads."),
+        ("WordPress plugin for plumbing companies", "Google Ads."),
+        ("browser extension for family law attorneys", "Paid search."),
+        ("API used by family law firms", "Google Ads."),
+        ("legal operations hub for family law practices", "PPC."),
+        ("lead-routing engine for plumbing companies", "Google Ads."),
+        ("call answering service for plumbers", "Google Ads."),
+        ("Google Ads consultant", "We sell an app to plumbing businesses."),
+        ("Google Ads consultant", "We provide a platform to cabinet makers."),
+        ("Google Ads consultant", "We are a PPC agency serving family law firms."),
+        ("Google Ads consultant", "We are an SEO agency serving plumbing companies."),
+        ("Google Ads consultant", "We sell accounting services to family law firms."),
+        ("Google Ads consultant", "We are a managed-IT service serving criminal defense firms."),
+        ("Google Ads consultant", "We sell an AI voice receptionist service to law firms."),
+    ],
+)
+def test_product_and_vertical_facing_service_titles_never_borrow_client_proof(
+    title: str,
+    description: str,
+):
+    result = analyze_job(
+        {
+            "title": title,
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert not any(study["match_strength"] == "exact" for study in result.case_studies), title
+    assert result.boost["recommendation"] == "no_boost", title
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "expected_key"),
+    [
+        ("Google Ads consultant", "Our family law firm is developing software for its lawyers.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our plumbing company is building software for its plumbers.", "priority-one-plumbing"),
+        ("Google Ads consultant", "Our family law firm commissioned an app for our lawyers.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our family law firm maintains a dashboard for its attorneys.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "We use a CRM to support our family law firm.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our plumbing company commissioned an app for its plumbers.", "priority-one-plumbing"),
+        ("Google Ads consultant", "Our criminal defense firm maintains a portal for its attorneys.", "drd-criminal-law"),
+        ("Google Ads consultant", "Our family law firm hired a marketing agency serving law firms.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our plumbing company uses a call answering service for plumbers.", "priority-one-plumbing"),
+        ("Google Ads consultant", "Our criminal defense firm subscribes to a newsletter for lawyers.", "drd-criminal-law"),
+        ("Google Ads consultant", "Our family law firm is listed in a directory for attorneys.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our plumbing team attends a training course for plumbers.", "priority-one-plumbing"),
+    ],
+)
+def test_internal_tools_and_consumed_vendors_keep_current_vertical_proof(
+    title: str,
+    description: str,
+    expected_key: str,
+):
+    result = analyze_job(
+        {
+            "title": title,
+            "description": f"{description} We need Google Ads lead generation.",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert result.case_studies[0]["key"] == expected_key, description
+    assert result.case_studies[0]["match_strength"] == "exact", description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "No Google Ads or SEO; paid social only.",
+        "This project excludes SEO and Google Ads; it is for email marketing.",
+        "Google Ads is outside scope. We need social media management.",
+        "We need neither Google Ads nor SEO; only organic social.",
+    ],
+)
+def test_explicitly_excluded_core_services_never_create_fit_or_boost(description: str):
+    result = analyze_job(
+        {
+            "title": "Marketing consultant for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert result.recommendation == "skip", description
+    assert result.boost["recommendation"] == "no_boost", description
+    assert any("core Google Ads or SEO" in blocker for blocker in result.blockers), description
+
+
+@pytest.mark.parametrize(
+    ("description", "excluded_key"),
+    [
+        ("We are not a family law firm; we are an accounting firm.", "cage-and-miles-family-law"),
+        ("Family law is outside our market.", "cage-and-miles-family-law"),
+        ("We have no family law clients.", "cage-and-miles-family-law"),
+        ("Nothing to do with criminal defense.", "drd-criminal-law"),
+        ("Criminal defense is not our field.", "drd-criminal-law"),
+        ("Unlike plumbers, we sell direct-to-consumer furniture.", "priority-one-plumbing"),
+        ("Every legal vertical except family law.", "cage-and-miles-family-law"),
+        ("Other than family law, we serve accountants.", "cage-and-miles-family-law"),
+        ("Rather than plumbers, our customers are cabinet makers.", "priority-one-plumbing"),
+        ("We no longer serve family law.", "cage-and-miles-family-law"),
+        ("We stopped working with criminal defense clients.", "drd-criminal-law"),
+        ("We previously served plumbers but now sell furniture.", "priority-one-plumbing"),
+        ("Family law was our old niche.", "cage-and-miles-family-law"),
+        ("Plumbing is a former market, not our current one.", "priority-one-plumbing"),
+    ],
+)
+def test_negated_or_historical_verticals_never_supply_current_proof(
+    description: str,
+    excluded_key: str,
+):
+    result = analyze_job(
+        {
+            "title": "Google Ads consultant",
+            "description": f"{description} We need Google Ads.",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "client": _client(),
+        }
+    )
+    assert all(study["key"] != excluded_key for study in result.case_studies), description
+
+
+def test_explicitly_excluded_proof_limitations_do_not_disqualify_current_vertical():
+    for description in (
+        "Our family law firm needs Google Ads. We do not use Local Services Ads.",
+        "Our family law firm needs Google Ads. No SEO content creation is required.",
+        "Our family law firm needs Google Ads. SEO only is not the scope.",
+    ):
+        result = analyze_job(
+            {
+                "title": "Google Ads consultant",
+                "description": description,
+                "job_type": "hourly",
+                "hourly_rate_max": 100,
+                "proposal_count": 3,
+                "client": _client(),
+            }
+        )
+        assert result.case_studies[0]["key"] == "cage-and-miles-family-law", description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Our online store sells tools to plumbers.",
+        "We sell uniforms to plumbing companies online.",
+        "We operate a Shopify store for family law attorneys.",
+        "We are a DTC brand selling products to criminal defense lawyers.",
+    ],
+)
+def test_commerce_selling_to_a_vertical_never_borrows_service_business_proof(
+    description: str,
+):
+    result = analyze_job(
+        {
+            "title": "Google Ads consultant",
+            "description": f"{description} We need paid search.",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert not any(study["match_strength"] == "exact" for study in result.case_studies), description
+    assert result.boost["recommendation"] == "no_boost", description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Google Search Ads management.",
+        "SEM specialist.",
+        "Search advertising management.",
+        "Google advertising campaign management.",
+        "Paid media management focused on Google Search.",
+        "Google Search campaign optimisation.",
+        "Search engine marketing.",
+        "Google Search specialist.",
+    ],
+)
+def test_common_google_ads_aliases_are_recognised_as_core_service_fit(description: str):
+    result = analyze_job(
+        {
+            "title": "Paid acquisition for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert not any("core Google Ads or SEO" in blocker for blocker in result.blockers), description
+    assert result.recommendation != "skip", description
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "expected_key"),
+    [
+        ("Google Ads consultant", "Submit your online application for our family law firm's Google Ads role.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Please send an online application to our family law firm.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "This web application is for candidates applying to manage Google Ads for our family law firm.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Use the online application portal for our criminal defense firm Google Ads opening.", "drd-criminal-law"),
+    ],
+)
+def test_hiring_application_language_is_not_mistaken_for_a_product_model(
+    title: str,
+    description: str,
+    expected_key: str,
+):
+    result = analyze_job(
+        {
+            "title": title,
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert result.case_studies[0]["key"] == expected_key, description
+    assert result.case_studies[0]["match_strength"] == "exact", description

@@ -2,7 +2,13 @@
 import pytest
 from pydantic import ValidationError
 
-from upwork_mcp.tools.jobs import JobDetailsParams, JobSearchParams, parse_job_page_text
+from upwork_mcp.strategy import analyze_job
+from upwork_mcp.tools.jobs import (
+    JobDetailsParams,
+    JobSearchParams,
+    _aggregate_description_paragraphs,
+    parse_job_page_text,
+)
 
 JOB_TEXT = """
 Google Ads Expert for B2B SaaS
@@ -57,6 +63,27 @@ def test_parse_job_page_text_captures_reachability_and_client_economics():
         "member_since": "Jan 12, 2014",
         "total_spent": 204000.0,
     }
+
+
+def test_description_aggregation_keeps_short_requirements_and_all_visible_paragraphs():
+    long_context = (
+        "We need an experienced paid acquisition consultant to review the account, "
+        "improve lead quality, and explain the commercial tradeoffs to our team."
+    )
+    result = _aggregate_description_paragraphs(
+        [long_context, "Must configure GTM.", "Must configure GTM.", "  "]
+    )
+
+    assert result == f"{long_context}\nMust configure GTM."
+    analysis = analyze_job(
+        {
+            "title": "Google Ads consultant",
+            "description": result,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+        }
+    )
+    assert any("Tag Manager" in blocker for blocker in analysis.blockers)
 
 
 def test_search_schema_rejects_silent_or_inverted_filters():
