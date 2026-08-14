@@ -70,6 +70,43 @@ class _Button(_Text):
             self.callback()
 
 
+class _HiddenButton(_Button):
+    async def is_visible(self) -> bool:
+        return False
+
+
+class _ControlScope:
+    def __init__(self, controls: list[Any]) -> None:
+        self.controls = controls
+
+    async def query_selector_all(self, _selector: str) -> list[Any]:
+        return self.controls
+
+
+@pytest.mark.asyncio
+async def test_consequential_submit_controls_reject_hidden_clones_and_visible_ambiguity() -> None:
+    visible = _Button("Submit proposal")
+    hidden = _HiddenButton("Submit proposal")
+
+    assert await proposals._first_stage_submit_control(_ControlScope([hidden, visible])) is visible
+    assert await proposals._first_stage_submit_control(
+        _ControlScope([visible, _Button("Submit proposal")])
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_final_send_for_connects_ignores_hidden_clone_but_requires_one_visible_match() -> None:
+    visible = _Button("Send for 12 Connects")
+    hidden = _HiddenButton("Send for 12 Connects")
+
+    assert await proposals._exact_final_send_control(
+        _ControlScope([hidden, visible]), 12
+    ) is visible
+    assert await proposals._exact_final_send_control(
+        _ControlScope([visible, _Button("Send for 12 Connects")]), 12
+    ) is None
+
+
 class _CommitPage:
     def __init__(self, mismatch: str | None = None) -> None:
         self.url = "https://www.upwork.com/nx/proposals/job/~abc123/apply"

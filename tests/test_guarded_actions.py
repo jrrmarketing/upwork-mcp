@@ -18,13 +18,20 @@ def _browser_must_not_open() -> None:
     raise AssertionError("browser access happened before approval")
 
 
-def _approved(model, payload: dict[str, Any]):
-    return model.model_copy(
-        update={
-            "approved": True,
-            "approval_sha256": proposals.approval_payload_digest(payload),
-        }
+def _approved_once(model, payload: dict[str, Any], monkeypatch, state_dir):
+    monkeypatch.setenv("UPWORK_MCP_STATE_DIR", str(state_dir))
+    action_type = {
+        "SendMessageParams": "message",
+        "WithdrawProposalParams": "withdrawal",
+        "DeclineInvitationParams": "invitation_decline",
+    }[type(model).__name__]
+    prepared = prepare_action(action_type, payload)
+    approve_action(
+        prepared["action_id"],
+        prepared["approval_sha256"],
+        owner_approval_reference="fresh exact approval",
     )
+    return model.model_copy(update={"action_id": prepared["action_id"]})
 
 
 def test_action_schemas_are_strict() -> None:
@@ -291,6 +298,25 @@ async def test_legacy_withdrawal_call_requires_identity_preflight(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_legacy_digest_cannot_authorize_withdrawal(monkeypatch) -> None:
+    monkeypatch.setattr(proposals, "get_browser", _browser_must_not_open)
+    params = _withdrawal_params()
+    payload = proposals.proposal_withdrawal_payload(params)
+    result = await proposals.withdraw_proposal(
+        params.model_copy(
+            update={
+                "approved": True,
+                "approval_sha256": proposals.approval_payload_digest(payload),
+            }
+        )
+    )
+
+    assert result["status"] == "approval_required"
+    assert result["legacy_authorization_rejected"] is True
+    assert result["external_action_taken"] is False
+
+
+@pytest.mark.asyncio
 async def test_message_requires_exact_approval_before_browser(monkeypatch) -> None:
     monkeypatch.setattr(messages, "get_browser", _browser_must_not_open)
     params = messages.SendMessageParams(
@@ -309,7 +335,8 @@ async def test_message_requires_exact_approval_before_browser(monkeypatch) -> No
     mismatch = await messages.send_message(
         params.model_copy(update={"approved": True, "approval_sha256": "0" * 64})
     )
-    assert mismatch["status"] == "approval_mismatch"
+    assert mismatch["status"] == "approval_required"
+    assert mismatch["legacy_authorization_rejected"] is True
 
 
 @pytest.mark.asyncio
@@ -331,7 +358,8 @@ async def test_decline_requires_exact_approval_before_browser(monkeypatch) -> No
     mismatch = await invitations.decline_invitation(
         params.model_copy(update={"approved": True, "approval_sha256": "0" * 64})
     )
-    assert mismatch["status"] == "approval_mismatch"
+    assert mismatch["status"] == "approval_required"
+    assert mismatch["legacy_authorization_rejected"] is True
 
 
 class _TextElement:
@@ -651,7 +679,7 @@ async def test_conversation_list_extraction_rejects_query_room_bypass() -> None:
 
 
 @pytest.mark.asyncio
-async def test_approved_message_requires_exact_owner_system_readback(monkeypatch) -> None:
+async def test_approved_message_requires_exact_owner_system_readback(monkeypatch, tmp_path) -> None:
     page = _MessagePage()
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
     params = messages.SendMessageParams(
@@ -660,7 +688,7 @@ async def test_approved_message_requires_exact_owner_system_readback(monkeypatch
         contact_name="Alex Client",
         message="Exact approved message",
     )
-    params = _approved(params, messages.message_payload(params))
+    params = _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
 
     result = await messages.send_message(params)
     assert result["status"] == "sent"
@@ -679,6 +707,7 @@ async def test_approved_message_requires_exact_owner_system_readback(monkeypatch
 @pytest.mark.asyncio
 async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_history(
     monkeypatch,
+    tmp_path,
 ) -> None:
     page = _MessagePage()
     page.messages = [
@@ -694,7 +723,7 @@ async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_hist
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "duplicate_blocked"
@@ -706,6 +735,7 @@ async def test_approved_message_blocks_older_exact_copy_anywhere_in_visible_hist
 @pytest.mark.asyncio
 async def test_approved_message_does_not_treat_matching_inbound_copy_as_our_duplicate(
     monkeypatch,
+    tmp_path,
 ) -> None:
     page = _MessagePage()
     page.messages = [_MessageElement("Thanks!", is_mine=False)]
@@ -718,7 +748,7 @@ async def test_approved_message_does_not_treat_matching_inbound_copy_as_our_dupl
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "sent"
@@ -726,7 +756,9 @@ async def test_approved_message_does_not_treat_matching_inbound_copy_as_our_dupl
 
 
 @pytest.mark.asyncio
-async def test_approved_message_requires_byte_exact_duplicate_before_blocking(monkeypatch) -> None:
+async def test_approved_message_requires_byte_exact_duplicate_before_blocking(
+    monkeypatch, tmp_path
+) -> None:
     page = _MessagePage()
     page.messages = [_MessageElement("Exact approved message ", is_mine=True)]
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
@@ -738,7 +770,7 @@ async def test_approved_message_requires_byte_exact_duplicate_before_blocking(mo
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "sent"
@@ -753,6 +785,7 @@ class _UnreadableMessageElement(_MessageElement):
 @pytest.mark.asyncio
 async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
     monkeypatch,
+    tmp_path,
 ) -> None:
     page = _MessagePage()
     page.messages = [_UnreadableMessageElement("Unreadable", is_mine=True)]
@@ -765,7 +798,7 @@ async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "history_unreadable"
@@ -775,7 +808,9 @@ async def test_approved_message_fails_closed_when_visible_history_is_incomplete(
 
 
 @pytest.mark.asyncio
-async def test_approved_message_never_uses_page_send_or_enter_fallback(monkeypatch) -> None:
+async def test_approved_message_never_uses_page_send_or_enter_fallback(
+    monkeypatch, tmp_path
+) -> None:
     page = _MessagePage(scoped_send_available=False)
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
     params = messages.SendMessageParams(
@@ -786,7 +821,7 @@ async def test_approved_message_never_uses_page_send_or_enter_fallback(monkeypat
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "send_control_unavailable"
@@ -799,7 +834,7 @@ async def test_approved_message_never_uses_page_send_or_enter_fallback(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_approved_message_requires_one_exact_visible_composer(monkeypatch) -> None:
+async def test_approved_message_requires_one_exact_visible_composer(monkeypatch, tmp_path) -> None:
     page = _MessagePage(composer_count=2)
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
     params = messages.SendMessageParams(
@@ -810,7 +845,7 @@ async def test_approved_message_requires_one_exact_visible_composer(monkeypatch)
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "composer_unavailable"
@@ -820,7 +855,9 @@ async def test_approved_message_requires_one_exact_visible_composer(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_approved_message_requires_byte_exact_composer_readback(monkeypatch) -> None:
+async def test_approved_message_requires_byte_exact_composer_readback(
+    monkeypatch, tmp_path
+) -> None:
     page = _MessagePage()
     page.input.corrupt_readback = True
     monkeypatch.setattr(messages, "get_browser", lambda: _Browser(page))
@@ -832,7 +869,7 @@ async def test_approved_message_requires_byte_exact_composer_readback(monkeypatc
     )
 
     result = await messages.send_message(
-        _approved(params, messages.message_payload(params))
+        _approved_once(params, messages.message_payload(params), monkeypatch, tmp_path)
     )
 
     assert result["status"] == "composer_readback_mismatch"
@@ -1047,6 +1084,173 @@ async def test_approved_withdrawal_stops_if_live_proposal_identity_changed(
     replay = await proposals.withdraw_proposal(params)
     assert replay["status"] == "approval_required"
     assert "already been claimed" in replay["message"]
+
+
+class _WithdrawalDialog(_TextElement):
+    def __init__(
+        self,
+        *,
+        confirm_label: str = "Withdraw proposal",
+        reason: _Input | None = None,
+    ) -> None:
+        super().__init__("Withdraw proposal")
+        self.reason = reason
+        self.confirm_clicks = 0
+        self.confirm = _Button(
+            lambda: setattr(self, "confirm_clicks", self.confirm_clicks + 1),
+            confirm_label,
+        )
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if "textarea" in selector:
+            return [self.reason] if self.reason is not None else []
+        if "confirm-withdraw" in selector or "button" in selector:
+            return [self.confirm]
+        return []
+
+
+class _WithdrawalPage:
+    def __init__(self, dialogs: list[_WithdrawalDialog]) -> None:
+        self.url = "https://www.upwork.com/nx/proposals/1111111111111111111"
+        self.title = "Google Ads review"
+        self.status = "active"
+        self.dialogs = dialogs
+        self.initial_clicks = 0
+        self.change_title_on_open = False
+        self.initial = _Button(self._open_dialog, "Withdraw")
+
+    def _open_dialog(self) -> None:
+        self.initial_clicks += 1
+        if self.change_title_on_open:
+            self.title = "Different job"
+
+    async def query_selector(self, selector: str):
+        if selector == "body":
+            withdrawn = any(dialog.confirm_clicks for dialog in self.dialogs)
+            return _TextElement("Proposal was withdrawn" if withdrawn else "Active proposal")
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[Any]:
+        if "withdraw-button" in selector:
+            return [self.initial]
+        if 'role="dialog"' in selector or "withdraw-proposal-dialog" in selector:
+            return self.dialogs
+        if 'data-test="job-title"' in selector:
+            return [_TextElement(self.title)]
+        if "proposal-status" in selector:
+            return [_TextElement(self.status)]
+        return []
+
+
+def _withdrawal_params(*, reason: str | None = None) -> proposals.WithdrawProposalParams:
+    return proposals.WithdrawProposalParams(
+        proposal_url="https://www.upwork.com/nx/proposals/1111111111111111111",
+        proposal_id="1111111111111111111",
+        job_title="Google Ads review",
+        proposal_status="active",
+        reason=reason,
+    )
+
+
+def _mock_current_withdrawal_details(monkeypatch) -> None:
+    async def details(_proposal_url: str, _page) -> dict[str, Any]:
+        return {
+            "url": "https://www.upwork.com/nx/proposals/1111111111111111111",
+            "proposal_id": "1111111111111111111",
+            "job_title": "Google Ads review",
+            "status": "active",
+        }
+
+    monkeypatch.setattr(proposals, "_get_proposal_details_on_page", details)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_never_uses_generic_confirm_control(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    dialog = _WithdrawalDialog(confirm_label="Confirm")
+    page = _WithdrawalPage([dialog])
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "error"
+    assert "exact final Withdraw" in result["message"]
+    assert result["external_action_taken"] is False
+    assert page.initial_clicks == 1
+    assert dialog.confirm_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_rejects_multiple_visible_withdrawal_dialogs(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    dialogs = [_WithdrawalDialog(), _WithdrawalDialog()]
+    page = _WithdrawalPage(dialogs)
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "error"
+    assert "one exact visible withdrawal dialog" in result["message"].casefold()
+    assert result["external_action_taken"] is False
+    assert all(dialog.confirm_clicks == 0 for dialog in dialogs)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_rechecks_target_identity_before_exact_confirm(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    dialog = _WithdrawalDialog()
+    page = _WithdrawalPage([dialog])
+    page.change_title_on_open = True
+
+    result = await proposals._withdraw_proposal_on_page(_withdrawal_params(), page)
+
+    assert result["status"] == "live_identity_mismatch"
+    assert result["external_action_taken"] is False
+    assert dialog.confirm_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_requires_exact_dialog_scoped_reason_readback(monkeypatch) -> None:
+    _mock_current_withdrawal_details(monkeypatch)
+    reason = _Input()
+    reason.corrupt_readback = True
+    dialog = _WithdrawalDialog(reason=reason)
+    page = _WithdrawalPage([dialog])
+
+    result = await proposals._withdraw_proposal_on_page(
+        _withdrawal_params(reason="Specific approved reason"),
+        page,
+    )
+
+    assert result["status"] == "error"
+    assert "reason" in result["message"].casefold()
+    assert result["external_action_taken"] is False
+    assert dialog.confirm_clicks == 0
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_exact_dialog_reason_and_control_are_read_back(monkeypatch) -> None:
+    reason = _Input()
+    dialog = _WithdrawalDialog(reason=reason)
+    page = _WithdrawalPage([dialog])
+
+    async def details(_proposal_url: str, _page) -> dict[str, Any]:
+        return {
+            "url": page.url,
+            "proposal_id": "1111111111111111111",
+            "job_title": "Google Ads review",
+            "status": "withdrawn" if dialog.confirm_clicks else "active",
+        }
+
+    monkeypatch.setattr(proposals, "_get_proposal_details_on_page", details)
+    result = await proposals._withdraw_proposal_on_page(
+        _withdrawal_params(reason="Specific approved reason"),
+        page,
+    )
+
+    assert result["status"] == "withdrawn"
+    assert result["owner_system_readback"]["confirmed"] is True
+    assert result["external_action_taken"] is True
+    assert reason.value == "Specific approved reason"
+    assert dialog.confirm_clicks == 1
 
 
 @pytest.mark.asyncio
@@ -1553,6 +1757,98 @@ class _CommercialPreflightPage:
         if selector.startswith('button[data-test="submit-proposal"]'):
             self.submit_queries += 1
         return []
+
+
+class _HiddenCommercialPrice(_CommercialPrice):
+    async def is_visible(self) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_ignores_hidden_enabled_price_clone() -> None:
+    page = _CommercialPreflightPage()
+    hidden = _HiddenCommercialPrice(page)
+    original_query = page.query_selector_all
+
+    async def with_hidden_clone(selector: str) -> list[Any]:
+        if selector == proposals._HOURLY_RATE_INPUT_SELECTOR:
+            return [hidden, page.price_control]
+        return await original_query(selector)
+
+    page.query_selector_all = with_hidden_clone  # type: ignore[method-assign]
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "complete"
+    assert result["price_restored"] is True
+    assert hidden.value == "50"
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_rejects_fee_snapshot_stale_from_different_price() -> None:
+    class _StaleFeePage(_CommercialPreflightPage):
+        async def query_selector_all(self, selector: str) -> list[Any]:
+            if selector == proposals._FEE_CONTROL_SELECTOR:
+                return [_TextElement("$5.00")]
+            if selector == proposals._NET_CONTROL_SELECTOR:
+                return [_TextElement("$45.00")]
+            return await super().query_selector_all(selector)
+
+    page = _StaleFeePage()
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_price_amount"] is None
+    assert result["fee_net_details"]["stale_original_price_evidence_rejected"] is True
+    assert result["price_restored"] is True
+
+
+@pytest.mark.asyncio
+async def test_commercial_preflight_rejects_unstable_exact_restoration() -> None:
+    class _UnstableRestorePrice(_CommercialPrice):
+        def __init__(self, page: _CommercialPreflightPage) -> None:
+            super().__init__(page)
+            self.restoring = False
+            self.restore_reads = 0
+
+        async def fill(self, value: str) -> None:
+            if value == "50" and self.value != "50":
+                self.restoring = True
+                self.restore_reads = 0
+            await super().fill(value)
+
+        async def input_value(self) -> str:
+            if self.restoring:
+                self.restore_reads += 1
+                if self.restore_reads >= 2:
+                    return "50.00"
+            return self.value
+
+    page = _CommercialPreflightPage()
+    page.price_control = _UnstableRestorePrice(page)
+    result = await proposals._inspect_proposal_commercial_preflight_on_page(
+        proposals.InspectProposalCommercialPreflightParams(
+            job_url="https://www.upwork.com/nx/proposals/job/~123/apply",
+            rate=63,
+        ),
+        page,
+    )
+
+    assert result["fee_net_status"] == "incomplete"
+    assert result["fee_net_source"] is None
+    assert result["price_restored"] is False
+    assert result["external_action_taken"] is True
 
 
 @pytest.mark.asyncio

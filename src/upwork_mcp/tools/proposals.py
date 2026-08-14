@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import json
 import re
 from collections.abc import Mapping
@@ -147,7 +146,12 @@ def approval_gate(
     approval_sha256: str | None,
     action_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return a safe prepare/error response, or ``None`` when commit is authorised."""
+    """Authorize only an approved, one-shot prepared action.
+
+    ``approved`` and ``approval_sha256`` remain accepted at this shared boundary
+    solely so older callers receive a fail-closed response instead of a runtime
+    error.  A reusable digest is not authorization for an owner-system mutation.
+    """
 
     expected = approval_payload_digest(payload)
     prepared = {
@@ -173,17 +177,14 @@ def approval_gate(
             return prepared
         prepared["prepared_action_authorization"] = authorization
         return None
-    if not approved:
-        prepared["message"] = (
-            "No browser was opened. Show this exact payload to the owner and retry only "
-            "after approval with approved=true and the matching approval_sha256."
-        )
-        return prepared
-    if not approval_sha256 or not hmac.compare_digest(approval_sha256.lower(), expected):
-        prepared["status"] = "approval_mismatch"
-        prepared["message"] = "Approval digest is missing or does not match the exact action payload."
-        return prepared
-    return None
+    prepared["message"] = (
+        "No browser was opened. Prepare this exact payload, obtain owner approval, "
+        "and retry with its approved one-time action_id. Legacy approved/digest "
+        "authorization is not accepted."
+    )
+    if approved or approval_sha256:
+        prepared["legacy_authorization_rejected"] = True
+    return prepared
 
 
 class ProposalsParams(StrictToolModel):
@@ -2057,6 +2058,38 @@ async def _one_enabled(scope, selector: str) -> Any | None:
     return controls[0] if len(controls) == 1 else None
 
 
+async def _visible_enabled_elements(scope, selector: str) -> list[Any]:
+    """Return controls proven both visible and enabled.
+
+    Upwork can leave hidden responsive/modal clones in the DOM.  Consequential
+    actions must never bind one of those clones merely because ``is_enabled`` is
+    true.
+    """
+
+    try:
+        candidates = await scope.query_selector_all(selector)
+    except Exception:
+        return []
+    controls: list[Any] = []
+    for element in candidates:
+        if not await _element_is_visible(element):
+            continue
+        try:
+            enabled = bool(await element.is_enabled())
+        except Exception:
+            enabled = False
+        if enabled:
+            controls.append(element)
+    return controls
+
+
+async def _one_consequential_control(scope, selector: str) -> Any | None:
+    """Resolve exactly one visible and enabled consequential control."""
+
+    controls = await _visible_enabled_elements(scope, selector)
+    return controls[0] if len(controls) == 1 else None
+
+
 async def _fill_and_readback_text(element, value: str) -> bool:
     """Fill a consequential text field and require byte-for-byte readback."""
 
@@ -2339,7 +2372,7 @@ async def _commercial_preflight_price_control(
     """Resolve one reversible price input without changing payment structure."""
 
     if params.rate is not None:
-        control = await _one_enabled(page, _HOURLY_RATE_INPUT_SELECTOR)
+        control = await _one_consequential_control(page, _HOURLY_RATE_INPUT_SELECTOR)
         return (
             (control, None)
             if control is not None
@@ -2361,7 +2394,7 @@ async def _commercial_preflight_price_control(
             None,
             "By-project must already be selected; commercial preflight will not mutate payment structure",
         )
-    control = await _one_enabled(section, _BY_PROJECT_AMOUNT_INPUT_SELECTOR)
+    control = await _one_consequential_control(section, _BY_PROJECT_AMOUNT_INPUT_SELECTOR)
     return (
         (control, None)
         if control is not None
@@ -2378,6 +2411,60 @@ async def inspect_proposal_commercial_preflight(
     await browser.ensure_logged_in()
     async with browser.operation() as page:
         return await _inspect_proposal_commercial_preflight_on_page(params, page)
+
+
+def _decimal_control_value(value: Any) -> Decimal | None:
+    """Normalize a rendered price control value without guessing its currency."""
+
+    normalized = str(value or "").replace(",", "").strip()
+    normalized = re.sub(r"^[\s$£€]+", "", normalized).strip()
+    try:
+        amount = Decimal(normalized)
+    except (ArithmeticError, ValueError):
+        return None
+    return amount if amount.is_finite() else None
+
+
+def _fee_net_signature(snapshot: Mapping[str, Any]) -> tuple[str, tuple[str, ...]] | None:
+    status = snapshot.get("status")
+    text = snapshot.get("text")
+    if status not in {"complete", "incomplete", "unavailable"}:
+        return None
+    if not isinstance(text, list) or not all(isinstance(value, str) for value in text):
+        return None
+    return str(status), tuple(_dedupe_text(text))
+
+
+async def _stable_scoped_fee_net_snapshot(page) -> tuple[dict[str, Any], bool]:
+    """Require two identical scoped fee/net reads separated by a short settle."""
+
+    try:
+        first = await _inspect_fee_net_state(page)
+        try:
+            await page.wait_for_timeout(150)
+        except Exception:
+            pass
+        second = await _inspect_fee_net_state(page)
+    except Exception:
+        return (
+            {
+                "text": [],
+                "status": "unavailable",
+                "details": {"message": "Scoped fee/net controls could not be read twice."},
+            },
+            False,
+        )
+    first_signature = _fee_net_signature(first)
+    second_signature = _fee_net_signature(second)
+    stable = first_signature is not None and first_signature == second_signature
+    result = dict(second)
+    raw_details = second.get("details")
+    details: dict[str, Any] = dict(raw_details) if isinstance(raw_details, Mapping) else {}
+    result["details"] = {
+        **details,
+        "stable_scoped_readback": stable,
+    }
+    return result, stable
 
 
 async def _inspect_proposal_commercial_preflight_on_page(
@@ -2433,10 +2520,18 @@ async def _inspect_proposal_commercial_preflight_on_page(
             "message": "The original commercial price could not be read before reversible preflight."
         }
         return base_result
-    try:
-        original_fee_net = await _inspect_fee_net_state(page)
-    except Exception:
-        original_fee_net = {"text": [], "status": "unavailable"}
+    original_amount = _decimal_control_value(original_value)
+    if original_amount is None:
+        base_result["fee_net_details"] = {
+            "message": "The original commercial price could not be normalized before preflight."
+        }
+        return base_result
+    original_fee_net, original_snapshot_stable = await _stable_scoped_fee_net_snapshot(page)
+    if not original_snapshot_stable:
+        base_result["fee_net_details"] = {
+            "message": "The original scoped fee/net state was not stable enough for exact restoration."
+        }
+        return base_result
 
     inspection: dict[str, Any] = {
         "text": [],
@@ -2444,27 +2539,57 @@ async def _inspect_proposal_commercial_preflight_on_page(
         "details": {"message": "Commercial preflight did not complete."},
     }
     exact_price_entered = False
+    approved_snapshot_stable = False
+    approved_price_stable = False
+    stale_price_evidence = False
     restored = False
     identity_restored = False
     try:
         base_result["reversible_form_interaction"] = True
         await control.fill(format(approved_amount, "f"))
-        live_value = str(await control.input_value()).replace(",", "").replace("$", "").strip()
-        exact_price_entered = Decimal(live_value) == approved_amount
+        live_value = _decimal_control_value(await control.input_value())
+        exact_price_entered = live_value == approved_amount
         if not exact_price_entered:
             inspection["details"]["message"] = (
                 "The approved commercial price could not be read back exactly."
             )
         else:
+            blurred = False
             try:
                 await control.press("Tab")
+                blurred = True
             except Exception:
-                pass
-            try:
-                await page.wait_for_timeout(300)
-            except Exception:
-                pass
-            inspection = await _inspect_fee_net_state(page)
+                inspection["details"]["message"] = (
+                    "The approved price could not be blurred before fee/net readback."
+                )
+            if blurred:
+                try:
+                    await page.wait_for_timeout(300)
+                except Exception:
+                    pass
+                inspection, approved_snapshot_stable = await _stable_scoped_fee_net_snapshot(page)
+                approved_price_stable = (
+                    _decimal_control_value(await control.input_value()) == approved_amount
+                )
+                stale_price_evidence = bool(
+                    original_amount != approved_amount
+                    and _fee_net_signature(inspection) == _fee_net_signature(original_fee_net)
+                )
+                if not approved_snapshot_stable:
+                    inspection["status"] = "incomplete"
+                    inspection.setdefault("details", {})["message"] = (
+                        "Scoped fee/net evidence changed between post-blur readbacks."
+                    )
+                elif not approved_price_stable:
+                    inspection["status"] = "incomplete"
+                    inspection.setdefault("details", {})["message"] = (
+                        "The approved price changed while fee/net evidence was read."
+                    )
+                elif stale_price_evidence:
+                    inspection["status"] = "incomplete"
+                    inspection.setdefault("details", {})["message"] = (
+                        "Scoped fee/net evidence did not change from the different original price."
+                    )
     except Exception as error:
         inspection["details"]["message"] = (
             f"Commercial preflight failed before fee/net readback: {type(error).__name__}."
@@ -2472,23 +2597,31 @@ async def _inspect_proposal_commercial_preflight_on_page(
     finally:
         try:
             await control.fill(original_value)
+            restored_blurred = False
             try:
                 await control.press("Tab")
+                restored_blurred = True
             except Exception:
                 pass
             try:
                 await page.wait_for_timeout(300)
             except Exception:
                 pass
-            restored_fee_net = await _inspect_fee_net_state(page)
+            restored_value_before = str(await control.input_value())
+            restored_fee_net, restored_snapshot_stable = (
+                await _stable_scoped_fee_net_snapshot(page)
+            )
+            restored_value_after = str(await control.input_value())
             restored_identity = await _application_identity_from_current_page(page)
             identity_restored = restored_identity == identity
             restored = bool(
-                str(await control.input_value()) == original_value
+                restored_value_before == original_value
+                and restored_value_after == original_value
+                and restored_blurred
                 and identity_restored
-                and restored_fee_net.get("status") == original_fee_net.get("status")
-                and _dedupe_text(restored_fee_net.get("text") or [])
-                == _dedupe_text(original_fee_net.get("text") or [])
+                and restored_snapshot_stable
+                and _fee_net_signature(restored_fee_net)
+                == _fee_net_signature(original_fee_net)
             )
         except Exception:
             restored = False
@@ -2508,6 +2641,9 @@ async def _inspect_proposal_commercial_preflight_on_page(
             "fee_net_details": {
                 **(inspection.get("details") or {}),
                 "approved_price_entered": exact_price_entered,
+                "approved_price_stable_during_readback": approved_price_stable,
+                "stable_post_blur_scoped_readback": approved_snapshot_stable,
+                "stale_original_price_evidence_rejected": stale_price_evidence,
                 "price_restored": restored,
             },
             "fee_net_price_amount": format(approved_amount, ".2f")
@@ -3102,7 +3238,7 @@ async def _reinspect_every_approved_live_state(
 async def _first_stage_submit_control(page) -> Any | None:
     """Resolve one exact first-stage control only after every form readback."""
 
-    return await _one_enabled(
+    return await _one_consequential_control(
         page,
         'button[data-test="submit-proposal"]:text-is("Submit proposal"), '
         '[data-test="submit-proposal"] button:text-is("Submit proposal")',
@@ -3151,7 +3287,7 @@ async def _explicit_selection_state(element) -> bool | None:
 async def _exact_final_send_control(dialog, approved_base_connects: int) -> Any | None:
     """Resolve only a Send label whose cost exactly matches approved base Connects."""
 
-    candidates = await _enabled_elements(dialog, "button")
+    candidates = await _visible_enabled_elements(dialog, "button")
     matches: list[Any] = []
     for button in candidates:
         try:
@@ -3684,6 +3820,123 @@ async def withdraw_proposal(params: WithdrawProposalParams | str) -> dict:
         return await _withdraw_proposal_on_page(params, page)
 
 
+async def _current_submitted_proposal_identity(
+    page,
+    proposal_url: str,
+) -> dict[str, str] | None:
+    """Re-read one proposal identity without navigating away from an open dialog."""
+
+    try:
+        _, expected_id = parse_submitted_proposal_url(proposal_url)
+        _, live_id = parse_submitted_proposal_url(str(getattr(page, "url", "")))
+    except ValueError:
+        return None
+    if live_id != expected_id:
+        return None
+
+    async def one_visible_text(selector: str) -> str | None:
+        try:
+            candidates = await page.query_selector_all(selector)
+        except Exception:
+            return None
+        visible = [item for item in candidates if await _element_is_visible(item)]
+        if len(visible) != 1:
+            return None
+        try:
+            value = _normalise_identity_text(await visible[0].text_content())
+        except Exception:
+            return None
+        return value or None
+
+    job_title = await one_visible_text('[data-test="job-title"], .job-title')
+    proposal_status = await one_visible_text(
+        '[data-test="proposal-status"], .proposal-status, [data-test*="proposal-status"]'
+    )
+    if not job_title or not proposal_status:
+        return None
+    return {
+        "proposal_id": live_id,
+        "job_title": job_title,
+        "proposal_status": proposal_status,
+    }
+
+
+async def _exact_withdrawal_dialog(page) -> Any | None:
+    """Resolve one visible dialog whose own text identifies proposal withdrawal."""
+
+    try:
+        dialogs = await page.query_selector_all(
+            '[role="dialog"], [data-test="withdraw-proposal-dialog"], .air3-modal'
+        )
+    except Exception:
+        return None
+    matches: list[Any] = []
+    for dialog in dialogs:
+        if not await _element_is_visible(dialog):
+            continue
+        try:
+            text = _normalise_identity_text(await dialog.text_content())
+        except Exception:
+            continue
+        if re.search(r"\bwithdraw(?:ing)?\s+(?:this\s+)?proposal\b|\bproposal\s+withdrawal\b", text, re.I):
+            matches.append(dialog)
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _exact_withdraw_control(scope, selector: str) -> Any | None:
+    """Resolve one exact Withdraw/Withdraw proposal control, never Yes/Confirm."""
+
+    controls = await _visible_enabled_elements(scope, selector)
+    matches: list[Any] = []
+    for control in controls:
+        try:
+            label = _normalise_identity_text(await control.text_content())
+        except Exception:
+            continue
+        if re.fullmatch(r"Withdraw(?: proposal)?", label, re.I):
+            matches.append(control)
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _withdrawal_reason_state(
+    dialog,
+    approved_reason: str | None,
+    *,
+    fill: bool,
+) -> tuple[bool, str]:
+    """Fill/read one dialog-scoped reason control, or prove its approved blank state."""
+
+    controls = await _visible_enabled_elements(
+        dialog,
+        '[data-test*="withdraw-reason"] textarea, textarea[name*="reason"], textarea',
+    )
+    if len(controls) > 1:
+        return False, "Multiple visible withdrawal reason controls made the dialog ambiguous."
+    if approved_reason is None:
+        if not controls:
+            return True, "not_present"
+        try:
+            return (
+                str(await controls[0].input_value()) == "",
+                "blank" if str(await controls[0].input_value()) == "" else "unexpected_value",
+            )
+        except Exception:
+            return False, "The withdrawal reason state could not be read."
+    if len(controls) != 1:
+        return False, "One exact visible withdrawal reason control was not found."
+    try:
+        if fill:
+            await controls[0].fill(approved_reason)
+        exact = str(await controls[0].input_value()) == approved_reason
+    except Exception:
+        exact = False
+    return (
+        (True, "exact")
+        if exact
+        else (False, "The approved withdrawal reason could not be read back exactly.")
+    )
+
+
 async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> dict[str, Any]:
     """Withdraw while the browser operation lock is held."""
 
@@ -3716,8 +3969,11 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
             "external_action_taken": False,
         }
 
-    # Find withdraw button
-    withdraw_btn = await page.query_selector('[data-test="withdraw-button"], button:has-text("Withdraw")')
+    withdraw_btn = await _exact_withdraw_control(
+        page,
+        '[data-test="withdraw-button"], button:text-is("Withdraw"), '
+        'button:text-is("Withdraw proposal")',
+    )
     if not withdraw_btn:
         return {
             "status": "error",
@@ -3727,24 +3983,58 @@ async def _withdraw_proposal_on_page(params: WithdrawProposalParams, page) -> di
 
     await _click(page, withdraw_btn)
 
-    if params.reason:
-        reason_input = await page.query_selector(
-            '[role="dialog"] textarea, [data-test*="withdraw-reason"] textarea, textarea[name*="reason"]'
-        )
-        if not reason_input:
-            return {
-                "status": "error",
-                "message": "Approved withdrawal reason input not found; withdrawal was not confirmed.",
-                "external_action_taken": False,
-            }
-        await reason_input.fill(params.reason)
+    dialog = await _exact_withdrawal_dialog(page)
+    if dialog is None:
+        return {
+            "status": "error",
+            "message": "One exact visible withdrawal dialog was not found.",
+            "external_action_taken": False,
+        }
+    reason_ok, reason_state = await _withdrawal_reason_state(
+        dialog,
+        params.reason,
+        fill=True,
+    )
+    if not reason_ok:
+        return {
+            "status": "error",
+            "message": reason_state,
+            "external_action_taken": False,
+        }
 
-    # Confirm withdrawal in modal
-    confirm_btn = await page.query_selector('[data-test="confirm-withdraw"], button:has-text("Yes"), button:has-text("Confirm")')
+    # Re-resolve the exact dialog and every approved state immediately before
+    # the only irreversible click.  No page-wide Yes/Confirm fallback exists.
+    dialog = await _exact_withdrawal_dialog(page)
+    live_identity_before_confirm = await _current_submitted_proposal_identity(
+        page,
+        params.proposal_url,
+    )
+    reason_ok, final_reason_state = (
+        await _withdrawal_reason_state(dialog, params.reason, fill=False)
+        if dialog is not None
+        else (False, "The exact withdrawal dialog disappeared before confirmation.")
+    )
+    if dialog is None or live_identity_before_confirm != approved_identity or not reason_ok:
+        return {
+            "status": "live_identity_mismatch",
+            "message": (
+                "The exact proposal, withdrawal dialog, or approved reason changed before "
+                "confirmation; withdrawal was not confirmed."
+            ),
+            "approved_proposal_identity": approved_identity,
+            "live_proposal_identity": live_identity_before_confirm,
+            "withdrawal_reason_state": final_reason_state,
+            "external_action_taken": False,
+        }
+    confirm_btn = await _exact_withdraw_control(
+        dialog,
+        '[data-test="confirm-withdraw"], button:text-is("Withdraw"), '
+        'button:text-is("Withdraw proposal")',
+    )
     if not confirm_btn:
         return {
             "status": "error",
-            "message": "Withdrawal confirmation button not found.",
+            "message": "One exact final Withdraw control was not found in the withdrawal dialog.",
             "external_action_taken": False,
         }
     await _click(page, confirm_btn)
