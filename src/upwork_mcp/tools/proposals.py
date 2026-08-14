@@ -2354,8 +2354,8 @@ async def _reinspect_approved_commercial_state(
     """Exact-compare the approval-bound fee and boost auction snapshots."""
 
     checks = (
-        ("fee_net", globals().get("_inspect_fee_net_state")),
-        ("boost_auction", globals().get("_inspect_boost_auction_state")),
+        ("fee_net", _inspect_fee_net_state),
+        ("boost_auction", _inspect_boost_auction_state),
     )
     for prefix, inspector in checks:
         expected_text = getattr(params, f"{prefix}_text", None)
@@ -2810,15 +2810,14 @@ async def _submit_proposal_on_page(params: SubmitProposalParams, page) -> dict[s
         return {"status": "error", "message": "Approved duration option could not be selected", "external_action_taken": False}
     if not await _select_rate_increase_never(
         page,
-        getattr(params, "rate_increase_control_status", None),
+        params.rate_increase_control_status,
     ):
         return {
             "status": "live_form_mismatch",
             "message": 'Rate increase frequency/status could not be verified as "Never".',
             "external_action_taken": False,
         }
-    highlight_status = getattr(params, "available_profile_highlights_status", None)
-    if params.profile_highlights and highlight_status not in {None, "complete"}:
+    if params.profile_highlights and params.available_profile_highlights_status != "complete":
         return {
             "status": "live_form_mismatch",
             "message": "Approved profile-highlight enumeration was not complete.",

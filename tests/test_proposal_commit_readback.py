@@ -117,26 +117,35 @@ def _params(**updates: Any) -> proposals.SubmitProposalParams:
         "job_title": "Google Ads audit",
         "job_type": "hourly",
         "cover_letter": "Exact approved copy",
+        "fee_net_text": [
+            "Upwork service fee $6.30",
+            "You'll receive $56.70 net",
+        ],
+        "fee_net_status": "complete",
+        "boost_auction_text": ["Boost your proposal 8 Connects"],
+        "boost_auction_status": "complete",
         "rate": 63,
         "answers": ["Exact approved answer"],
         "screening_questions": ["What similar work have you done?"],
+        "screening_questions_status": "complete",
         "duration": "1 to 3 months",
+        "duration_options_status": "complete",
+        "available_profile_highlights_status": "complete",
         "base_connects": 12,
+        "rate_increase_control_status": "complete",
         "action_id": "uwa_test_action",
     }
     values.update(updates)
-    params = proposals.SubmitProposalParams(**values)
-    object.__setattr__(params, "rate_increase_control_status", "complete")
-    object.__setattr__(params, "fee_net_text", ["You'll receive $56.70 net"])
-    object.__setattr__(params, "fee_net_status", "complete")
-    object.__setattr__(params, "boost_auction_text", ["Boost your proposal 8 Connects"])
-    object.__setattr__(params, "boost_auction_status", "complete")
-    return params
+    return proposals.SubmitProposalParams(**values)
 
 
 def _commercial_inspectors(monkeypatch, *, changed: str | None = None) -> None:
     async def fee(_page):
-        text = ["Changed fee"] if changed == "fee" else ["You'll receive $56.70 net"]
+        text = (
+            ["Changed fee"]
+            if changed == "fee"
+            else ["Upwork service fee $6.30", "You'll receive $56.70 net"]
+        )
         return {"text": text, "status": "complete", "details": {}}
 
     async def boost(_page):
