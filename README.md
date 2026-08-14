@@ -59,12 +59,10 @@ No tool may infer approval or Connect spend from a recommendation.
 ## Verification
 
 ```bash
-uv lock --check
-uv sync --frozen --group dev
-uv run ruff check src tests
-uv run mypy src/upwork_mcp
-uv run pytest -q
+./scripts/verify.sh
 ```
+
+The same locked verification runs on every pull request and push to `main`.
 
 The default suite is offline. Owner-account checks are read-only and opt-in:
 
