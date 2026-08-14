@@ -1,19 +1,26 @@
 """Browser client for Upwork automation using Patchright with CDP."""
 
 import asyncio
+import fcntl
 import inspect
 import os
+import shutil
+import signal
 import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from patchright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
-PROFILE_DIR = Path.home() / ".upwork-mcp" / "chrome-profile"
+STATE_DIR = Path(os.environ.get("UPWORK_MCP_STATE_DIR", "~/.upwork-mcp")).expanduser()
+PROFILE_DIR = STATE_DIR / "chrome-profile"
+LOG_DIR = STATE_DIR / "logs"
+BROWSER_OPERATION_LOCK = STATE_DIR / "browser-operation.lock"
 CDP_PORT = 9222
 DESKTOP_VIEWPORT = {
     "width": 1500,
@@ -36,6 +43,85 @@ CHROME_PATHS = [
 ]
 
 
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+@contextmanager
+def browser_operation_file_lock():
+    """Serialize every process that can operate the dedicated Upwork browser."""
+    _ensure_private_directory(STATE_DIR)
+    descriptor = os.open(BROWSER_OPERATION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    os.chmod(BROWSER_OPERATION_LOCK, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+@asynccontextmanager
+async def _async_browser_operation_file_lock() -> AsyncIterator[None]:
+    _ensure_private_directory(STATE_DIR)
+    descriptor = os.open(BROWSER_OPERATION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    os.chmod(BROWSER_OPERATION_LOCK, 0o600)
+    acquired = False
+    try:
+        while not acquired:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                await asyncio.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _listener_pids() -> list[int]:
+    result = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{CDP_PORT}", "-sTCP:LISTEN", "-t"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode not in {0, 1}:
+        return []
+    return sorted({int(value) for value in result.stdout.split() if value.isdigit()})
+
+
+def _process_command(pid: int) -> str:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def dedicated_chrome_pids() -> list[int]:
+    expected_argument = f"--user-data-dir={PROFILE_DIR}"
+    return [pid for pid in _listener_pids() if expected_argument in _process_command(pid)]
+
+
+def chrome_debug_status() -> str:
+    """Return stopped, dedicated, or mismatched for the CDP listener."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=2) as response:
+            if response.status != 200:
+                return "stopped"
+    except Exception:
+        return "stopped"
+    return "dedicated" if dedicated_chrome_pids() else "mismatched"
+
+
 def find_chrome() -> str | None:
     """Find real Chrome/Chromium browser on system."""
     for path in CHROME_PATHS:
@@ -45,29 +131,26 @@ def find_chrome() -> str | None:
 
 
 def is_chrome_running_with_debug() -> bool:
-    """Check if Chrome is running with debug port."""
-    import urllib.request
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=2) as resp:
-            return resp.status == 200
-    except Exception:
+    """Check that the debug port belongs to the dedicated Upwork profile."""
+    return chrome_debug_status() == "dedicated"
+
+
+def _start_chrome_with_debug_locked() -> bool:
+    """Start the dedicated browser while the cross-process lock is held."""
+    status = chrome_debug_status()
+    if status == "dedicated":
+        return True
+    if status == "mismatched":
         return False
 
-
-def start_chrome_with_debug() -> bool:
-    """Start Chrome with remote debugging enabled.
-
-    This function remains synchronous for the login CLI. Async callers must run it
-    in a worker thread so waiting for Chrome never blocks or nests the active event
-    loop.
-    """
     chrome_path = find_chrome()
     if not chrome_path:
         return False
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(STATE_DIR)
+    _ensure_private_directory(PROFILE_DIR)
+    _ensure_private_directory(LOG_DIR)
 
-    # Start Chrome with debugging port
     subprocess.Popen(
         [
             chrome_path,
@@ -82,13 +165,69 @@ def start_chrome_with_debug() -> bool:
         stderr=subprocess.DEVNULL,
     )
 
-    # Wait for Chrome to start
     for _ in range(10):
-        if is_chrome_running_with_debug():
+        if chrome_debug_status() == "dedicated":
             return True
         time.sleep(0.5)
 
-    return is_chrome_running_with_debug()
+    return chrome_debug_status() == "dedicated"
+
+
+def start_chrome_with_debug() -> bool:
+    """Start Chrome with remote debugging enabled.
+
+    This function remains synchronous for the login CLI. Async callers must run it
+    in a worker thread so waiting for Chrome never blocks or nests the active event
+    loop.
+    """
+    with browser_operation_file_lock():
+        return _start_chrome_with_debug_locked()
+
+
+def _stop_dedicated_chrome_locked(timeout_seconds: float = 5.0) -> bool:
+    """Stop only the exact dedicated-profile listener while the lock is held."""
+    status = chrome_debug_status()
+    if status == "mismatched":
+        return False
+    pids = dedicated_chrome_pids()
+    if not pids:
+        return status == "stopped"
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        status = chrome_debug_status()
+        if status == "stopped":
+            return True
+        if status == "mismatched":
+            return False
+        time.sleep(0.1)
+    return False
+
+
+def stop_dedicated_chrome() -> bool:
+    with browser_operation_file_lock():
+        return _stop_dedicated_chrome_locked()
+
+
+def clear_saved_session() -> bool:
+    """Stop the exact dedicated Chrome, then remove its profile under one lock."""
+    with browser_operation_file_lock():
+        if chrome_debug_status() == "mismatched":
+            raise RuntimeError(
+                f"Refusing logout because port {CDP_PORT} is not owned by the dedicated Upwork profile."
+            )
+        existed = PROFILE_DIR.exists()
+        if not _stop_dedicated_chrome_locked():
+            raise RuntimeError("Dedicated Upwork Chrome did not stop; the saved session was not removed.")
+        if PROFILE_DIR.exists():
+            shutil.rmtree(PROFILE_DIR)
+        return existed
 
 
 def _supports_keyword(callable_obj: Callable[..., Any], keyword: str) -> bool:
@@ -160,8 +299,8 @@ class UpworkBrowser:
 
     async def start(self) -> Page:
         """Connect to Chrome via CDP."""
-        async with self._lifecycle_lock:
-            return await self._start_locked()
+        async with self.operation() as page:
+            return page
 
     def _browser_is_connected(self) -> bool:
         """Return whether the existing CDP connection is still usable."""
@@ -174,21 +313,31 @@ class UpworkBrowser:
 
     async def _start_locked(self) -> Page:
         """Start or repair the connection while ``_lifecycle_lock`` is held."""
+        await self._ensure_connected_locked()
+        page = await self._select_safe_page()
+        await self._configure_page(page)
+        return page
+
+    async def _ensure_connected_locked(self) -> None:
+        """Connect without selecting or configuring any existing browser tab."""
         if self._started and self._browser_is_connected():
-            page = await self._select_safe_page()
-            await self._configure_page(page)
-            return page
+            return
 
         if self._playwright or self._browser or self._started:
             await self._stop_playwright()
 
-        # Ensure Chrome is running with debug port
-        if not is_chrome_running_with_debug():
-            print("Starting Chrome with debug port...")
-            if not await asyncio.to_thread(start_chrome_with_debug):
+        status = chrome_debug_status()
+        if status == "mismatched":
+            raise RuntimeError(
+                f"Port {CDP_PORT} belongs to a Chrome process that is not using "
+                f"the dedicated Upwork profile at {PROFILE_DIR}."
+            )
+        if status != "dedicated":
+            print("Starting dedicated Upwork Chrome...", file=sys.stderr)
+            if not await asyncio.to_thread(_start_chrome_with_debug_locked):
                 raise RuntimeError(
-                    f"Could not start Chrome. Please start it manually with:\n"
-                    f'"{find_chrome()}" --remote-debugging-port={CDP_PORT}'
+                    "Could not start the dedicated Upwork Chrome profile. "
+                    "Run scripts/start-chrome-daemon.sh and inspect its error."
                 )
             await asyncio.sleep(2)
 
@@ -210,12 +359,23 @@ class UpworkBrowser:
                 **connect_options,
             )
             self._started = True
-            page = await self._select_safe_page()
-            await self._configure_page(page)
-            return page
         except Exception:
             await self._stop_playwright()
             raise
+
+    async def _create_owned_page_locked(self) -> Page:
+        """Create a new tab without selecting or modifying any existing tab."""
+        await self._ensure_connected_locked()
+        if self._browser is None:
+            raise RuntimeError("Browser is not connected")
+        contexts = list(self._browser.contexts)
+        context = contexts[0] if contexts else await self._browser.new_context()
+        page = await context.new_page()
+        self._context = context
+        self._page = page
+        self._page_is_owned = True
+        await self._configure_page(page)
+        return page
 
     async def _select_safe_page(self) -> Page:
         """Select an Upwork tab, or create an owned blank tab.
@@ -303,7 +463,26 @@ class UpworkBrowser:
         Existing helper methods use it without changing their public API.
         """
         async with self._operation_lock:
-            yield await self.get_page()
+            async with _async_browser_operation_file_lock():
+                yield await self.get_page()
+
+    @asynccontextmanager
+    async def disposable_operation(self) -> AsyncIterator[Page]:
+        """Use and close a new tab without navigating any existing Upwork tab."""
+        async with self._operation_lock:
+            async with _async_browser_operation_file_lock():
+                async with self._lifecycle_lock:
+                    page = await self._create_owned_page_locked()
+                try:
+                    yield page
+                finally:
+                    try:
+                        await page.close()
+                    finally:
+                        self._configured_page_ids.discard(id(page))
+                        if self._page is page:
+                            self._page = None
+                            self._page_is_owned = False
 
     async def _stop_playwright(self) -> None:
         """Disconnect Patchright without closing the owner's Chrome process."""
@@ -323,43 +502,44 @@ class UpworkBrowser:
             async with self._lifecycle_lock:
                 await self._stop_playwright()
 
-    async def is_logged_in(self) -> bool:
-        """Check if user is authenticated on Upwork."""
-        async with self.operation() as page:
-            try:
-                await page.goto("https://www.upwork.com/nx/find-work/best-matches", wait_until="domcontentloaded")
+    async def _is_logged_in_on_page(self, page: Page) -> bool:
+        try:
+            await page.goto("https://www.upwork.com/nx/find-work/best-matches", wait_until="domcontentloaded")
 
-                # Wait for page to stabilize (Cloudflare or content)
-                for _ in range(10):
-                    await asyncio.sleep(2)
-                    title = await page.title()
-                    if "moment" not in title.lower():
-                        break
-
-                current_url = page.url.lower()
+            for _ in range(10):
+                await asyncio.sleep(2)
                 title = await page.title()
+                if "moment" not in title.lower():
+                    break
 
-                # Check for Cloudflare (still showing)
-                if "moment" in title.lower():
-                    print("Cloudflare challenge detected. Please solve it in the browser window.")
-                    return False
+            current_url = page.url.lower()
+            title = await page.title()
 
-                # Check for login redirect
-                if "login" in current_url or "ab/account-security" in current_url:
-                    return False
-
-                body_text = await page.locator("body").inner_text(timeout=5000)
-                profile_hrefs = await page.locator('a[href*="/freelancers/"]').evaluate_all(
-                    "(links) => links.map((link) => link.href || '')"
-                )
-                return _is_expected_freelancer_snapshot(
-                    page.url,
-                    body_text,
-                    profile_hrefs,
-                )
-            except Exception as e:
-                print(f"Login check error: {e}")
+            if "moment" in title.lower():
+                print("Cloudflare challenge detected in the dedicated Upwork browser.", file=sys.stderr)
                 return False
+
+            if "login" in current_url or "ab/account-security" in current_url:
+                return False
+
+            body_text = await page.locator("body").inner_text(timeout=5000)
+            profile_hrefs = await page.locator('a[href*="/freelancers/"]').evaluate_all(
+                "(links) => links.map((link) => link.href || '')"
+            )
+            return _is_expected_freelancer_snapshot(page.url, body_text, profile_hrefs)
+        except Exception as error:
+            print(f"Login check error: {error}", file=sys.stderr)
+            return False
+
+    async def is_logged_in(self) -> bool:
+        """Check authentication on the process's normal serialized tab."""
+        async with self.operation() as page:
+            return await self._is_logged_in_on_page(page)
+
+    async def is_logged_in_disposable(self) -> bool:
+        """Check authentication without navigating an existing browser tab."""
+        async with self.disposable_operation() as page:
+            return await self._is_logged_in_on_page(page)
 
     async def ensure_logged_in(self) -> bool:
         """Verify login status, raise error if not logged in."""

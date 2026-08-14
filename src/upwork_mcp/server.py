@@ -564,11 +564,9 @@ async def upwork_bidding_report(
 
 @mcp.tool()
 async def upwork_check_session() -> dict:
-    """Check the attached freelancer session without exposing credentials."""
-    browser = get_browser()
+    """Check the freelancer session in a disposable serialized browser tab."""
     try:
-        await browser.start()
-        logged_in = await browser.is_logged_in()
+        logged_in = await check_session()
         return {
             "logged_in": logged_in,
             "message": "Session is valid" if logged_in else "Session expired; run the Upwork login flow.",

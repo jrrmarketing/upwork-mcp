@@ -1,6 +1,9 @@
 #!/bin/bash
-# Stop the upwork-mcp Chrome instance (does not clear session cookies).
+# Stop only the exact dedicated Upwork Chrome instance.
 set -euo pipefail
+umask 077
 
-pkill -f "user-data-dir=${HOME}/.upwork-mcp/chrome-profile" 2>/dev/null || true
-echo "Stopped upwork-mcp Chrome (if it was running)."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+uv run python -m upwork_mcp.browser.lifecycle stop
+echo "Stopped dedicated Upwork Chrome."
