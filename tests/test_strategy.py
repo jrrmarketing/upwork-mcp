@@ -1359,3 +1359,265 @@ def test_old_unviewed_proposals_are_not_withdrawn_for_cosmetic_cleanup():
     submitted = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%d")
     result = audit_proposals([{"job_title": "Old job", "submitted": submitted, "client_viewed": False}])
     assert result["proposals"][0]["maintenance_action"] == "leave_unwithdrawn"
+
+
+@pytest.mark.parametrize(
+    ("expected", "description"),
+    [
+        ("excluded", "We require WhatConverts with zero GTM involvement."),
+        ("excluded", "We need tracking that excludes GTM."),
+        ("excluded", "We need a solution free from GTM."),
+        ("excluded", "We require a non-GTM approach."),
+        ("excluded", "We need no involvement with GTM."),
+        ("excluded", "Please refrain from installing GTM."),
+        ("excluded", "We ask that you not configure GTM."),
+        ("excluded", "You must avoid installing GTM."),
+        ("excluded", "WhatConverts is mandatory and GTM is disallowed."),
+        ("excluded", "Use WhatConverts in place of GTM."),
+        ("excluded", "The solution must be built without GTM."),
+        ("excluded", "Absolutely no GTM."),
+        ("excluded", "GTM is banned."),
+        ("excluded", "GTM is not in scope."),
+        ("excluded", "The freelancer won't handle GTM."),
+        ("excluded", "GTM must not be touched."),
+        ("excluded", "We need a contractor rather than a full-time hire."),
+        ("excluded", "We require freelance support instead of full-time employment."),
+        ("excluded", "We need ten hours weekly, never full-time."),
+        ("excluded", "Full-time involvement is prohibited."),
+        ("required", "GTM expertise is essential; certification is optional."),
+        ("required", "GTM proficiency is required; GA4 is optional."),
+        ("required", "GTM ownership is mandatory; reporting is optional."),
+        ("required", "GTM maintenance is required; calls are optional."),
+        ("required", "GTM deployment is necessary; training is optional."),
+        ("required", "GTM must be supported; reporting is optional."),
+        ("required", "GTM has to be maintained; calls are optional."),
+        ("required", "GTM, required for conversion tracking, is central; reporting is optional."),
+        ("required", "GTM (mandatory for Ads) is needed; reporting is optional."),
+        ("required", "We won't hire anyone unfamiliar with GTM."),
+        ("required", "We are not considering candidates inexperienced in GTM."),
+        ("required", "Applicants new to GTM should not apply."),
+        ("required", "GTM novices need not apply."),
+        ("required", "Only GTM-qualified applicants will be considered."),
+        ("required", "Candidates must possess GTM expertise."),
+        ("required", "We do not want applicants unfamiliar with GTM."),
+        ("required", "We don't need anyone inexperienced in GTM."),
+        ("required", "We will not hire a GTM novice."),
+        ("required", "GTM can be omitted only when approved; otherwise configure it."),
+        ("required", "GTM is optional if WhatConverts works; failing that, implement it."),
+        ("required", "You may skip GTM for the audit; the implementation phase requires it."),
+        ("ambiguous", "GTM familiarity may become useful as the project evolves."),
+        ("ambiguous", "The account contains a GTM container, but ownership is undecided."),
+        ("ambiguous", "GTM could be included after discovery."),
+        ("ambiguous", "Whether GTM is part of phase two is still open."),
+        ("ambiguous", "The client has not decided who will own GTM."),
+        ("ambiguous", "GTM is mentioned in the brief without a defined deliverable."),
+        ("ambiguous", "GTM access may be available if needed."),
+        ("ambiguous", "The weekly commitment may increase toward full-time."),
+        ("ambiguous", "This could become a full-time engagement depending on results."),
+    ],
+)
+def test_scope_classifier_extended_counterexample_corpus(expected: str, description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads consultant for a family law firm",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    employee_block = any("employee-style" in blocker for blocker in result.blockers)
+    gtm_block = any("Tag Manager" in blocker for blocker in result.blockers)
+    if expected == "required":
+        assert result.recommendation == "skip", description
+        assert gtm_block or employee_block, description
+    elif expected == "ambiguous":
+        assert result.recommendation == "scope_review", description
+        assert not gtm_block and not employee_block, description
+        assert result.boost["recommendation"] == "no_boost", description
+    else:
+        assert not gtm_block and not employee_block, description
+        assert result.recommendation not in {"skip", "scope_review"}, description
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "expected_key"),
+    [
+        ("Google Ads consultant", "Our family law firm has a client portal and needs Google Ads lead generation.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our family law firm uses a CRM and needs Google Ads lead generation.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our criminal defense attorneys log into Clio and need Google Ads lead generation.", "drd-criminal-law"),
+        ("Google Ads consultant", "Our plumbers use a scheduling system and need Google Ads lead generation.", "priority-one-plumbing"),
+        ("Google Ads consultant", "Our plumbing company runs ServiceTitan and needs Google Ads lead generation.", "priority-one-plumbing"),
+        ("Google Ads consultant", "Our family law firm adopted a client portal and needs Google Ads lead generation.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "The family law team works in a case-management system and needs Google Ads lead generation.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our attorneys rely on a legal dashboard and need Google Ads lead generation for the family law practice.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our family law firm uses legal software and needs Google Ads lead generation.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our family law firm offers a suite of legal services and needs Google Ads lead generation.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our plumbing company offers a system of maintenance plans and needs Google Ads lead generation.", "priority-one-plumbing"),
+        ("Google Ads consultant", "Our attorneys use a dashboard to monitor Google Ads for the family law firm.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Please submit an application for this Google Ads role at our family law firm.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "Our family law firm needs a system for managing Google Ads.", "cage-and-miles-family-law"),
+        ("Google Ads consultant", "We need Google Ads for our family law firm, and our CRM stores leads.", "cage-and-miles-family-law"),
+    ],
+)
+def test_extended_internal_tool_language_retains_service_vertical_proof(
+    title: str,
+    description: str,
+    expected_key: str,
+):
+    result = analyze_job(
+        {
+            "title": title,
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.case_studies[0]["key"] == expected_key, description
+    assert result.case_studies[0]["match_strength"] == "exact", description
+    assert result.boost["recommendation"] == "inspect_live_auction", description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "We sell an AI copilot to family law firms and need Google Ads lead generation.",
+        "We offer an AI agent to criminal defense attorneys and need Google Ads.",
+        "We license a WordPress plugin to plumbing companies and need Google Ads.",
+        "We sell a browser extension to family law attorneys and need paid search.",
+        "We provide an API to family law firms and need Google Ads.",
+        "We offer a case-management database to law firms and need Google Ads.",
+        "We sell a practice-management toolkit to attorneys and need paid search.",
+        "We market a digital workspace to criminal defense firms and need Google Ads.",
+        "We sell a legal operations hub to family law practices and need PPC.",
+        "We offer a lead-routing engine to plumbing companies and need Google Ads.",
+        "We use the AI copilot internally and sell it to family law firms. We need Google Ads.",
+        "We use the plugin internally and offer it to plumbers. We need Google Ads.",
+        "Our internal API is licensed to family law firms. We need Google Ads.",
+        "We built the database internally and family law firms subscribe to it. We need paid search.",
+        "Our staff use the tool internally and family law firms pay monthly. We need Google Ads.",
+        "We built an internal platform with paid subscriptions for law firms. We need Google Ads.",
+        "We are a marketing agency serving family law firms and need Google Ads for our agency.",
+        "We sell outsourced bookkeeping to family law firms and need paid search.",
+        "We are a consultancy serving criminal defense firms and need Google Ads.",
+        "We provide call answering services to plumbing companies and need Google Ads.",
+        "We sell coaching programs to family law attorneys and need Google Ads.",
+        "We publish a newsletter for criminal defense lawyers and need PPC.",
+        "We run a directory for family law firms and need paid search.",
+        "We sell training courses to plumbing companies and need Google Ads.",
+    ],
+)
+def test_extended_marketed_models_never_borrow_end_client_vertical_proof(description: str):
+    result = analyze_job(
+        {
+            "title": "Google Ads consultant",
+            "description": description,
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert not any(study["match_strength"] == "exact" for study in result.case_studies), description
+    assert result.boost["recommendation"] == "no_boost", description
+
+
+@pytest.mark.parametrize(
+    "job_update",
+    [
+        {"hours_per_week": "More than 30 hrs/week"},
+        {"contract_to_hire": True},
+        {"hours_per_week": "More than 30 hrs/week", "contract_to_hire": True},
+        {"description": "Google Ads lead generation. More than 30 hrs/week."},
+    ],
+)
+def test_structured_employee_style_scope_is_never_bid_or_boosted(job_update):
+    job = {
+        "title": "Google Ads for a family law firm",
+        "description": "Google Ads lead generation.",
+        "job_type": "hourly",
+        "hourly_rate_max": 100,
+        "proposal_count": 3,
+        "connects_required": 8,
+        "client": _client(),
+    }
+    job.update(job_update)
+    result = analyze_job(job)
+
+    assert result.recommendation == "skip"
+    assert any("employee-style" in blocker for blocker in result.blockers)
+    assert result.boost["recommendation"] == "no_boost"
+
+
+def test_inverted_hourly_range_requires_manual_review_and_never_boosts():
+    result = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": "Google Ads lead generation.",
+            "job_type": "hourly",
+            "hourly_rate_min": 200,
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+
+    assert result.pricing["position"] == "invalid_client_range"
+    assert result.recommendation == "scope_review"
+    assert result.boost["recommendation"] == "no_boost"
+
+    partial = analyze_job(
+        {
+            "title": "Google Ads for a family law firm",
+            "description": "Google Ads lead generation.",
+            "job_type": "hourly",
+            "hourly_rate_min": 120,
+            "proposal_count": 3,
+            "connects_required": 8,
+            "client": _client(),
+        }
+    )
+    assert partial.pricing["position"] == "partial_client_range"
+    assert partial.pricing["recommended_bid"] >= 120
+    assert partial.recommendation == "scope_review"
+    assert partial.boost["recommendation"] == "no_boost"
+
+
+def test_explicitly_rejected_vertical_proof_is_not_selected():
+    result = analyze_job(
+        {
+            "title": "Google Ads consultant",
+            "description": (
+                "Plumbing case studies are irrelevant; our criminal defense firm needs Google Ads."
+            ),
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "client": _client(),
+        }
+    )
+
+    assert result.case_studies[0]["key"] == "drd-criminal-law"
+    assert all(study["key"] != "priority-one-plumbing" for study in result.case_studies)
+
+    rejected = analyze_job(
+        {
+            "title": "Google Ads consultant",
+            "description": "Do not use family law case studies in the proposal.",
+            "job_type": "hourly",
+            "hourly_rate_max": 100,
+            "proposal_count": 3,
+            "client": _client(),
+        }
+    )
+    assert all(study["key"] != "cage-and-miles-family-law" for study in rejected.case_studies)

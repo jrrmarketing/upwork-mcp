@@ -70,9 +70,18 @@ TAG_TERMS: Mapping[str, tuple[str, ...]] = {
     "disability_law": ("disability law", "disability attorney", "ssdi"),
     "ecommerce": ("ecommerce", "e-commerce", "shopify", "woocommerce", "shopping"),
     "furniture": ("furniture", "cushion", "home decor"),
-    "home_services": ("home service", "plumber", "plumbing", "hvac", "roofing", "contractor", "window tint"),
-    "plumbing": ("plumber", "plumbing"),
-    "trades": ("trades", "plumber", "plumbing", "hvac", "roofing", "contractor", "cabinet"),
+    "home_services": (
+        "home service",
+        "plumber",
+        "plumbers",
+        "plumbing",
+        "hvac",
+        "roofing",
+        "contractor",
+        "window tint",
+    ),
+    "plumbing": ("plumber", "plumbers", "plumbing"),
+    "trades": ("trades", "plumber", "plumbers", "plumbing", "hvac", "roofing", "contractor", "cabinet"),
     "home_improvement": ("home improvement", "remodel", "cabinet", "contractor"),
     "window_tinting": ("window tint", "architectural tint", "solar film"),
     "beauty": ("beauty", "aesthetic", "cosmetic", "med spa", "head spa"),
@@ -142,7 +151,8 @@ NON_CLIENT_DESCRIPTION_MODEL_PATTERN = re.compile(
 )
 PRODUCT_MODEL_PATTERN = re.compile(
     r"\b(?:saas|software|platform|marketplace|(?:mobile|web|online)[- ]+(?:app|application)|"
-    r"app|application|portal|system|suite|dashboard|chatbot|bot|"
+    r"app|portal|system|suite|dashboard|chatbot|bot|copilot|agent|plugin|extension|api|"
+    r"workspace|hub|engine|database|"
     r"(?:mobile|scheduling|booking|workflow|case[- ]management|practice[- ]management|"
     r"field[- ]service(?:\s+management)?|case[- ]intake|client[- ]intake|crm)\s+solution|"
     r"case[- ]manager|virtual[- ]receptionist|(?:ai[- ]+)?assistant|(?:ai[- ]+)?tool|"
@@ -195,11 +205,28 @@ EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN = re.compile(
     r")",
     re.I,
 )
+EXTERNAL_COMMERCIAL_RELATION_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:sell|sells|selling|sold|offer|offers|offered|offering|license|licenses|licensed|"
+    r"licensing|market|markets|marketed|marketing|provide|provides|provided|rent|rents|"
+    r"rented|monetize|monetizes|monetized)\b[^.;!?]{0,95}"
+    r"\b(?:to|for|by)\b[^.;!?]{0,45}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b|"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|customers?)\b[^.;!?]{0,60}"
+    r"\b(?:pay|pays|paid|subscribe|subscribes|subscribed|buy|buys|purchase|purchases|"
+    r"rent|rents)\b(?:[^.;!?]{0,35}\b(?:monthly|access|it|this|software|platform|app|"
+    r"system|tool|product)\b)?"
+    r")",
+    re.I,
+)
 MARKETED_PRODUCT_AUDIENCE_PATTERN = re.compile(
     r"(?:"
     r"\b(?:saas|software|platform|marketplace|mobile[- ]app|app|web\s+application|"
     r"online\s+application|portal|online\s+product|digital\s+product|product|system|suite|"
-    r"dashboard|chatbot|bot|case[- ]manager|virtual\s+receptionist|"
+    r"dashboard|chatbot|bot|copilot|agent|plugin|extension|api|workspace|hub|engine|database|"
+    r"case[- ]manager|virtual\s+receptionist|"
     r"(?:ai\s+)?assistant|(?:ai\s+)?tool|crm(?:\s+solution)?|"
     r"(?:case[- ]management|practice[- ]management|case\s+intake|client\s+intake|"
     r"mobile|booking|scheduling|field[- ]service(?:\s+management)?)\s+(?:system|solution)|"
@@ -207,12 +234,7 @@ MARKETED_PRODUCT_AUDIENCE_PATTERN = re.compile(
     r"\b(?:for|to|helps?|helping|serves?|serving|supports?|connects?|connecting|used\s+by)\b"
     r"[^.;!?]{0,75}\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law(?:\s+firms?|\s+practices?)?|"
     r"criminal[- ]defen[cs]e(?:\s+firms?|\s+lawyers?|\s+attorneys?)?|plumbers?|"
-    r"plumbing\s+companies|clinics?|dentists?)\b|"
-    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|"
-    r"plumbers?|plumbing\s+companies|clinics?|dentists?)\b[^.;!?]{0,75}"
-    r"\b(?:saas|software|platform|marketplace|app|application|portal|product|assistant|"
-    r"tool|crm|solution|system|suite|dashboard|chatbot|bot|case[- ]manager|"
-    r"virtual\s+receptionist|automation|cloud\s+service|technology)\b"
+    r"plumbing\s+companies|clinics?|dentists?)\b"
     r")",
     re.I,
 )
@@ -234,6 +256,35 @@ INTERNAL_BUSINESS_TOOL_PATTERN = re.compile(
     r"[^.;!?]{0,80}\b(?:powers?|is\s+used|helps?)\b[^.;!?]{0,70}"
     r"\b(?:our\s+(?:internal\s+)?(?:team|staff|firm|attorneys?|technicians?|cases?|casework)|"
     r"internally|in[- ]house)\b"
+    r")",
+    re.I,
+)
+SERVICE_INTERNAL_PRODUCT_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:our|the)\s+(?:family[- ]law\s+(?:firm|team)|criminal[- ]defen[cs]e\s+"
+    r"(?:firm|team|attorneys?)|plumbing\s+(?:company|team)|attorneys?|plumbers?|team)\b"
+    r"[^.;!?]{0,55}\b(?:has|have|uses?|using|adopted|works?|working|logs?|logging|needs?)\b"
+    r"[^.;!?]{0,65}\b(?:saas|software|platform|app|portal|system|suite|dashboard|crm|clio|"
+    r"servicetitan)\b|"
+    r"\b(?:saas|software|platform|app|portal|system|suite|dashboard|crm|clio|servicetitan)\b"
+    r"[^.;!?]{0,55}\b(?:stores?|tracks?|holds?|records?)\b[^.;!?]{0,35}\b(?:leads?|cases?)\b"
+    r")",
+    re.I,
+)
+MARKETED_SERVICE_AUDIENCE_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:marketing\s+agency|outsourced\s+bookkeeping|bookkeeping\s+service|consultancy|"
+    r"call[- ]answering\s+service|coaching\s+program|newsletter|directory|training\s+course|"
+    r"education\s+program|membership\s+community)\b[^.;!?]{0,80}"
+    r"\b(?:serves?|serving|supports?|supporting|for|to)\b[^.;!?]{0,50}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|clinics?|dentists?)\b|"
+    r"\b(?:sell|sells|selling|provide|provides|offering|offer)\b[^.;!?]{0,45}"
+    r"\b(?:outsourced\s+bookkeeping|bookkeeping|call[- ]answering\s+services?|coaching\s+programs?|"
+    r"training\s+courses?|newsletters?|directories|consulting|consultancy)\b[^.;!?]{0,55}"
+    r"\b(?:to|for)\b[^.;!?]{0,40}"
+    r"\b(?:law[- ]firms?|lawyers?|attorneys?|family[- ]law|criminal[- ]defen[cs]e|plumbers?|"
+    r"plumbing[- ]companies|clinics?|dentists?)\b"
     r")",
     re.I,
 )
@@ -379,6 +430,36 @@ def _contains_bounded_term(text: str, term: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", text.casefold()) is not None
 
 
+def _proof_term_is_explicitly_excluded(text: str, term: str) -> bool:
+    """Reject a vertical only when the job explicitly says not to use that proof.
+
+    A negative example must never outrank the actual client vertical merely
+    because both words appear in the job.  This is deliberately narrower than
+    general sentiment analysis: unfamiliar wording simply receives no special
+    treatment, while clear instructions such as "plumbing case studies are
+    irrelevant" or "do not use family-law proof" are binding.
+    """
+
+    normalized = text.casefold().replace("’", "'")
+    term_pattern = rf"(?<![a-z0-9]){re.escape(term.casefold())}(?![a-z0-9])"
+    for match in re.finditer(term_pattern, normalized):
+        left = re.split(r"[.;!?\n]", normalized[max(0, match.start() - 120) : match.start()])[-1]
+        right = re.split(r"[.;!?\n]", normalized[match.end() : match.end() + 120])[0]
+        clause = re.sub(r"\s+", " ", f"{left} <proof> {right}").strip()
+        if re.search(
+            r"\b(?:do\s+not|don't|never|avoid|exclude|omit|skip|ignore)\b"
+            r"[^.;!?]{0,55}(?:use|mention|include|cite|reference)?[^.;!?]{0,25}<proof>",
+            clause,
+        ) or re.search(
+            r"<proof>[^.;!?]{0,45}(?:case\s+stud(?:y|ies)|proof|example|vertical)?"
+            r"[^.;!?]{0,30}\b(?:is|are|seems?|remain)?\s*"
+            r"(?:irrelevant|unrelated|inapplicable|not\s+applicable|not\s+relevant)\b",
+            clause,
+        ):
+            return True
+    return False
+
+
 def _classify_scope_match(
     text: str,
     start: int,
@@ -422,22 +503,57 @@ def _classify_scope_match(
         sentence = sentence.replace(contraction, expanded)
         context = context.replace(contraction, expanded)
 
+    decisive_exclusion_patterns = (
+        r"\bnon[- ]+\s*<scope>\s+(?:approach|solution|tracking|implementation)\b",
+        r"\b(?:ask|require|need)\b[^.;!?]{0,45}\byou\s+not\s+(?:to\s+)?"
+        r"(?:configure|install|use|touch|manage|change)\b[^.;!?]{0,20}<scope>",
+        r"\b(?:please\s+)?refrain\s+from\s+(?:installing|configuring|using|touching|managing)"
+        r"[^.;!?]{0,20}<scope>",
+        r"\bwhatconverts\b[^.;!?]{0,60}\bin\s+place\s+of\b[^.;!?]{0,20}<scope>",
+        r"\babsolutely\s+no\s+<scope>|<scope>\s+(?:is\s+)?(?:disallowed|banned|prohibited)\b",
+        r"<scope>\s+is\s+not\s+in\s+scope\b|"
+        r"\b(?:freelancer|consultant|contractor)\b[^.;!?]{0,35}\bwill\s+not\s+"
+        r"(?:handle|manage|touch|use|configure)\b[^.;!?]{0,20}<scope>",
+        r"<scope>\s+must\s+not\s+be\s+(?:touched|handled|managed|configured|installed|used)\b",
+    )
+    if any(re.search(pattern, sentence) for pattern in decisive_exclusion_patterns):
+        return "excluded"
+
     # Resolve grammar that unambiguously binds the target before consulting the
     # broader patterns below.  This prevents an unrelated word such as
     # "optional" from changing "GTM setup is needed", and prevents a generic
     # "require" in "require WhatConverts, not GTM" from being attributed to GTM.
     direct_required_patterns = (
-        r"<scope>\s+(?:(?:setup|work|implementation|knowledge)\s+)?"
-        r"(?:(?:is|remains)\s+)?(?:needed|required|mandatory|necessary|compulsory|"
+        r"<scope>\s+(?:(?:setup|work|implementation|knowledge|expertise|proficiency|ownership|"
+        r"maintenance|deployment|support)\s+)?"
+        r"(?:(?:is|remains)\s+)?(?:needed|required|mandatory|necessary|essential|compulsory|"
         r"non[- ]negotiable|a\s+requirement|a\s+must[- ]have)\b",
         r"<scope>\s+implementation\s+must\s+be\s+completed\b",
-        r"<scope>.{0,45}\bmust\s+be\s+(?:maintained|completed|handled|owned)\b",
+        r"<scope>.{0,45}\b(?:must\s+be|has\s+to\s+be)\s+"
+        r"(?:maintained|completed|handled|owned|supported|deployed)\b",
         r"\b(?:we\s+)?expect\b.{0,30}<scope>\s+(?:implementation|setup|work)\b",
         r"\bplease\s+(?:handle|manage|implement|install|configure|maintain)\b.{0,25}<scope>",
         r"\byou(?:'ll|\s+will)\s+(?:own|handle|manage|maintain)\b.{0,25}<scope>",
         r"\b(?:not\s+looking\s+for|will\s+not\s+hire)\b.{0,60}"
         r"\b(?:someone|anyone|applicants?|candidates?)\b.{0,45}"
         r"\b(?:without|lacking)\b.{0,25}<scope>",
+        r"\b(?:do\s+not|don't|will\s+not)\b.{0,30}"
+        r"\b(?:want|need|hire|consider)\b.{0,45}"
+        r"\b(?:someone|anyone|applicants?|candidates?)\b.{0,35}"
+        r"\b(?:unfamiliar|inexperienced)\b.{0,20}\b(?:with|in)\b.{0,15}<scope>",
+        r"\b(?:will\s+not|won't)\s+hire\b.{0,45}<scope>\s+novice\b",
+        r"<scope>\s*[,()]\s*(?:is\s+)?(?:required|mandatory|essential)\b",
+        r"\b(?:do\s+not|don't|are\s+not|will\s+not)\b.{0,30}"
+        r"\b(?:consider|considering|want|hire)\b.{0,45}"
+        r"\b(?:applicants?|candidates?|anyone|someone)\b.{0,35}"
+        r"\b(?:new|unfamiliar|inexperienced)\b.{0,20}\b(?:to|with|in)\b.{0,15}<scope>",
+        r"\b(?:applicants?|candidates?)\b[^.;!?]{0,35}\bnew\s+to\b[^.;!?]{0,15}"
+        r"<scope>[^.;!?]{0,35}\bshould\s+not\s+apply\b",
+        r"<scope>\s+novices?\b[^.;!?]{0,30}\bneed\s+not\s+apply\b",
+        r"\bonly\s+<scope>\s*[- ]\s*qualified\b[^.;!?]{0,45}"
+        r"\b(?:applicants?|candidates?)\b[^.;!?]{0,25}\bwill\s+be\s+considered\b",
+        r"\b(?:applicants?|candidates?)\b[^.;!?]{0,30}\bmust\s+possess\b"
+        r"[^.;!?]{0,20}<scope>\s+(?:expertise|knowledge|proficiency|experience)\b",
         r"<scope>[^.;!?]{0,75}\b(?:optional|not\s+needed)\b[^.;!?]{0,55}"
         r"[,;]\s*(?:(?:it|this)\s+(?:is\s+)?)?(?:required|mandatory)\b",
         r"<scope>[^.;!?]{0,70}\b(?:initially|currently|for\s+now)\b[^.;!?]{0,45}"
@@ -453,6 +569,9 @@ def _classify_scope_match(
         r"\b(?:please\s+)?(?:implement|install|configure|add|set\s+up)\s+(?:it|this)\b",
         r"<scope>[^.!?]{0,100}[;,:]?[^.!?]{0,45}"
         r"\bimplementation\s+(?:is|will\s+be)\s+(?:required|mandatory|needed)\b",
+        r"<scope>[^.!?]{0,80}\b(?:audit|review|reporting)\b[^.!?]{0,45}[;,:]"
+        r"[^.!?]{0,65}\b(?:implementation|deployment|setup)\s+(?:phase\s+)?"
+        r"(?:requires?|needs?)\s+(?:it|this)\b",
     )
     if any(re.search(pattern, sentence) for pattern in direct_required_patterns):
         return "required"
@@ -477,6 +596,18 @@ def _classify_scope_match(
         r"\b(?:require|requires)\s+(?:no|zero)\s+<scope>\s+changes?\b",
         r"\b(?:part[- ]time|consultant|freelancer|contractor|\d+(?:\.\d+)?\s+hours?)\b"
         r"[^.;!?]{0,55}\bnot\s+(?:a\s+)?<scope>(?:\s+employee\b)?",
+        r"\b(?:require|requires|need|needs)\b[^.;!?]{0,65}"
+        r"\b(?:zero|no)\s+<scope>\s+(?:involvement|work|changes?)\b",
+        r"\b(?:tracking|solution|approach|engagement|project)\b[^.;!?]{0,55}"
+        r"\b(?:excludes?|free\s+from|without|non[- ])\s*<scope>",
+        r"\bnon[- ]<scope>\s+(?:approach|solution|tracking|implementation)\b|"
+        r"\b(?:need|needs|require|requires)\s+no\s+(?:involvement|work|changes?)\s+"
+        r"(?:with|from|in)\s+<scope>",
+        r"\b(?:ask|require|need)\b[^.;!?]{0,45}\byou\s+not\s+(?:to\s+)?"
+        r"(?:configure|install|use|touch|manage|change)\b[^.;!?]{0,20}<scope>",
+        r"\b(?:contractor|freelance|fractional|part[- ]time|ten\s+hours?|"
+        r"\d+(?:\.\d+)?\s+hours?)\b[^.;!?]{0,55}"
+        r"\b(?:rather\s+than|instead\s+of|never|not)\b[^.;!?]{0,25}<scope>",
     )
     if any(re.search(pattern, sentence) for pattern in direct_excluded_patterns):
         return "excluded"
@@ -557,7 +688,7 @@ def _classify_scope_match(
         return "excluded"
 
     optional_patterns = (
-        r"<scope>.{0,70}\b(?:not\s+(?:required|needed|necessary|expected|mandatory|essential|"
+        r"<scope>[^,;:!?]{0,70}\b(?:not\s+(?:required|needed|necessary|expected|mandatory|essential|"
         r"a\s+(?:requirement|prerequisite))|unnecessary|"
         r"optional|excluded|explicitly\s+excluded|specifically\s+excluded|out\s+of\s+scope|"
         r"outside\s+(?:the\s+)?scope)\b",
@@ -742,19 +873,24 @@ def _has_non_client_service_business_model(job: Mapping[str, Any]) -> bool:
     description = str(job.get("description") or "")
     description_has_product = PRODUCT_MODEL_PATTERN.search(description) is not None
     for sentence in re.split(r"[.;!?\n]+", description):
-        internal = INTERNAL_BUSINESS_TOOL_PATTERN.search(sentence) is not None
-        commercial = EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN.search(sentence) is not None
+        if MARKETED_SERVICE_AUDIENCE_PATTERN.search(sentence):
+            return True
+        internal = bool(
+            INTERNAL_BUSINESS_TOOL_PATTERN.search(sentence)
+            or SERVICE_INTERNAL_PRODUCT_PATTERN.search(sentence)
+        )
+        commercial = bool(
+            EXTERNAL_PRODUCT_COMMERCIALIZATION_PATTERN.search(sentence)
+            or (
+                description_has_product
+                and EXTERNAL_COMMERCIAL_RELATION_PATTERN.search(sentence)
+            )
+        )
         if commercial and description_has_product:
             return True
         if internal:
             continue
-        if (
-            MARKETED_PRODUCT_AUDIENCE_PATTERN.search(sentence)
-            or (
-                PRODUCT_MODEL_PATTERN.search(sentence)
-                and EXTERNAL_PRODUCT_AUDIENCE_PATTERN.search(sentence)
-            )
-        ):
+        if MARKETED_PRODUCT_AUDIENCE_PATTERN.search(sentence):
             return True
         if NON_CLIENT_DESCRIPTION_MODEL_PATTERN.search(sentence):
             return True
@@ -775,7 +911,12 @@ def select_case_studies(job: Mapping[str, Any], limit: int = 2) -> list[dict[str
         service_terms = _proof_terms(study.services, SERVICE_TERMS)
         blocked_terms = _proof_terms(study.blocked_job_tags, TAG_TERMS)
         tag_hits = {
-            tag: [term for term in TAG_TERMS[tag] if _contains_bounded_term(text, term)]
+            tag: [
+                term
+                for term in TAG_TERMS[tag]
+                if _contains_bounded_term(text, term)
+                and not _proof_term_is_explicitly_excluded(text, term)
+            ]
             for tag in routing_tags
         }
         tag_hits = {tag: terms for tag, terms in tag_hits.items() if terms}
@@ -881,6 +1022,52 @@ def _recommend_price(job: Mapping[str, Any], context: PricingContext, service_fi
     assumptions: list[str] = []
 
     if "hour" in job_type or rate_min is not None or rate_max is not None:
+        if rate_min is not None and rate_max is not None and rate_min > rate_max:
+            assumptions.append(
+                "The observed client hourly minimum exceeded its maximum, so owner review is required"
+            )
+            return {
+                "type": "hourly",
+                "recommended_bid": context.profile_hourly_rate,
+                "defensible_range": [
+                    context.minimum_hourly_rate,
+                    context.founder_advisory_benchmark,
+                ],
+                "profile_rate": context.profile_hourly_rate,
+                "minimum_hourly_rate": context.minimum_hourly_rate,
+                "founder_advisory_benchmark": context.founder_advisory_benchmark,
+                "pricing_source_version": context.source_version,
+                "client_range": [rate_min, rate_max],
+                "position": "invalid_client_range",
+                "requires_owner_approval": True,
+                "below_floor_exception": False,
+                "live_fee_preview_required": True,
+                "expected_net": None,
+                "assumptions": assumptions,
+            }
+        if rate_min is not None and rate_max is None:
+            assumptions.append(
+                "Only the client hourly minimum was observed, so the upper bound must be reviewed"
+            )
+            recommended = max(context.profile_hourly_rate, rate_min)
+            return {
+                "type": "hourly",
+                "recommended_bid": recommended,
+                "defensible_range": sorted(
+                    (recommended, max(recommended, context.founder_advisory_benchmark))
+                ),
+                "profile_rate": context.profile_hourly_rate,
+                "minimum_hourly_rate": context.minimum_hourly_rate,
+                "founder_advisory_benchmark": context.founder_advisory_benchmark,
+                "pricing_source_version": context.source_version,
+                "client_range": [rate_min, None],
+                "position": "partial_client_range",
+                "requires_owner_approval": True,
+                "below_floor_exception": False,
+                "live_fee_preview_required": True,
+                "expected_net": None,
+                "assumptions": assumptions,
+            }
         if rate_max is None:
             recommended = context.profile_hourly_rate
             position = "profile_rate"
@@ -905,10 +1092,6 @@ def _recommend_price(job: Mapping[str, Any], context: PricingContext, service_fi
             recommended,
             min(rate_max or context.profile_hourly_rate, context.founder_advisory_benchmark),
         )
-        if rate_min is not None and rate_max is not None and rate_min > rate_max:
-            assumptions.append(
-                "The observed client hourly minimum exceeded its maximum, so the defensible range was normalized"
-            )
         defensible_range = sorted((defensible_low, defensible_high))
         return {
             "type": "hourly",
@@ -1040,7 +1223,27 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         "direct client ownership",
     )
     employee_states = _term_scope_states(text, employee_terms)
-    employee_style = "required" in employee_states
+    hours_per_week = str(job.get("hours_per_week") or "").casefold()
+    structured_high_hours = bool(
+        re.search(
+            r"\b(?:more\s+than\s+30|3[1-9]|[4-9]\d)\s*(?:\+\s*)?(?:hrs?|hours?)\b",
+            hours_per_week,
+        )
+    )
+    described_high_hours = bool(
+        re.search(
+            r"\b(?:more\s+than\s+30|3[1-9]|[4-9]\d)\s*(?:\+\s*)?(?:hrs?|hours?)"
+            r"(?:\s*/\s*(?:week|wk))?\b",
+            text,
+        )
+    )
+    contract_to_hire = job.get("contract_to_hire") is True
+    employee_style = bool(
+        "required" in employee_states
+        or structured_high_hours
+        or described_high_hours
+        or contract_to_hire
+    )
     if employee_style:
         blockers.append("The role is employee-style or requires 35+ hours rather than consultancy support")
     elif "ambiguous" in employee_states:
@@ -1135,6 +1338,18 @@ def analyze_job(job: Mapping[str, Any], pricing: PricingContext | None = None) -
         components.append(ScoreComponent("price_fit", -3, "The posted price needs a consultative conversion"))
     elif price["position"] in {"above_client_range", "above_client_budget"}:
         components.append(ScoreComponent("price_fit", -12, "The client range is below the configured minimum"))
+    elif price["position"] in {"invalid_client_range", "partial_client_range"}:
+        components.append(
+            ScoreComponent(
+                "price_evidence_invalid",
+                -12,
+                "The observed client hourly range is incomplete or internally inconsistent",
+            )
+        )
+        boundaries.append(
+            "Manual scope review required: the observed client hourly range is incomplete or internally inconsistent"
+        )
+        requires_scope_review = True
 
     score = max(0, min(100, sum(component.points for component in components)))
     client_quality = sum(
