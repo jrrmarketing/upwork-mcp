@@ -236,6 +236,8 @@ async def test_sync_chrome_wait_does_not_nest_running_event_loop(monkeypatch, tm
 
     assert client.start_chrome_with_debug() is True
     assert sleeps == [0.5]
+    assert "--enable-automation" in command
+    assert "--disable-blink-features=AutomationControlled" in command
     assert "--window-size=1,1" in command
 
 

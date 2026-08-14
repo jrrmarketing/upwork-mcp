@@ -158,6 +158,11 @@ def _start_chrome_with_debug_locked() -> bool:
             f"--user-data-dir={PROFILE_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
+            # Chrome 151 rejects Playwright's default-context download setup
+            # unless the browser exposes its automation protocol surface.
+            # Keep navigator.webdriver false while enabling that surface.
+            "--enable-automation",
+            "--disable-blink-features=AutomationControlled",
             "--window-size=1,1",
             "--window-position=9999,9999",
         ],
