@@ -121,6 +121,7 @@ def test_non_law_firm_business_models_never_receive_exact_law_firm_proof(title: 
         "Paid search for a lawyer recruitment marketplace serving law firms.",
         "Paid search for a criminal defense software platform.",
         "Legal SaaS for law firms whose customers use Clio software internally.",
+        "We sell a subscription product that helps criminal defense lawyers manage cases.",
     ],
 )
 def test_business_model_mismatch_in_description_cannot_supply_exact_law_proof(
@@ -158,6 +159,16 @@ def test_business_model_mismatch_in_description_cannot_supply_exact_law_proof(
         (
             "Google Ads for a plumbing company",
             "Local plumbing leads. Our team uses ServiceTitan software internally.",
+            "priority-one-plumbing",
+        ),
+        (
+            "Google Ads for a family law firm",
+            "The firm relies on practice-management software for internal case work.",
+            "cage-and-miles-family-law",
+        ),
+        (
+            "Google Ads for a plumbing company",
+            "Our internal booking flow connects to proprietary dispatch software.",
             "priority-one-plumbing",
         ),
     ],
@@ -335,6 +346,11 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "This isn't a full-time role.",
         "Full-time support is unnecessary.",
         "We aren't hiring full-time.",
+        "We do not need you to use GTM.",
+        "GTM cannot be used.",
+        "You do not have to use GTM.",
+        "We don't need someone full-time.",
+        "Full-time hours are not expected.",
         "This will not be a full-time position.",
         "Part-time rather than full-time support.",
         "We don't need a full-time person; this is five hours a week.",
@@ -362,6 +378,14 @@ def test_explicit_scope_exclusions_do_not_trigger_hard_skips():
         "We won't hire anyone without Google Tag Manager experience.",
         "Without GTM experience, you cannot apply.",
         "You cannot apply without GTM experience.",
+        "If you can't use GTM, don't apply.",
+        "Applicants who cannot use GTM should not apply.",
+        "No one without GTM experience should apply.",
+        "Applicants without GTM knowledge are ineligible.",
+        "We cannot run these ads without GTM.",
+        "GTM is not optional.",
+        "GTM cannot be omitted.",
+        "GTM is not only required but central to the brief.",
     ],
 )
 def test_negative_eligibility_language_still_proves_gtm_is_required(description: str):

@@ -117,12 +117,15 @@ ADJACENT_PROOF_TAGS = frozenset(
 NON_CLIENT_SERVICE_MODEL_PATTERN = re.compile(
     r"\b(?:saas|software|marketplace|mobile app|school|university|college|"
     r"recruit(?:er|ing|ment)?|staffing|law enforcement|police|"
-    r"legal tech|law tech|practice management (?:platform|system|tool))\b",
+    r"legal tech|law tech|subscription (?:product|service|business)|"
+    r"practice management (?:platform|system|tool))\b",
     re.I,
 )
 INTERNAL_TOOL_CONTEXT_PATTERN = re.compile(
     r"\b(?:use|uses|using|utilise|utilises|utilising|utilize|utilizes|utilizing|"
-    r"run|runs|running)\b[^.;!?]{0,80}\b(?:software|platform|marketplace|"
+    r"run|runs|running|rely|relies|relying|connect|connects|connected|connecting|"
+    r"integrate|integrates|integrated|integrating)\b[^.;!?]{0,80}\b"
+    r"(?:software|platform|marketplace|"
     r"practice management (?:platform|system|tool))\b|"
     r"\b(?:software|platform|marketplace)\b[^.;!?]{0,50}\b(?:internally|in-house|"
     r"for (?:our|their) (?:operations|team|firm|company))\b",
@@ -271,126 +274,62 @@ def _contains_bounded_term(text: str, term: str) -> bool:
 
 
 def _match_is_negated(text: str, start: int, end: int) -> bool:
-    """Recognize explicit same-clause exclusions around a scope phrase."""
+    """Classify the same contrast-bounded clause around one scope phrase."""
 
-    # Curly and straight apostrophes have the same code-point width, so this
-    # normalization preserves the match offsets supplied by ``re.finditer``.
-    text = text.replace("’", "'")
-    clause_boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
-    prefix = re.split(clause_boundary, text[max(0, start - 120) : start], flags=re.I)[-1]
-    suffix = re.split(clause_boundary, text[end : end + 120], flags=re.I)[0]
-    excluded_actions = (
-        r"(?:using|requiring|needing|including|implementing|managing|running|supporting|"
-        r"hiring|seeking|employing)"
-    )
-    excluded_verbs = r"(?:use|require|need|include|implement|manage|run|support|hire|seek|employ)"
-    negated_prefix = re.search(
-        r"(?:"
-        rf"\b(?:no\s+(?:need|requirement)\s+(?:for|to\s+{excluded_verbs})|"
-        rf"no\s+plans?\s+to\s+{excluded_verbs}|no\s+intention\s+of\s+{excluded_actions}|"
-        r"not\s+looking\s+for|without|rather\s+than|except(?:\s+for)?|"
-        r"avoid(?:ing)?|exclud(?:e|ing)|omit(?:ting)?)"
-        r"|\b(?:no|not)(?:\s+(?:a|an|the))?"
-        r"|\b(?:is|are|was|were)\s+not(?:\s+(?:a|an|the))?"
-        r"|\b(?:isn't|aren't|wasn't|weren't)(?:\s+(?:a|an|the))?"
-        rf"|\b(?:am|is|are|was|were)\s+not\s+{excluded_actions}(?:\s+(?:a|an|the))?"
-        rf"|\b(?:isn't|aren't|wasn't|weren't)\s+{excluded_actions}(?:\s+(?:a|an|the))?"
-        rf"|\b(?:am|is|are|was|were)\s+not\s+(?:planning|going|intending)\s+to\s+{excluded_verbs}"
-        rf"|\b(?:isn't|aren't|wasn't|weren't)\s+(?:planning|going|intending)\s+to\s+{excluded_verbs}"
-        rf"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't)\s+"
-        rf"(?:plan|intend|expect)\s+to\s+{excluded_verbs}"
-        rf"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't)\s+"
-        rf"want\s+to\s+{excluded_verbs}"
-        rf"|\b(?:will|would|should)\s+not\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
-        rf"|\b(?:won't|wouldn't|shouldn't)\s+be(?:\s+{excluded_actions})?(?:\s+(?:a|an|the))?"
-        rf"|\bnot\s+{excluded_actions}(?:\s+(?:a|an|the))?"
-        r"|\b(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't|"
-        r"will\s+not|won't|would\s+not|wouldn't|should\s+not|shouldn't|"
-        r"must\s+not|mustn't|"
-        r"cannot|can't)\s+(?:want|need|require|use|include|implement|manage|run|support)"
-        r"(?:\s+(?:a|an|the))?"
-        r")$",
-        prefix.strip(),
-        re.I,
-    )
-    if negated_prefix:
-        return True
-    return bool(
-        re.match(
-            r"^\s*,?\s*(?:which\s+)?"
-            r"(?:(?:support|role|position|work|implementation|integration|use|usage|"
-            r"management|service)\s+){0,2}(?:"
-            r"(?:not|(?:is|are|was|were)\s+"
-            r"(?:(?:specifically|definitely|explicitly|currently|absolutely)\s+)?not|"
-            r"isn't|aren't|wasn't|weren't|will\s+not\s+be|won't\s+be|"
-            r"would\s+not\s+be|wouldn't\s+be|should\s+not\s+be|shouldn't\s+be|"
-            r"must\s+not\s+be|mustn't\s+be)\s+"
-            r"(?:required|needed|necessary|included|used|managed|implemented|part of|in scope|"
-            r"a requirement)"
-            r"|(?:is|are|was|were)\s+"
-            r"(?:(?:specifically|definitely|explicitly|currently|absolutely)\s+)?"
-            r"(?:unnecessary|optional|excluded|prohibited|forbidden|out(?:side| of) (?:the )?scope)"
-            r"|(?:can|could|should)\s+be\s+(?:ignored|excluded|omitted|avoided)"
-            r"|(?:excluded|omitted|prohibited|forbidden|out(?:side| of) (?:the )?scope)"
-            r")\b",
-            suffix,
-            re.I,
-        )
-    )
-
-
-def _match_is_required_despite_negation(text: str, start: int, end: int) -> bool:
-    """Recognize negative eligibility wording that makes the scope mandatory."""
-
-    text = text.replace("’", "'")
+    normalized = text.replace("’", "'")
     boundary = r"[.;!?\n]|\b(?:but|however|although|though|yet)\b"
-    prefix = re.split(boundary, text[max(0, start - 180) : start], flags=re.I)[-1].strip()
-    suffix = re.split(boundary, text[end : end + 140], flags=re.I)[0].strip()
-    if re.search(
-        r"\bdo\s+not\s+apply\s+if\b.{0,80}\b(?:cannot|can't|unable\s+to)\s+"
-        r"(?:use|implement|manage|work\s+with)\s*$",
-        prefix,
-        re.I,
-    ):
-        return True
-    if re.search(
-        r"\b(?:will\s+not|won't)\s+hire\b.{0,80}\bwithout\s*$",
-        prefix,
-        re.I,
-    ):
-        return True
-    if re.search(
-        r"\b(?:cannot|can't|not\s+eligible\s+to|ineligible\s+to)\b.{0,60}\b"
-        r"(?:apply|qualify|be\s+(?:considered|accepted|eligible))\b.{0,60}\bwithout\s*$",
-        prefix,
-        re.I,
-    ):
-        return True
-    if re.search(r"\bwithout\s*$", prefix, re.I) and re.match(
-        r"^(?:experience|skills?|knowledge)?\b.{0,60}\b"
-        r"(?:cannot|can't|will\s+not|won't)\b.{0,40}\b"
-        r"(?:apply|be\s+(?:considered|accepted|eligible)|qualify)\b",
-        suffix,
-        re.I,
-    ):
-        return True
-    return bool(
-        re.search(r"\b(?:candidates?|applicants?)\s+without\s*$", prefix, re.I)
-        and re.match(
-            r"^(?:experience|skills?|knowledge)?\b.{0,60}\b"
-            r"(?:will\s+not|won't)\s+be\s+(?:considered|accepted|eligible)\b",
-            suffix,
-            re.I,
-        )
+    prefix = re.split(boundary, normalized[max(0, start - 220) : start], flags=re.I)[-1]
+    suffix = re.split(boundary, normalized[end : end + 180], flags=re.I)[0]
+    clause = re.sub(r"\s+", " ", f"{prefix} <scope> {suffix}").strip().casefold()
+
+    eligibility_actor = re.search(
+        r"\b(?:applicants?|candidates?|apply|application|hire|hiring|eligible|"
+        r"ineligible|considered|accepted|qualif(?:y|ied))\b",
+        clause,
     )
+    missing_scope = re.search(
+        r"\b(?:without|cannot|can't|unable|lack(?:ing|s)?|no one)\b",
+        clause,
+    )
+    negative_outcome = re.search(
+        r"\b(?:do not|don't|should not|shouldn't|will not|won't|cannot|can't|"
+        r"ineligible|not eligible|not considered|not accepted|no one)\b",
+        clause,
+    )
+    no_one_excludes_scope = re.search(
+        r"\bno one\b.{0,50}\b(?:needs?|requires?|has to use)\b.{0,40}<scope>",
+        clause,
+    )
+    if eligibility_actor and missing_scope and negative_outcome and not no_one_excludes_scope:
+        return False
+
+    required_despite_negative = (
+        r"(?:\b(?:cannot|can't)\b.{0,90}\bwithout\s+<scope>|"
+        r"<scope>.{0,50}\bnot\s+(?:optional|unnecessary|excluded|prohibited)\b|"
+        r"<scope>.{0,50}\bnot\s+(?:only|just)\b|"
+        r"\b(?:must|should)\s+not\s+(?:omit|skip|avoid|exclude)\b.{0,70}<scope>|"
+        r"<scope>.{0,70}\b(?:must|should)\s+not\s+be\s+"
+        r"(?:omitted|skipped|avoided|excluded)|"
+        r"<scope>.{0,70}\b(?:cannot|can't)\s+be\s+(?:omitted|skipped|avoided|excluded)|"
+        r"\b(?:cannot|can't)\s+(?:avoid|omit|skip)\b.{0,60}<scope>|"
+        r"\bnot\s+(?:only|just)\b.{0,60}<scope>)"
+    )
+    if re.search(required_despite_negative, clause):
+        return False
+
+    # After eligibility and double-negative requirements are resolved, any
+    # explicit negative marker in the same clause makes the scope an exclusion.
+    exclusion_marker = re.compile(
+        r"\b(?:no|not|never|without|cannot|can't|isn't|aren't|wasn't|weren't|"
+        r"won't|wouldn't|shouldn't|mustn't|don't|doesn't|didn't|unnecessary|"
+        r"optional|excluded|omitted|prohibited|forbidden|avoid(?:ed|ing)?|"
+        r"outside|rather than|except)\b"
+    )
+    return bool(exclusion_marker.search(clause))
 
 
 def _has_unnegated_pattern(text: str, pattern: str) -> bool:
-    return any(
-        _match_is_required_despite_negation(text, match.start(), match.end())
-        or not _match_is_negated(text, match.start(), match.end())
-        for match in re.finditer(pattern, text, re.I)
-    )
+    return any(not _match_is_negated(text, match.start(), match.end()) for match in re.finditer(pattern, text, re.I))
 
 
 def _contains_unnegated_terms(text: str, terms: Iterable[str]) -> bool:
